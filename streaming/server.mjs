@@ -79,7 +79,7 @@ function normalizeRecord(caller, record) {
     internal_notes: '',
     history: [],
     updated_at: Date.now(),
-    turn_count: 0,
+    turnCount: 0,
     stage: 'greet',
     last_question_id: ''
   };
@@ -142,17 +142,20 @@ const QUESTION_SETS = {
     {
       id: 'name_callback',
       label: 'Name + Callback Number',
-      ask: 'I’m Ava, the assistant for Attorney Harper. He’s unavailable; I’ll take a message. What is your full name and the best callback number?'
+      ask: 'I’m Ava, the assistant for the attorney. He’s unavailable; I’ll take details for him. What is your full name and best callback number?',
+      fills: ['name', 'callback_number']
     },
     {
       id: 'best_time_location',
       label: 'Best Time + Location',
-      ask: 'What is the best time to reach you, and what state are you in?'
+      ask: 'What is the best time to reach you, and what state are you in?',
+      fills: ['best_time', 'location_state']
     },
     {
-      id: 'category_description',
-      label: 'Category + Brief Description',
-      ask: 'Which type of matter is this—family, injury, criminal, or business—and what happened in a sentence or two?'
+      id: 'category_brief_urgency',
+      label: 'Category + Brief Description + Urgency',
+      ask: 'Which type of matter is this—family, injury, criminal, or business—and what happened, plus any urgent deadlines?',
+      fills: ['category', 'brief_description', 'urgency_deadline']
     }
   ],
   family: [
@@ -237,7 +240,7 @@ function buildSummary(record) {
   const parts = [];
   if (record.name) parts.push(`Caller ${record.name}`);
   if (record.category) parts.push(`Category: ${record.category}`);
-  const desc = record.answers.category_description || record.answers.other_context || '';
+  const desc = record.answers.category_brief_urgency || record.answers.other_context || '';
   if (desc) parts.push(`Summary: ${desc}`);
   if (record.answers.urgency_deadline) parts.push(`Urgency: ${record.answers.urgency_deadline}`);
   if (record.callback) parts.push(`Callback: ${record.callback}`);
@@ -307,33 +310,41 @@ function getQuestionList(category, { limitFollowups = true } = {}) {
 }
 
 function getNextQuestion(record) {
-  const questions = getQuestionList(record.category || 'other');
+  const remaining = Math.max(0, MAX_TURNS - 1 - (record.turnCount || 0));
+  const questions = getQuestionList(record.category || 'other', {
+    limitFollowups: remaining <= 2
+  }).slice(0, remaining);
   for (const q of questions) {
     if (!record.answers[q.id]) return q;
   }
   return null;
 }
 
+const QUESTION_MAP = Object.values(QUESTION_SETS)
+  .flat()
+  .reduce((acc, q) => {
+    acc[q.id] = q;
+    return acc;
+  }, {});
+
 function recordAnswer(record, questionId, text) {
   if (!questionId) return record;
   record.answers[questionId] = text;
 
-  if (questionId === 'name_callback') {
+  const q = QUESTION_MAP[questionId];
+  if (q?.fills?.includes('name')) {
     const name = extractName(text);
-    const phone = extractPhone(text);
     if (name) record.name = name;
+  }
+  if (q?.fills?.includes('callback_number')) {
+    const phone = extractPhone(text);
     if (phone) record.callback = phone;
   }
-
-  if (questionId === 'best_time_location') {
-    record.best_time = text;
-    record.answers.location_state = text;
-  }
-
-  if (questionId === 'category_description') {
-    record.category = detectCategory(text, record.category);
-    record.answers.category_description = text;
-  }
+  if (q?.fills?.includes('best_time')) record.best_time = text;
+  if (q?.fills?.includes('location_state')) record.answers.location_state = text;
+  if (q?.fills?.includes('category')) record.category = detectCategory(text, record.category);
+  if (q?.fills?.includes('brief_description')) record.answers.brief_description = text;
+  if (q?.fills?.includes('urgency_deadline')) record.answers.urgency_deadline = text;
 
   return record;
 }
@@ -655,10 +666,10 @@ app.post('/twiml', async (req, reply) => {
       record = recordAnswer(record, record.last_question_id, speech);
     }
 
-    if (record.turn_count >= MAX_TURNS - 1) {
+    if ((record.turnCount || 0) >= MAX_TURNS - 1) {
       record.summary = await maybeSummarizeWithAI(record);
       record.stage = 'done';
-      record.turn_count += 1;
+      record.turnCount = (record.turnCount || 0) + 1;
       record.updated_at = Date.now();
       await upsertCaller(record);
       const closing = formatSummaryScript(record);
@@ -684,7 +695,7 @@ app.post('/twiml', async (req, reply) => {
     }
 
     record.last_question_id = nextQuestion.id;
-    record.turn_count += 1;
+    record.turnCount = (record.turnCount || 0) + 1;
     record.stage = 'collect';
     record.updated_at = Date.now();
     await upsertCaller(record);

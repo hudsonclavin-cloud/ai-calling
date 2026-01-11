@@ -1,0 +1,53 @@
+{
+  "callers": {
+    "unknown": {
+      "caller": "unknown",
+      "name": "",
+      "callback": "",
+      "best_time": "",
+      "category": "other",
+      "answers": {},
+      "summary": "The individual provided minimal information during the intake, with no specific details regarding their name, callback preferences, or category of concern, and did not answer any questions.",
+      "status": "new",
+      "internal_notes": "",
+      "history": [
+        {
+          "role": "assistant",
+          "text": "I’m Ava, the assistant for the attorney. He’s unavailable; I’ll take details for him. What is your full name and best callback number?",
+          "ts": 1768174196405
+        }
+      ],
+      "updated_at": 1768174198302,
+      "turnCount": 1,
+      "stage": "collect",
+      "last_question_id": "name_callback"
+    },
+    "+17045910644": {
+      "caller": "+17045910644",
+      "name": "",
+      "callback": "",
+      "best_time": "",
+      "category": "other",
+      "answers": {},
+      "summary": "The intake provides minimal information, lacking essential details such as the individual's name, callback preference, best time for contact, and specific answers to questions. The category is labeled as \"other,\" indicating that the matter may not fit traditional legal classifications. Further information is needed to proceed effectively.",
+      "status": "new",
+      "internal_notes": "",
+      "history": [
+        {
+          "role": "caller",
+          "text": "Hi, my name is John Smith. My number is 704-555-1212.",
+          "ts": 1768174516085
+        },
+        {
+          "role": "assistant",
+          "text": "I’m Ava, the assistant for the attorney. He’s unavailable; I’ll take details for him. What is your full name and best callback number?",
+          "ts": 1768174516085
+        }
+      ],
+      "updated_at": 1768174518028,
+      "turnCount": 1,
+      "stage": "collect",
+      "last_question_id": "name_callback"
+    }
+  }
+}
