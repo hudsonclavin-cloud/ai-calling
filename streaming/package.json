@@ -4,7 +4,10 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "dev": "node server.mjs"
+    "dev": "node server.mjs",
+    "start:clean": "node scripts/kill-port.mjs && node server.mjs",
+    "start": "node server.mjs",
+    "doctor": "node scripts/doctor.mjs"
   },
   "dependencies": {
     "@fastify/formbody": "^8.0.2",

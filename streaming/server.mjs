@@ -7,39 +7,50 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const fetch = globalThis.fetch;
+if (!fetch) throw new Error('Node 18+ is required (global fetch).');
 
-if (!fetch) {
-  throw new Error('This project requires Node 18+ (global fetch).');
-}
-
-/* =========================
-   CONFIG
-========================= */
 const PORT = Number(process.env.PORT || 5050);
-const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://127.0.0.1:${PORT}`;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || '';
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || '';
+const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID || 'eleven_multilingual_v2';
+const TTS_TIMEOUT_MS = Number(process.env.TTS_TIMEOUT_MS || 2500);
+const MAX_TTS_CHARS = Number(process.env.MAX_TTS_CHARS || 220);
 
-if (!PUBLIC_BASE_URL) throw new Error('❌ PUBLIC_BASE_URL missing');
-if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) {
-  throw new Error('❌ ELEVENLABS_API_KEY or ELEVENLABS_VOICE_ID missing');
-}
+const MAX_QUESTIONS = 8;
+const MAX_REPROMPTS = 2;
+const REQUIRED_FIELDS = ['full_name', 'callback_number', 'practice_area', 'case_summary'];
+const CLOSING_TEXT = "Thanks — I’ve got what I need. The attorney will review this and call you back.";
 
-const SERVER_PATH = fileURLToPath(import.meta.url);
+const QUESTION_BANK = {
+  full_name: 'To start, what is your full name?',
+  callback_number: 'What is the best callback number for the attorney?',
+  practice_area: 'What type of legal matter is this about?',
+  case_summary: 'Please briefly describe what happened and what help you need.',
+  final_clarify: 'Before I wrap up, is there one key detail you want the attorney to know?',
+};
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const DATA_DIR = path.join(__dirname, 'data');
+const FIRMS_FILE = path.join(DATA_DIR, 'firms.json');
+const CALLS_FILE = path.join(DATA_DIR, 'calls.json');
+const LEADS_FILE = path.join(DATA_DIR, 'leads.json');
+const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
+const AUDIO_DIR = path.join(DATA_DIR, 'tts_audio');
 
 const app = Fastify({ logger: true });
 await app.register(formbody);
 
-/* =========================
-   FILE STORAGE (NO NATIVE DEPS)
-========================= */
-const DATA_DIR = path.resolve('data');
-const DB_FILE = path.join(DATA_DIR, 'db.json');
-const TTS_CACHE_FILE = path.join(DATA_DIR, 'tts_cache.json');
+function nowIso() {
+  return new Date().toISOString();
+}
 
-await fs.mkdir(DATA_DIR, { recursive: true });
+function sha1(value) {
+  return crypto.createHash('sha1').update(String(value)).digest('hex');
+}
 
 async function readJson(filePath, fallback) {
   try {
@@ -51,157 +62,321 @@ async function readJson(filePath, fallback) {
 }
 
 async function writeJsonAtomic(filePath, data) {
-  const tmpPath = `${filePath}.${crypto.randomUUID()}.tmp`;
-  await fs.writeFile(tmpPath, JSON.stringify(data, null, 2), 'utf8');
-  await fs.rename(tmpPath, filePath);
+  const tmp = `${filePath}.${crypto.randomUUID()}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(data, null, 2), 'utf8');
+  await fs.rename(tmp, filePath);
 }
 
-async function loadAll() {
-  const data = await readJson(DB_FILE, { callers: {} });
-  if (!data.callers) data.callers = {};
-  return data;
-}
-
-async function saveAll(db) {
-  await writeJsonAtomic(DB_FILE, db);
-}
-
-function normalizeRecord(caller, record) {
-  const base = {
-    caller,
-    name: '',
-    callback: '',
-    best_time: '',
-    category: 'other',
-    answers: {},
-    summary: '',
-    status: 'new',
-    internal_notes: '',
-    history: [],
-    updated_at: Date.now(),
-    turnCount: 0,
-    stage: 'greet',
-    last_question_id: ''
-  };
-
-  const out = { ...base, ...(record || {}) };
-  if (!out.answers) out.answers = {};
-  if (!Array.isArray(out.history)) out.history = [];
-  if (!out.status) out.status = 'new';
-  if (!out.category) out.category = 'other';
-  return out;
-}
-
-async function getCaller(caller) {
-  const db = await loadAll();
-  const found = db.callers[caller];
-  return found ? normalizeRecord(caller, found) : null;
-}
-
-async function getOrCreateCaller(caller) {
-  const db = await loadAll();
-  const record = normalizeRecord(caller, db.callers[caller]);
-  db.callers[caller] = record;
-  await saveAll(db);
-  return record;
-}
-
-async function upsertCaller(record) {
-  const db = await loadAll();
-  db.callers[record.caller] = normalizeRecord(record.caller, record);
-  await saveAll(db);
-  return db.callers[record.caller];
-}
-
-async function updateCaller(caller, patch) {
-  const db = await loadAll();
-  const current = normalizeRecord(caller, db.callers[caller]);
-  const next = { ...current, ...patch, caller };
-  db.callers[caller] = normalizeRecord(caller, next);
-  await saveAll(db);
-  return db.callers[caller];
-}
-
-async function loadTtsCache() {
-  return readJson(TTS_CACHE_FILE, {});
-}
-
-async function saveTtsCache(cache) {
-  await writeJsonAtomic(TTS_CACHE_FILE, cache);
-}
-
-/* =========================
-   HELPERS
-========================= */
-const MAX_TURNS = 6;
-
-const CATEGORY_OPTIONS = ['family', 'injury', 'criminal', 'business', 'other'];
-
-const QUESTION_SETS = {
-  universal: [
-    {
-      id: 'name_callback',
-      label: 'Name + Callback Number',
-      ask: 'I’m Ava, the assistant for the attorney. He’s unavailable; I’ll take details for him. What is your full name and best callback number?',
-      fills: ['name', 'callback_number']
-    },
-    {
-      id: 'best_time_location',
-      label: 'Best Time + Location',
-      ask: 'What is the best time to reach you, and what state are you in?',
-      fills: ['best_time', 'location_state']
-    },
-    {
-      id: 'category_brief_urgency',
-      label: 'Category + Brief Description + Urgency',
-      ask: 'Which type of matter is this—family, injury, criminal, or business—and what happened, plus any urgent deadlines?',
-      fills: ['category', 'brief_description', 'urgency_deadline']
-    }
-  ],
-  family: [
-    { id: 'family_dates', label: 'Key Dates', ask: 'What are the key dates or deadlines involved?' },
-    { id: 'family_children', label: 'Children', ask: 'Are children involved, and if so, what ages?' },
-    { id: 'family_orders', label: 'Existing Orders', ask: 'Are there any existing court orders we should know about?' },
-    { id: 'family_location', label: 'County', ask: 'Which county is the case in or expected to be filed?' },
-    { id: 'family_conflict', label: 'Other Party', ask: 'Who is the other party involved?' },
-    { id: 'family_goals', label: 'Goals', ask: 'What outcome are you hoping for?' }
-  ],
-  injury: [
-    { id: 'injury_date', label: 'Injury Date', ask: 'What date did the injury occur?' },
-    { id: 'injury_employer', label: 'Employer', ask: 'Who is the employer or responsible party?' },
-    { id: 'injury_treatment', label: 'Treatment', ask: 'Have you received medical treatment yet?' },
-    { id: 'injury_reported', label: 'Reported', ask: 'Was the injury reported, and if so, to whom?' },
-    { id: 'injury_witnesses', label: 'Witnesses', ask: 'Were there any witnesses?' },
-    { id: 'injury_deadlines', label: 'Deadlines', ask: 'Are there any upcoming hearings or deadlines?' }
-  ],
-  criminal: [
-    { id: 'criminal_charge', label: 'Charge Type', ask: 'What is the charge or alleged offense?' },
-    { id: 'criminal_court_date', label: 'Court Date', ask: 'Do you have an upcoming court date?' },
-    { id: 'criminal_custody', label: 'Custody Status', ask: 'Are you currently in custody or out on bond?' },
-    { id: 'criminal_rep', label: 'Current Representation', ask: 'Do you already have an attorney on this case?' },
-    { id: 'criminal_county', label: 'County', ask: 'Which county is the case in?' },
-    { id: 'criminal_prior', label: 'Prior History', ask: 'Is there any prior history the attorney should know about?' }
-  ],
-  business: [
-    { id: 'business_parties', label: 'Parties', ask: 'Who are the parties involved?' },
-    { id: 'business_signed', label: 'Documents', ask: 'What was signed or agreed to, if anything?' },
-    { id: 'business_dates', label: 'Key Dates', ask: 'What are the key dates in dispute?' },
-    { id: 'business_amount', label: 'Amount', ask: 'What is the approximate amount at stake?' },
-    { id: 'business_outcome', label: 'Outcome', ask: 'What outcome are you hoping to achieve?' },
-    { id: 'business_location', label: 'Location', ask: 'Where did this occur or which state’s law applies?' }
-  ],
-  other: [
-    { id: 'other_context', label: 'Context', ask: 'Can you briefly describe the situation?' },
-    { id: 'other_deadlines', label: 'Deadlines', ask: 'Are there any deadlines or court dates?' },
-    { id: 'other_parties', label: 'Parties', ask: 'Who else is involved?' },
-    { id: 'other_location', label: 'Location', ask: 'Where is this taking place?' },
-    { id: 'other_documents', label: 'Documents', ask: 'Do you have any documents or evidence to share?' },
-    { id: 'other_goal', label: 'Goal', ask: 'What outcome are you hoping for?' }
-  ]
+const seedFirm = {
+  id: 'firm_default',
+  name: 'Redwood Legal Group',
+  practiceAreas: ['Personal Injury', 'Family Law', 'Employment'],
+  officeHours: 'Mon-Fri 8:00 AM - 6:00 PM',
+  disclaimers: 'This intake call is informational only and does not create an attorney-client relationship. We do not provide legal advice on this line.',
+  intakeRules: 'Collect caller contact details and a short case summary. Escalate emergency threats to 911 guidance.',
 };
 
-function escapeHtml(value) {
-  return String(value || '')
+async function ensureDataFiles() {
+  await fs.mkdir(DATA_DIR, { recursive: true });
+  await fs.mkdir(AUDIO_DIR, { recursive: true });
+
+  const firms = await readJson(FIRMS_FILE, null);
+  if (!Array.isArray(firms) || firms.length === 0) {
+    await writeJsonAtomic(FIRMS_FILE, [seedFirm]);
+  }
+
+  const calls = await readJson(CALLS_FILE, null);
+  if (!Array.isArray(calls)) await writeJsonAtomic(CALLS_FILE, []);
+
+  const leads = await readJson(LEADS_FILE, null);
+  if (!Array.isArray(leads)) await writeJsonAtomic(LEADS_FILE, []);
+
+  const sessions = await readJson(SESSIONS_FILE, null);
+  if (!sessions || typeof sessions !== 'object' || Array.isArray(sessions)) {
+    await writeJsonAtomic(SESSIONS_FILE, {});
+  }
+}
+
+await ensureDataFiles();
+
+async function loadFirms() {
+  return readJson(FIRMS_FILE, [seedFirm]);
+}
+
+async function saveFirms(firms) {
+  await writeJsonAtomic(FIRMS_FILE, firms);
+}
+
+async function loadCalls() {
+  return readJson(CALLS_FILE, []);
+}
+
+async function saveCalls(calls) {
+  await writeJsonAtomic(CALLS_FILE, calls);
+}
+
+async function loadLeads() {
+  return readJson(LEADS_FILE, []);
+}
+
+async function saveLeads(leads) {
+  await writeJsonAtomic(LEADS_FILE, leads);
+}
+
+async function loadSessions() {
+  return readJson(SESSIONS_FILE, {});
+}
+
+async function saveSessions(sessions) {
+  await writeJsonAtomic(SESSIONS_FILE, sessions);
+}
+
+function normalizePhone(raw) {
+  const txt = String(raw || '').trim();
+  const digits = txt.replace(/[^\d+]/g, '');
+  const onlyDigits = digits.replace(/\D/g, '');
+  if (onlyDigits.length === 10) return `+1${onlyDigits}`;
+  if (onlyDigits.length === 11 && onlyDigits.startsWith('1')) return `+${onlyDigits}`;
+  if (digits.startsWith('+') && onlyDigits.length >= 10) return digits;
+  return txt || 'unknown';
+}
+
+function findFirm(firms, firmId) {
+  if (firmId) {
+    const matched = firms.find((f) => f.id === firmId);
+    if (matched) return matched;
+  }
+  return firms[0] || seedFirm;
+}
+
+function sanitizeFirmPatch(existing, patch) {
+  return {
+    ...existing,
+    id: existing.id,
+    name: String(patch?.name ?? existing.name ?? '').trim() || existing.name,
+    practiceAreas: Array.isArray(patch?.practiceAreas)
+      ? patch.practiceAreas.map((x) => String(x).trim()).filter(Boolean)
+      : existing.practiceAreas,
+    officeHours: String(patch?.officeHours ?? existing.officeHours ?? ''),
+    disclaimers: String(patch?.disclaimers ?? existing.disclaimers ?? ''),
+    intakeRules: String(patch?.intakeRules ?? existing.intakeRules ?? ''),
+  };
+}
+
+function createSession({ callSid, firmId, fromPhone }) {
+  return {
+    callSid,
+    firmId,
+    fromPhone,
+    callId: `call_${sha1(`${callSid}|${firmId}`)}`,
+    leadId: `lead_${sha1(`${firmId}|${fromPhone}`)}`,
+    turnCount: 0,
+    repromptCount: 0,
+    askedQuestionIds: [],
+    collected: {
+      full_name: '',
+      callback_number: fromPhone || '',
+      practice_area: '',
+      case_summary: '',
+    },
+    lastQuestionId: '',
+    lastQuestionText: '',
+    transcript: [],
+    disclaimerShown: false,
+    done: false,
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
+  };
+}
+
+function extractStructuredDeterministic(userText) {
+  const text = String(userText || '').trim();
+  if (!text) return {};
+
+  const extracted = {};
+  const phoneMatch = text.match(/(\+?\d[\d\s().-]{8,}\d)/);
+  if (phoneMatch) extracted.callback_number = normalizePhone(phoneMatch[1]);
+
+  const nameMatch = text.match(/(?:my name is|this is)\s+([A-Za-z.'\-\s]{2,})/i);
+  if (nameMatch) extracted.full_name = nameMatch[1].trim();
+
+  const lower = text.toLowerCase();
+  if (lower.includes('injury') || lower.includes('accident')) extracted.practice_area = 'Personal Injury';
+  else if (lower.includes('divorce') || lower.includes('custody') || lower.includes('family')) extracted.practice_area = 'Family Law';
+  else if (lower.includes('employment') || lower.includes('termination') || lower.includes('harassment')) extracted.practice_area = 'Employment';
+
+  if (text.length > 24 && !nameMatch && !phoneMatch) extracted.case_summary = text;
+  return extracted;
+}
+
+function isLikelyName(value, sourceText) {
+  const v = String(value || '').trim();
+  if (!v) return false;
+  if (!/(my name is|this is)/i.test(sourceText)) return false;
+  if (!/^[A-Za-z.'\-\s]{2,}$/.test(v)) return false;
+  const words = v.split(/\s+/).filter(Boolean);
+  if (words.length < 2 || words.length > 4) return false;
+  if (/\b(personal|injury|case|accident|rear-ended|matter|help)\b/i.test(v)) return false;
+  return true;
+}
+
+function isLikelyPhone(value) {
+  const normalized = normalizePhone(value);
+  return normalized.startsWith('+') && normalized.replace(/\D/g, '').length >= 10;
+}
+
+function isLikelySummary(value) {
+  const v = String(value || '').trim();
+  return v.length >= 20;
+}
+
+function buildDeterministicQuestion(session, firm) {
+  const missing = REQUIRED_FIELDS.filter((field) => !String(session.collected[field] || '').trim());
+  const nextField = missing[0] || null;
+  if (!nextField) return { done: true, nextField: null, nextQuestionId: null, nextQuestionText: '' };
+
+  if (!session.askedQuestionIds.includes(nextField)) {
+    let text = QUESTION_BANK[nextField];
+    if (nextField === 'practice_area' && Array.isArray(firm.practiceAreas) && firm.practiceAreas.length) {
+      text = `What type of legal matter is this? We handle: ${firm.practiceAreas.join(', ')}.`;
+    }
+    return { done: false, nextField, nextQuestionId: nextField, nextQuestionText: text };
+  }
+
+  if (!session.askedQuestionIds.includes('final_clarify')) {
+    return {
+      done: false,
+      nextField,
+      nextQuestionId: 'final_clarify',
+      nextQuestionText: QUESTION_BANK.final_clarify,
+    };
+  }
+
+  return { done: true, nextField: null, nextQuestionId: null, nextQuestionText: '' };
+}
+
+async function callOpenAiForNextStep({ firm, session, userText }) {
+  if (!OPENAI_API_KEY) return null;
+
+  const schema = {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      extracted: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          full_name: { type: 'string' },
+          callback_number: { type: 'string' },
+          practice_area: { type: 'string' },
+          case_summary: { type: 'string' },
+        },
+      },
+      next_question_id: { type: 'string' },
+      next_question_text: { type: 'string' },
+      done_reason: { type: 'string' },
+    },
+    required: ['extracted', 'next_question_id', 'next_question_text'],
+  };
+
+  const prompt = {
+    firm,
+    required_fields: REQUIRED_FIELDS,
+    asked_question_ids: session.askedQuestionIds,
+    current_collected: session.collected,
+    user_text: userText,
+    constraints: {
+      never_repeat_same_question: true,
+      never_legal_advice: true,
+      max_questions: MAX_QUESTIONS,
+      max_reprompts: MAX_REPROMPTS,
+    },
+  };
+
+  const res = await fetch('https://api.openai.com/v1/responses', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      temperature: 0,
+      max_output_tokens: 350,
+      input: [
+        {
+          role: 'system',
+          content: [
+            {
+              type: 'input_text',
+              text: 'You are an intake controller. Return only strict JSON per schema. Never provide legal advice. Only choose the next question and extract structured fields.',
+            },
+          ],
+        },
+        {
+          role: 'user',
+          content: [{ type: 'input_text', text: JSON.stringify(prompt) }],
+        },
+      ],
+      text: {
+        format: {
+          type: 'json_schema',
+          name: 'next_step_output',
+          schema,
+          strict: true,
+        },
+      },
+    }),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`OpenAI error ${res.status}: ${errText}`);
+  }
+
+  const payload = await res.json();
+  const raw = payload?.output_text || payload?.output?.[0]?.content?.[0]?.text || '';
+  if (!raw) return null;
+  return JSON.parse(raw);
+}
+
+function mergeExtracted(session, extracted, userText) {
+  const updates = {};
+  for (const key of REQUIRED_FIELDS) {
+    const value = String(extracted?.[key] ?? '').trim();
+    if (!value) continue;
+    if (key === 'full_name' && !isLikelyName(value, userText)) continue;
+    if (key === 'callback_number' && !isLikelyPhone(value)) continue;
+    if (key === 'case_summary' && !isLikelySummary(value)) continue;
+    if (!session.collected[key]) {
+      session.collected[key] = value;
+      updates[key] = value;
+      continue;
+    }
+    if (session.collected[key] !== value) {
+      session.collected[key] = value;
+      updates[key] = value;
+    }
+  }
+  if (!session.collected.callback_number && session.fromPhone) {
+    session.collected.callback_number = session.fromPhone;
+    updates.callback_number = session.fromPhone;
+  }
+  return updates;
+}
+
+function composeSpeakText({ firm, session, bodyText }) {
+  const trimmed = String(bodyText || '').trim();
+  if (!trimmed) return '';
+  if (session.disclaimerShown) return trimmed;
+
+  session.disclaimerShown = true;
+  const intro = `Hi, this is Ava, the attorney's assistant.`;
+  return `${intro} ${trimmed}`;
+}
+
+function xmlEscape(s) {
+  return String(s || '')
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;')
@@ -209,513 +384,446 @@ function escapeHtml(value) {
     .replaceAll("'", '&#39;');
 }
 
-function normalizeCaller(raw) {
-  return (raw || 'unknown').toString().trim() || 'unknown';
+async function synthesizeToDisk(text) {
+  const safeText = truncateForSpeech(text, MAX_TTS_CHARS);
+  if (!safeText || !ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) return null;
+
+  const key = sha1(`${ELEVENLABS_VOICE_ID}|${ELEVENLABS_MODEL_ID}|${safeText}`);
+  const filePath = path.join(AUDIO_DIR, `${key}.mp3`);
+  const already = await fs.readFile(filePath).catch(() => null);
+  if (already) return key;
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), Math.max(500, TTS_TIMEOUT_MS));
+    const resp = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(ELEVENLABS_VOICE_ID)}`, {
+      method: 'POST',
+      headers: {
+        'xi-api-key': ELEVENLABS_API_KEY,
+        Accept: 'audio/mpeg',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        text: safeText,
+        model_id: ELEVENLABS_MODEL_ID,
+        voice_settings: {
+          stability: Number(process.env.ELEVEN_STABILITY ?? 0.32),
+          similarity_boost: Number(process.env.ELEVEN_SIMILARITY ?? 0.92),
+          style: Number(process.env.ELEVEN_STYLE ?? 0.78),
+          use_speaker_boost: String(process.env.ELEVEN_SPEAKER_BOOST ?? 'true').toLowerCase() === 'true',
+        },
+      }),
+      signal: controller.signal,
+    }).finally(() => clearTimeout(timeout));
+
+    if (!resp.ok) return null;
+    const audio = Buffer.from(await resp.arrayBuffer());
+    if (!audio.length) return null;
+    await fs.writeFile(filePath, audio);
+    return key;
+  } catch {
+    return null;
+  }
 }
 
-function detectCategory(text, current) {
-  const t = String(text || '').toLowerCase();
-  if (t.includes('divorce') || t.includes('custody') || t.includes('family')) return 'family';
-  if (t.includes('injury') || t.includes('worker') || t.includes('accident')) return 'injury';
-  if (t.includes('criminal') || t.includes('charge') || t.includes('arrest')) return 'criminal';
-  if (t.includes('contract') || t.includes('business') || t.includes('company')) return 'business';
-  return current || 'other';
+function addQueryParam(url, key, value) {
+  const separator = url.includes('?') ? '&' : '?';
+  return `${url}${separator}${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`;
 }
 
-function extractPhone(text) {
-  const match = String(text || '').match(/(\+?\d[\d\-\s().]{8,}\d)/);
-  return match ? match[1].replace(/[^\d+]/g, '') : '';
+function truncateForSpeech(input, maxChars) {
+  const text = String(input || '').replace(/\s+/g, ' ').trim();
+  const limit = Math.max(120, Number(maxChars) || 220);
+  if (text.length <= limit) return text;
+
+  const windowed = text.slice(0, limit);
+  const punctuationIdx = Math.max(windowed.lastIndexOf('.'), windowed.lastIndexOf('?'), windowed.lastIndexOf('!'));
+  const softBoundaryIdx = windowed.lastIndexOf(' ');
+  let cut = -1;
+
+  if (punctuationIdx >= Math.floor(limit * 0.55)) {
+    cut = punctuationIdx + 1;
+  } else if (softBoundaryIdx >= Math.floor(limit * 0.55)) {
+    cut = softBoundaryIdx;
+  } else {
+    cut = limit;
+  }
+
+  return windowed.slice(0, cut).trim();
 }
 
-function extractName(text) {
-  const t = String(text || '').trim();
-  const match = t.match(/(?:my name is|this is)\s+([A-Za-z.'\-\s]{2,})/i);
-  if (match) return match[1].trim();
-  const words = t.split(/\s+/).filter(Boolean);
-  if (words.length >= 2 && words.length <= 4) return t;
-  return '';
-}
+function gatherTwiml({ actionUrl, speakText, ttsKey, emptyCount = 0 }) {
+  const speakerNode = ttsKey
+    ? `<Play>${xmlEscape(`${PUBLIC_BASE_URL}/api/tts?key=${encodeURIComponent(ttsKey)}`)}</Play>`
+    : `<Say>${xmlEscape(speakText)}</Say>`;
+  const redirectUrl = addQueryParam(addQueryParam(actionUrl, 'empty', '1'), 'rc', Number(emptyCount) + 1);
 
-function buildSummary(record) {
-  const parts = [];
-  if (record.name) parts.push(`Caller ${record.name}`);
-  if (record.category) parts.push(`Category: ${record.category}`);
-  const desc = record.answers.category_brief_urgency || record.answers.other_context || '';
-  if (desc) parts.push(`Summary: ${desc}`);
-  if (record.answers.urgency_deadline) parts.push(`Urgency: ${record.answers.urgency_deadline}`);
-  if (record.callback) parts.push(`Callback: ${record.callback}`);
-  if (record.best_time) parts.push(`Best time: ${record.best_time}`);
-  return parts.join(' • ').trim();
-}
-
-function makeGatherTwiml(ttsUrl) {
-  const actionUrl = `${PUBLIC_BASE_URL}/twiml`;
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Gather input="speech" action="${escapeHtml(actionUrl)}" method="POST" speechTimeout="auto" timeout="6">
-    <Play>${escapeHtml(ttsUrl)}</Play>
-    <Pause length="1"/>
+  <Gather input="speech" action="${xmlEscape(actionUrl)}" method="POST" speechTimeout="auto" timeout="6" actionOnEmptyResult="false" bargeIn="true">
+    ${speakerNode}
   </Gather>
+  <Redirect method="POST">${xmlEscape(redirectUrl)}</Redirect>
 </Response>`;
 }
 
-function makePlayTwiml(ttsUrl, { hangup = false } = {}) {
-  const actionUrl = `${PUBLIC_BASE_URL}/twiml`;
-  if (hangup) {
-    return `<?xml version="1.0" encoding="UTF-8"?>
+function doneTwiml({ speakText, ttsKey }) {
+  const speakerNode = ttsKey
+    ? `<Play>${xmlEscape(`${PUBLIC_BASE_URL}/api/tts?key=${encodeURIComponent(ttsKey)}`)}</Play>`
+    : `<Say>${xmlEscape(speakText)}</Say>`;
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Play>${escapeHtml(ttsUrl)}</Play>
+  ${speakerNode}
   <Hangup/>
 </Response>`;
+}
+
+function appendTranscript(session, role, text) {
+  const t = String(text || '').trim();
+  if (!t) return;
+  session.transcript.push({ role, text: t, ts: nowIso() });
+}
+
+async function persistSessionArtifacts(session, { assistantText, callerText, done }) {
+  const calls = await loadCalls();
+  const leads = await loadLeads();
+
+  let call = calls.find((c) => c.callSid === session.callSid);
+  if (!call) {
+    call = {
+      id: session.callId,
+      callSid: session.callSid,
+      firmId: session.firmId,
+      fromPhone: session.fromPhone,
+      leadId: session.leadId,
+      status: 'in_progress',
+      startedAt: nowIso(),
+      updatedAt: nowIso(),
+      endedAt: null,
+      outcome: '',
+      collected: {},
+      transcript: [],
+    };
+    calls.unshift(call);
   }
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Play>${escapeHtml(ttsUrl)}</Play>
-  <Gather input="speech" action="${escapeHtml(actionUrl)}" method="POST" speechTimeout="auto" timeout="6"/>
-</Response>`;
-}
 
-function makeErrorTwiml() {
-  const actionUrl = `${PUBLIC_BASE_URL}/twiml`;
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Say>${escapeHtml('Sorry, something went wrong. Please try again later.')}</Say>
-  <Gather input="speech" action="${escapeHtml(actionUrl)}" method="POST" speechTimeout="auto" timeout="5"/>
-</Response>`;
-}
-
-async function storeTtsText(text) {
-  const cache = await loadTtsCache();
-  const id = crypto.randomUUID();
-  cache[id] = { text, created_at: Date.now() };
-  await saveTtsCache(cache);
-  return id;
-}
-
-async function makePlayUrl(text) {
-  if (text.length > 200) {
-    const id = await storeTtsText(text);
-    return `${PUBLIC_BASE_URL}/api/tts?id=${encodeURIComponent(id)}`;
+  const leadIdx = leads.findIndex((l) => l.id === session.leadId);
+  if (leadIdx === -1) {
+    leads.unshift({
+      id: session.leadId,
+      firmId: session.firmId,
+      fromPhone: session.fromPhone,
+      full_name: session.collected.full_name || '',
+      callback_number: session.collected.callback_number || session.fromPhone,
+      practice_area: session.collected.practice_area || '',
+      case_summary: session.collected.case_summary || '',
+      status: done ? 'ready_for_review' : 'in_progress',
+      lastCallSid: session.callSid,
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      transcript: [],
+      timeline: [{ ts: nowIso(), type: 'call_started', detail: `Call ${session.callSid} started` }],
+    });
   }
-  return `${PUBLIC_BASE_URL}/api/tts?text=${encodeURIComponent(text)}`;
-}
 
-function getQuestionList(category, { limitFollowups = true } = {}) {
-  const cat = CATEGORY_OPTIONS.includes(category) ? category : 'other';
-  const followups = QUESTION_SETS[cat] || QUESTION_SETS.other;
-  return [
-    ...QUESTION_SETS.universal,
-    ...(limitFollowups ? followups.slice(0, 2) : followups)
-  ];
-}
-
-function getNextQuestion(record) {
-  const remaining = Math.max(0, MAX_TURNS - 1 - (record.turnCount || 0));
-  const questions = getQuestionList(record.category || 'other', {
-    limitFollowups: remaining <= 2
-  }).slice(0, remaining);
-  for (const q of questions) {
-    if (!record.answers[q.id]) return q;
+  const lead = leads.find((l) => l.id === session.leadId);
+  if (callerText) {
+    call.transcript.push({ role: 'caller', text: callerText, ts: nowIso() });
+    lead.transcript.push({ role: 'caller', text: callerText, ts: nowIso() });
   }
-  return null;
-}
-
-const QUESTION_MAP = Object.values(QUESTION_SETS)
-  .flat()
-  .reduce((acc, q) => {
-    acc[q.id] = q;
-    return acc;
-  }, {});
-
-function recordAnswer(record, questionId, text) {
-  if (!questionId) return record;
-  record.answers[questionId] = text;
-
-  const q = QUESTION_MAP[questionId];
-  if (q?.fills?.includes('name')) {
-    const name = extractName(text);
-    if (name) record.name = name;
+  if (assistantText) {
+    call.transcript.push({ role: 'assistant', text: assistantText, ts: nowIso() });
+    lead.transcript.push({ role: 'assistant', text: assistantText, ts: nowIso() });
   }
-  if (q?.fills?.includes('callback_number')) {
-    const phone = extractPhone(text);
-    if (phone) record.callback = phone;
+
+  call.collected = { ...session.collected };
+  call.updatedAt = nowIso();
+  if (done) {
+    call.status = 'completed';
+    call.endedAt = nowIso();
+    call.outcome = 'intake_complete';
   }
-  if (q?.fills?.includes('best_time')) record.best_time = text;
-  if (q?.fills?.includes('location_state')) record.answers.location_state = text;
-  if (q?.fills?.includes('category')) record.category = detectCategory(text, record.category);
-  if (q?.fills?.includes('brief_description')) record.answers.brief_description = text;
-  if (q?.fills?.includes('urgency_deadline')) record.answers.urgency_deadline = text;
 
-  return record;
+  lead.full_name = session.collected.full_name || lead.full_name;
+  lead.callback_number = session.collected.callback_number || lead.callback_number;
+  lead.practice_area = session.collected.practice_area || lead.practice_area;
+  lead.case_summary = session.collected.case_summary || lead.case_summary;
+  lead.lastCallSid = session.callSid;
+  lead.updatedAt = nowIso();
+  lead.status = done ? 'ready_for_review' : 'in_progress';
+
+  await saveCalls(calls.slice(0, 500));
+  await saveLeads(leads.slice(0, 500));
 }
 
-function formatSummaryScript(record) {
-  const summary = buildSummary(record) || 'Thanks. I have your details.';
-  return `${summary} Thank you. The attorney will review and call you back.`;
-}
+async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
+  const firms = await loadFirms();
+  const firm = findFirm(firms, firmId);
+  const sessions = await loadSessions();
 
-async function maybeSummarizeWithAI(record) {
-  if (!OPENAI_API_KEY) return buildSummary(record);
-  const payload = {
-    model: OPENAI_MODEL,
-    messages: [
-      {
-        role: 'system',
-        content:
-          'Summarize the intake in one short paragraph for an attorney. No legal advice. No mention of contacting a lawyer.'
+  const normalizedPhone = normalizePhone(fromPhone);
+  let session = sessions[callSid];
+  if (!session) {
+    session = createSession({ callSid, firmId: firm.id, fromPhone: normalizedPhone });
+  }
+  session.firmId = firm.id;
+  session.fromPhone = normalizedPhone;
+
+  const callerText = String(userText || '').trim();
+  if (callerText) appendTranscript(session, 'caller', callerText);
+
+  const deterministicExtracted = extractStructuredDeterministic(callerText);
+  let llm = null;
+  if (callerText) {
+    try {
+      llm = await callOpenAiForNextStep({ firm, session, userText: callerText });
+    } catch (err) {
+      app.log.warn({ err: String(err), callSid }, 'OpenAI next-step failed; using deterministic fallback');
+    }
+  }
+
+  const extracted = { ...deterministicExtracted, ...(llm?.extracted || {}) };
+  const fieldUpdates = mergeExtracted(session, extracted, callerText);
+
+  const reachedQuestionCap = session.turnCount >= MAX_QUESTIONS;
+  const allCollected = REQUIRED_FIELDS.every((f) => String(session.collected[f] || '').trim());
+
+  let nextDecision = buildDeterministicQuestion(session, firm);
+  if (!allCollected && !reachedQuestionCap && llm) {
+    const nextId = String(llm.next_question_id || '').trim();
+    const nextText = String(llm.next_question_text || '').trim();
+    const missing = REQUIRED_FIELDS.filter((field) => !String(session.collected[field] || '').trim());
+
+    if (nextId && nextText && !session.askedQuestionIds.includes(nextId) && missing.length) {
+      nextDecision = {
+        done: false,
+        nextField: missing[0],
+        nextQuestionId: nextId,
+        nextQuestionText: nextText,
+      };
+    }
+  }
+
+  const done = allCollected || reachedQuestionCap || nextDecision.done;
+  let speakText = CLOSING_TEXT;
+  let nextField = null;
+
+  if (!done) {
+    session.turnCount += 1;
+    session.lastQuestionId = nextDecision.nextQuestionId;
+    session.lastQuestionText = nextDecision.nextQuestionText;
+    session.askedQuestionIds.push(nextDecision.nextQuestionId);
+    nextField = nextDecision.nextField;
+    speakText = composeSpeakText({ firm, session, bodyText: nextDecision.nextQuestionText });
+  } else {
+    session.done = true;
+    session.lastQuestionId = '';
+    session.lastQuestionText = '';
+    speakText = CLOSING_TEXT;
+  }
+
+  appendTranscript(session, 'assistant', speakText);
+  session.updatedAt = nowIso();
+  sessions[callSid] = session;
+  await saveSessions(sessions);
+
+  await persistSessionArtifacts(session, { assistantText: speakText, callerText, done: session.done });
+
+  return {
+    firm,
+    session,
+    payload: {
+      speakText,
+      done: session.done,
+      updates: {
+        ...fieldUpdates,
+        turnCount: session.turnCount,
+        repromptCount: session.repromptCount,
       },
-      {
-        role: 'user',
-        content: JSON.stringify({
-          name: record.name,
-          callback: record.callback,
-          best_time: record.best_time,
-          category: record.category,
-          answers: record.answers
-        })
-      }
-    ],
-    response_format: { type: 'text' }
-  };
-
-  const res = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      'Content-Type': 'application/json'
+      nextField,
     },
-    body: JSON.stringify(payload)
-  });
-
-  if (!res.ok) return buildSummary(record);
-  const data = await res.json();
-  return String(data.choices?.[0]?.message?.content || '').trim() || buildSummary(record);
+  };
 }
 
-/* =========================
-   ROUTES
-========================= */
+function applyRepromptText(session) {
+  if (session.repromptCount >= MAX_REPROMPTS) {
+    session.done = true;
+    return CLOSING_TEXT;
+  }
+  const base = session.lastQuestionText || QUESTION_BANK.full_name;
+  return `Sorry, I didn’t catch that. ${base}`;
+}
+
 app.get('/health', async () => ({ ok: true }));
 app.get('/favicon.ico', async (_, reply) => reply.code(204).send());
 
-app.get('/dashboard', async (_, reply) => {
-  const db = await loadAll();
-  const callers = Object.values(db.callers || {})
-    .map((c) => normalizeRecord(c.caller, c))
-    .sort((a, b) => b.updated_at - a.updated_at);
-
-  const rows = callers
-    .map((c) => {
-      const date = new Date(c.updated_at || 0).toLocaleString();
-      const summary = (c.summary || '').slice(0, 120);
-      return `<tr>
-        <td><a href="/dashboard/${encodeURIComponent(c.caller)}">${escapeHtml(c.caller)}</a></td>
-        <td>${escapeHtml(c.name || '—')}</td>
-        <td>${escapeHtml(c.category || 'other')}</td>
-        <td><span class="status ${escapeHtml(c.status)}">${escapeHtml(c.status)}</span></td>
-        <td>${escapeHtml(date)}</td>
-        <td>${escapeHtml(summary || '—')}</td>
-        <td><a class="btn" href="/dashboard/${encodeURIComponent(c.caller)}">Open</a></td>
-      </tr>`;
-    })
-    .join('');
-
-  const html = `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Ava Intake Dashboard</title>
-  <style>
-    :root{
-      --ink:#1f2430;--muted:#6b7280;--accent:#0f766e;--bg:#f8f4ee;
-      --card:#ffffff;--line:#e6e2d9;--warn:#a16207;--ok:#0f766e;--danger:#b91c1c;
-    }
-    body{margin:0;font-family:"Palatino Linotype","Book Antiqua",Palatino,serif;background:var(--bg);color:var(--ink);}
-    header{padding:28px 40px;background:linear-gradient(135deg,#f0e7d8,#f7f1e7);}
-    h1{margin:0;font-size:28px;letter-spacing:0.5px;}
-    .sub{color:var(--muted);margin-top:6px;}
-    main{padding:24px 40px;}
-    table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);}
-    th,td{padding:12px 10px;border-bottom:1px solid var(--line);text-align:left;font-size:14px;}
-    th{background:#fbf7f1;font-weight:600;}
-    .status{padding:4px 8px;border-radius:999px;background:#f1ede5;font-size:12px;text-transform:capitalize;}
-    .status.new{background:#e8e0d4;}
-    .status.followup{background:#fde68a;color:#7c5000;}
-    .status.scheduled{background:#d1fae5;color:#065f46;}
-    .status.closed{background:#fee2e2;color:#7f1d1d;}
-    .btn{display:inline-block;padding:6px 10px;border-radius:8px;background:var(--accent);color:white;text-decoration:none;font-size:12px;}
-    .empty{padding:20px;color:var(--muted);}
-  </style>
-</head>
-<body>
-  <header>
-    <h1>Attorney Intake Dashboard</h1>
-    <div class="sub">Review callers, summaries, and next steps. Keep internal notes private.</div>
-  </header>
-  <main>
-    <table>
-      <thead>
-        <tr>
-          <th>Caller</th>
-          <th>Name</th>
-          <th>Category</th>
-          <th>Status</th>
-          <th>Last Updated</th>
-          <th>Summary</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>${rows || '<tr><td colspan="7" class="empty">No calls yet.</td></tr>'}</tbody>
-    </table>
-  </main>
-</body>
-</html>`;
-
-  reply.header('Content-Type', 'text/html; charset=utf-8').send(html);
+app.get('/api/firms', async () => {
+  const firms = await loadFirms();
+  return { data: firms };
 });
 
-app.get('/dashboard/:caller', async (req, reply) => {
-  const caller = req.params.caller;
-  const record = await getCaller(caller);
+app.get('/api/firms/:id', async (req, reply) => {
+  const firms = await loadFirms();
+  const firm = firms.find((f) => f.id === req.params.id);
+  if (!firm) return reply.code(404).send({ error: 'Firm not found' });
+  return { data: firm };
+});
 
-  if (!record) {
-    reply.code(404).send('Not found');
-    return;
+app.post('/api/firms/:id', async (req, reply) => {
+  const firms = await loadFirms();
+  const idx = firms.findIndex((f) => f.id === req.params.id);
+  if (idx === -1) return reply.code(404).send({ error: 'Firm not found' });
+
+  firms[idx] = sanitizeFirmPatch(firms[idx], req.body || {});
+  await saveFirms(firms);
+  return { data: firms[idx] };
+});
+
+app.get('/api/calls', async () => {
+  const calls = await loadCalls();
+  calls.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+  return { data: calls.slice(0, 100) };
+});
+
+app.get('/api/leads', async () => {
+  const leads = await loadLeads();
+  leads.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+  return { data: leads };
+});
+
+app.get('/api/leads/:id', async (req, reply) => {
+  const leads = await loadLeads();
+  const lead = leads.find((x) => x.id === req.params.id);
+  if (!lead) return reply.code(404).send({ error: 'Lead not found' });
+  return { data: lead };
+});
+
+app.post('/api/next-step', async (req, reply) => {
+  const firmId = String(req.body?.firmId || '').trim();
+  const callSid = String(req.body?.callSid || '').trim();
+  const fromPhone = String(req.body?.fromPhone || '').trim();
+  const userText = String(req.body?.userText || '').trim();
+
+  if (!callSid) return reply.code(400).send({ error: 'callSid is required' });
+
+  try {
+    const result = await runNextStepController({ firmId, callSid, fromPhone, userText });
+    return result.payload;
+  } catch (err) {
+    app.log.error({ err: String(err), callSid }, '/api/next-step failed');
+    return reply.code(500).send({ error: 'next-step failed' });
   }
-
-  const questionList = getQuestionList(record.category || 'other', { limitFollowups: false });
-  const answerRows = questionList
-    .map((q) => `<tr><td>${escapeHtml(q.label)}</td><td>${escapeHtml(record.answers[q.id] || '—')}</td></tr>`)
-    .join('');
-
-  const historyHtml = (record.history || [])
-    .map(
-      (h) =>
-        `<div class="msg ${escapeHtml(h.role)}"><span>${escapeHtml(h.role)}</span>${escapeHtml(h.text || '')}</div>`
-    )
-    .join('');
-
-  const summary = escapeHtml(record.summary || '—');
-
-  const html = `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Caller ${escapeHtml(caller)}</title>
-  <style>
-    :root{
-      --ink:#1f2430;--muted:#6b7280;--accent:#0f766e;--bg:#f8f4ee;
-      --card:#ffffff;--line:#e6e2d9;
-    }
-    body{margin:0;font-family:"Palatino Linotype","Book Antiqua",Palatino,serif;background:var(--bg);color:var(--ink);}
-    header{padding:24px 40px;background:linear-gradient(135deg,#efe5d4,#fbf7f1);}
-    a{color:var(--accent);text-decoration:none;}
-    main{padding:24px 40px;display:grid;grid-template-columns:1.4fr 1fr;gap:18px;}
-    .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;}
-    h1{margin:0 0 8px;}
-    h2{margin:0 0 12px;font-size:18px;}
-    table{width:100%;border-collapse:collapse;font-size:14px;}
-    td{padding:8px;border-bottom:1px solid var(--line);}
-    .msg{padding:8px 10px;border-radius:10px;margin:8px 0;background:#faf6ef;font-size:14px;}
-    .msg span{display:block;font-size:11px;color:var(--muted);text-transform:capitalize;}
-    textarea{width:100%;min-height:120px;border:1px solid var(--line);border-radius:8px;padding:8px;font-family:inherit;}
-    select,button,input{font-family:inherit;}
-    button{background:var(--accent);color:#fff;border:none;border-radius:8px;padding:8px 12px;cursor:pointer;}
-    .meta{color:var(--muted);font-size:13px;margin-bottom:8px;}
-    .stack{display:flex;flex-direction:column;gap:10px;}
-    @media (max-width: 900px){main{grid-template-columns:1fr;}}
-  </style>
-</head>
-<body>
-  <header>
-    <a href="/dashboard">← Back to dashboard</a>
-    <h1>Caller: ${escapeHtml(caller)}</h1>
-    <div class="meta">Last updated: ${escapeHtml(new Date(record.updated_at || 0).toLocaleString())}</div>
-  </header>
-  <main>
-    <div class="stack">
-      <div class="card">
-        <h2>Summary</h2>
-        <p>${summary}</p>
-      </div>
-      <div class="card">
-        <h2>Core Intake Answers</h2>
-        <table>${answerRows || '<tr><td colspan="2">No answers yet.</td></tr>'}</table>
-      </div>
-      <div class="card">
-        <h2>Transcript</h2>
-        ${historyHtml || '<div class="meta">No transcript yet.</div>'}
-      </div>
-    </div>
-    <div class="stack">
-      <div class="card">
-        <h2>Internal Notes</h2>
-        <form method="POST" action="/dashboard/${encodeURIComponent(caller)}">
-          <label class="meta">Status</label>
-          <select name="status">
-            ${['new', 'followup', 'scheduled', 'closed']
-              .map((s) => `<option value="${s}" ${record.status === s ? 'selected' : ''}>${s}</option>`)
-              .join('')}
-          </select>
-          <label class="meta" style="margin-top:10px;display:block;">Notes</label>
-          <textarea name="internal_notes">${escapeHtml(record.internal_notes || '')}</textarea>
-          <div style="margin-top:10px;">
-            <button type="submit">Save</button>
-          </div>
-        </form>
-      </div>
-      <div class="card">
-        <h2>Export</h2>
-        <div class="meta">JSON for case file.</div>
-        <a href="/api/export/${encodeURIComponent(caller)}">Download JSON</a>
-      </div>
-    </div>
-  </main>
-</body>
-</html>`;
-
-  reply.header('Content-Type', 'text/html; charset=utf-8').send(html);
-});
-
-app.post('/dashboard/:caller', async (req, reply) => {
-  const caller = req.params.caller;
-  const status = String(req.body?.status || '').toLowerCase();
-  const notes = String(req.body?.internal_notes || '');
-
-  const safeStatus = ['new', 'followup', 'scheduled', 'closed'].includes(status) ? status : 'new';
-  await updateCaller(caller, {
-    status: safeStatus,
-    internal_notes: notes,
-    updated_at: Date.now()
-  });
-
-  reply.code(303).header('Location', `/dashboard/${encodeURIComponent(caller)}`).send();
-});
-
-app.get('/api/export/:caller', async (req, reply) => {
-  const record = await getCaller(req.params.caller);
-  if (!record) {
-    reply.code(404).send({ error: 'Not found' });
-    return;
-  }
-  reply.send(record);
 });
 
 app.get('/api/tts', async (req, reply) => {
-  const textParam = (req.query?.text || '').toString();
-  const idParam = (req.query?.id || '').toString();
-  let text = textParam;
+  const key = String(req.query?.key || '').trim();
+  const text = String(req.query?.text || '').trim();
 
-  if (!text && idParam) {
-    const cache = await loadTtsCache();
-    text = cache[idParam]?.text || '';
+  if (key) {
+    const filePath = path.join(AUDIO_DIR, `${key}.mp3`);
+    const audio = await fs.readFile(filePath).catch(() => null);
+    if (!audio) return reply.code(404).send({ error: 'audio not found' });
+    reply.header('Content-Type', 'audio/mpeg');
+    reply.header('Cache-Control', 'public, max-age=31536000, immutable');
+    return reply.send(audio);
   }
 
-  if (!text) {
-    reply.code(400).send({ error: 'Missing text' });
-    return;
-  }
+  if (!text) return reply.code(400).send({ error: 'text or key is required' });
 
-  try {
-    const ttsRes = await fetch(
-      `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(ELEVENLABS_VOICE_ID)}`,
-      {
-        method: 'POST',
-        headers: {
-          'xi-api-key': ELEVENLABS_API_KEY,
-          Accept: 'audio/mpeg',
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          text,
-          model_id: 'eleven_multilingual_v2',
-          voice_settings: {
-            stability: 0.45,
-            similarity_boost: 0.85,
-            style: 0.65,
-            use_speaker_boost: true
-          }
-        })
-      }
-    );
+  const generated = await synthesizeToDisk(text);
+  if (!generated) return reply.code(502).send({ error: 'tts unavailable' });
 
-    if (!ttsRes.ok) {
-      const errText = await ttsRes.text().catch(() => '');
-      throw new Error(`ElevenLabs error: ${ttsRes.status} ${errText}`);
-    }
-
-    const audio = Buffer.from(await ttsRes.arrayBuffer());
-    reply.header('Content-Type', 'audio/mpeg').send(audio);
-  } catch (err) {
-    app.log.error({ err: String(err) }, 'TTS error');
-    reply.code(500).send({ error: 'TTS failed' });
-  }
+  const audio = await fs.readFile(path.join(AUDIO_DIR, `${generated}.mp3`));
+  reply.header('Content-Type', 'audio/mpeg');
+  reply.header('Cache-Control', 'public, max-age=31536000, immutable');
+  return reply.send(audio);
 });
 
 app.post('/twiml', async (req, reply) => {
-  const caller = normalizeCaller(req.body?.From);
-  const speech = (req.body?.SpeechResult || '').trim();
+  const callSid = String(req.body?.CallSid || '').trim();
+  const fromPhone = normalizePhone(req.body?.From);
+  const userText = String(req.body?.SpeechResult || '').trim();
+  const firmId = String(req.body?.firmId || req.query?.firmId || '').trim();
+  const isEmptyRedirect = String(req.query?.empty || '') === '1';
+
+  if (!callSid) {
+    reply.header('Content-Type', 'text/xml');
+    return reply.send(doneTwiml({ speakText: 'Unable to continue this call right now.', ttsKey: null }));
+  }
 
   try {
-    let record = await getOrCreateCaller(caller);
-
-    if (speech) {
-      record.history.push({ role: 'caller', text: speech, ts: Date.now() });
-      record = recordAnswer(record, record.last_question_id, speech);
+    const sessions = await loadSessions();
+    let session = sessions[callSid];
+    if (!session) {
+      session = createSession({ callSid, firmId: firmId || seedFirm.id, fromPhone });
+      sessions[callSid] = session;
+      await saveSessions(sessions);
     }
 
-    if ((record.turnCount || 0) >= MAX_TURNS - 1) {
-      record.summary = await maybeSummarizeWithAI(record);
-      record.stage = 'done';
-      record.turnCount = (record.turnCount || 0) + 1;
-      record.updated_at = Date.now();
-      await upsertCaller(record);
-      const closing = formatSummaryScript(record);
-      const ttsUrl = await makePlayUrl(closing);
-      record.history.push({ role: 'assistant', text: closing, ts: Date.now() });
-      await upsertCaller(record);
-      reply.header('Content-Type', 'text/xml').send(makePlayTwiml(ttsUrl, { hangup: true }));
-      return;
+    let speakText = '';
+    let done = false;
+
+    if (!userText) {
+      if (!session.lastQuestionId) {
+        const firstStep = await runNextStepController({ firmId, callSid, fromPhone, userText: '' });
+        speakText = firstStep.payload.speakText;
+        done = firstStep.payload.done;
+      } else {
+        if (isEmptyRedirect || !userText) {
+          session.repromptCount += 1;
+        }
+        speakText = applyRepromptText(session);
+        done = session.done;
+
+        if (!done) {
+          appendTranscript(session, 'assistant', speakText);
+          session.updatedAt = nowIso();
+          sessions[callSid] = session;
+          await saveSessions(sessions);
+          await persistSessionArtifacts(session, { assistantText: speakText, callerText: '', done: false });
+        } else {
+          appendTranscript(session, 'assistant', speakText);
+          session.updatedAt = nowIso();
+          sessions[callSid] = session;
+          await saveSessions(sessions);
+          await persistSessionArtifacts(session, { assistantText: speakText, callerText: '', done: true });
+        }
+      }
+    } else {
+      const step = await runNextStepController({ firmId, callSid, fromPhone, userText });
+      speakText = step.payload.speakText;
+      done = step.payload.done;
     }
 
-    const nextQuestion = getNextQuestion(record);
-    if (!nextQuestion) {
-      record.summary = await maybeSummarizeWithAI(record);
-      record.stage = 'done';
-      record.updated_at = Date.now();
-      await upsertCaller(record);
-      const closing = formatSummaryScript(record);
-      const ttsUrl = await makePlayUrl(closing);
-      record.history.push({ role: 'assistant', text: closing, ts: Date.now() });
-      await upsertCaller(record);
-      reply.header('Content-Type', 'text/xml').send(makePlayTwiml(ttsUrl, { hangup: true }));
-      return;
+    const ttsKey = await synthesizeToDisk(speakText);
+    reply.header('Content-Type', 'text/xml');
+
+    if (done) {
+      return reply.send(doneTwiml({ speakText, ttsKey }));
     }
 
-    record.last_question_id = nextQuestion.id;
-    record.turnCount = (record.turnCount || 0) + 1;
-    record.stage = 'collect';
-    record.updated_at = Date.now();
-    await upsertCaller(record);
-
-    const ttsUrl = await makePlayUrl(nextQuestion.ask);
-    record.history.push({ role: 'assistant', text: nextQuestion.ask, ts: Date.now() });
-    record.summary = await maybeSummarizeWithAI(record);
-    record.updated_at = Date.now();
-    await upsertCaller(record);
-
-    reply.header('Content-Type', 'text/xml').send(makeGatherTwiml(ttsUrl));
+    return reply.send(
+      gatherTwiml({
+        actionUrl: `${PUBLIC_BASE_URL}/twiml${firmId ? `?firmId=${encodeURIComponent(firmId)}` : ''}`,
+        speakText,
+        ttsKey,
+        emptyCount: session.repromptCount,
+      })
+    );
   } catch (err) {
-    app.log.error({ err: String(err), caller }, 'Twiml error');
-    reply.header('Content-Type', 'text/xml').send(makeErrorTwiml());
+    app.log.error({ err: String(err), callSid }, '/twiml failed');
+    reply.header('Content-Type', 'text/xml');
+    return reply.send(doneTwiml({ speakText: 'Sorry, there was a technical issue. Please call again.', ttsKey: null }));
   }
 });
 
-/* =========================
-   START HTTP SERVER
-========================= */
-await app.listen({ port: PORT, host: '0.0.0.0' });
-app.log.info(`BOOT server=${SERVER_PATH}`);
-app.log.info(`HTTP listening on http://127.0.0.1:${PORT}`);
+app.log.info(`BOOT PORT=${PORT} PUBLIC_BASE_URL=${PUBLIC_BASE_URL}`);
+
+try {
+  await app.listen({ port: PORT, host: '0.0.0.0' });
+  app.log.info(`HTTP listening on http://127.0.0.1:${PORT}`);
+} catch (err) {
+  app.log.error({ err: String(err) }, 'Server failed to start');
+  process.exit(1);
+}
