@@ -488,9 +488,9 @@ async function synthesizeToDisk(text) {
           text: safeText,
           model_id: ELEVENLABS_MODEL_ID,
           voice_settings: {
-            stability: Number(process.env.ELEVEN_STABILITY ?? 0.42),
+            stability: Number(process.env.ELEVEN_STABILITY ?? 0.55),
             similarity_boost: Number(process.env.ELEVEN_SIMILARITY ?? 0.85),
-            style: Number(process.env.ELEVEN_STYLE ?? 0.25),
+            style: Number(process.env.ELEVEN_STYLE ?? 0.15),
             use_speaker_boost: String(process.env.ELEVEN_SPEAKER_BOOST ?? 'true').toLowerCase() === 'true',
           },
         }),
@@ -593,13 +593,14 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   }
 
   // Speculatively start TTS on the most likely next phrase while OpenAI is thinking.
-  // buildDeterministicQuestion is sync with no side effects — safe to call early.
-  const deterministicDecision = buildDeterministicQuestion(session, firmConfig);
+  // buildDeterministicQuestion is read-only (no side effects) — safe to call early.
+  // This result is used ONLY for the TTS prefetch; session state is NOT updated here.
+  const speculativeDecision = buildDeterministicQuestion(session, firmConfig);
   let speculativeText = '';
   let ttsPrefetch = null;
-  if (!deterministicDecision.done && deterministicDecision.nextQuestionText) {
+  if (!speculativeDecision.done && speculativeDecision.nextQuestionText) {
     speculativeText = session.disclaimerShown
-      ? `${peekNextAck(callSid, firmConfig)} ${deterministicDecision.nextQuestionText}`
+      ? `${peekNextAck(callSid, firmConfig)} ${speculativeDecision.nextQuestionText}`
       : (firmConfig.opening || `Hi, this is ${firmConfig.ava_name || 'Ava'}, the attorney's assistant.`);
     ttsPrefetch = synthesizeToDisk(speculativeText).catch(() => null);
   }
@@ -613,8 +614,9 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   const requiredFields = firmConfig.required_fields || REQUIRED_FIELDS_DEFAULT;
   const allCollected = requiredFields.every((f) => String(session.collected[f] || '').trim());
 
-  // Reuse the deterministic decision already computed above; override with LLM if it gives better guidance
-  let nextDecision = deterministicDecision;
+  // Recompute after mergeExtracted so nextDecision reflects the updated collected fields.
+  // The speculative decision above may be stale if extraction filled a previously missing field.
+  let nextDecision = buildDeterministicQuestion(session, firmConfig);
   if (!allCollected && !reachedQuestionCap && llm) {
     const nextId = String(llm.next_question_id || '').trim();
     const nextText = String(llm.next_question_text || '').trim();
@@ -641,6 +643,15 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
     session.lastQuestionText = '';
     speakText = firmConfig.closing || DEFAULT_FIRM_CONFIG.closing;
     sessionAckIndex.delete(callSid);
+  }
+
+  // Log any time the speculative TTS phrase differed from what was actually spoken,
+  // so we can see question-skip or phrasing-change patterns in the logs.
+  if (ttsPrefetch && speakText !== speculativeText) {
+    app.log.info(
+      { callSid, speculativeText, speakText },
+      'tts-prefetch miss — speculative phrase differed from final (prefetch cached for future use)',
+    );
   }
 
   appendTranscript(session, 'assistant', speakText);
