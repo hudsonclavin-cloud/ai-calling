@@ -629,6 +629,12 @@ async function sendSmsNotification(session, firmConfig) {
   if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_FROM_NUMBER) return;
   if (!firmConfig.notification_phone) return;
 
+  // Normalize to E.164: 10 digits → +1XXXXXXXXXX, 11 digits starting with 1 → +1XXXXXXXXXX
+  const rawPhone = String(firmConfig.notification_phone).replace(/\D/g, '');
+  const toPhone = rawPhone.length === 10 ? `+1${rawPhone}`
+    : rawPhone.length === 11 && rawPhone[0] === '1' ? `+${rawPhone}`
+    : firmConfig.notification_phone;
+
   const { full_name, callback_number, practice_area, case_summary } = session.collected;
   const name = full_name || 'Unknown';
   const area = practice_area || 'General';
@@ -645,14 +651,14 @@ async function sendSmsNotification(session, firmConfig) {
         'Content-Type': 'application/x-www-form-urlencoded',
       },
       body: new URLSearchParams({
-        To:   firmConfig.notification_phone,
+        To:   toPhone,
         From: TWILIO_FROM_NUMBER,
         Body: body,
       }).toString(),
     }
   );
 
-  app.log.info({ status: res.status, leadId: session.leadId, to: firmConfig.notification_phone }, 'sendSmsNotification response');
+  app.log.info({ status: res.status, leadId: session.leadId, to: toPhone }, 'sendSmsNotification response');
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
     throw new Error(`Twilio SMS error ${res.status}: ${errText}`);
@@ -980,6 +986,12 @@ app.post('/twiml', async (req, reply) => {
 // ── Boot ──────────────────────────────────────────────────────────────────────
 
 app.log.info(`BOOT PORT=${PORT} PUBLIC_BASE_URL=${PUBLIC_BASE_URL}`);
+app.log.info({
+  RESEND_API_KEY_prefix:     RESEND_API_KEY     ? RESEND_API_KEY.slice(0, 4)     : '(unset)',
+  RESEND_FROM_EMAIL,
+  TWILIO_ACCOUNT_SID_prefix: TWILIO_ACCOUNT_SID ? TWILIO_ACCOUNT_SID.slice(0, 4) : '(unset)',
+  TWILIO_FROM_NUMBER,
+}, 'BOOT notification config');
 
 try {
   await app.listen({ port: PORT, host: '0.0.0.0' });
