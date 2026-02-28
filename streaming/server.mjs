@@ -28,6 +28,12 @@ const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID || 'eleven_turbo_v2_
 const TTS_TIMEOUT_MS = Number(process.env.TTS_TIMEOUT_MS || 2500);
 const MAX_TTS_CHARS = Number(process.env.MAX_TTS_CHARS || 180);
 
+const RESEND_API_KEY    = process.env.RESEND_API_KEY    || '';
+const RESEND_FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.dev';
+const TWILIO_ACCOUNT_SID  = process.env.TWILIO_ACCOUNT_SID  || '';
+const TWILIO_AUTH_TOKEN   = process.env.TWILIO_AUTH_TOKEN   || '';
+const TWILIO_FROM_NUMBER  = process.env.TWILIO_FROM_NUMBER  || '';
+
 const REQUIRED_FIELDS_DEFAULT = ['full_name', 'callback_number', 'practice_area', 'case_summary'];
 
 const __filename = fileURLToPath(import.meta.url);
@@ -64,6 +70,8 @@ const DEFAULT_FIRM_CONFIG = {
   office_hours: 'Mon-Fri 8:00 AM - 6:00 PM',
   disclaimer: 'This call is informational only and does not create an attorney-client relationship.',
   intake_rules: 'Collect caller contact details and a short case summary. Escalate emergency threats to 911 guidance.',
+  notification_email: '',
+  notification_phone: '',
 };
 
 const app = Fastify({ logger: true });
@@ -577,6 +585,85 @@ function appendTranscript(session, role, text) {
   session.transcript.push({ role, text: t, ts: nowIso() });
 }
 
+// ── Notifications ─────────────────────────────────────────────────────────────
+// Both functions are async and throw on failure so the caller can log the error.
+// Use fireNotifications() to call them fire-and-forget after a call completes.
+
+async function sendEmailNotification(session, firmConfig) {
+  if (!RESEND_API_KEY || !firmConfig.notification_email) return;
+
+  const { full_name, callback_number, practice_area, case_summary } = session.collected;
+  const name = full_name || 'Unknown';
+  const area = practice_area || 'General';
+
+  const res = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${RESEND_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      from: RESEND_FROM_EMAIL,
+      to: [firmConfig.notification_email],
+      subject: `New intake lead — ${name} (${area})`,
+      text: [
+        `New lead from ${name}`,
+        `Phone: ${callback_number || session.fromPhone}`,
+        `Matter: ${area}`,
+        `Summary: ${case_summary || '—'}`,
+        '',
+        `Review in dashboard: ${PUBLIC_BASE_URL}/leads/${session.leadId}`,
+      ].join('\n'),
+    }),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`Resend error ${res.status}: ${errText}`);
+  }
+}
+
+async function sendSmsNotification(session, firmConfig) {
+  if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_FROM_NUMBER) return;
+  if (!firmConfig.notification_phone) return;
+
+  const { full_name, callback_number, practice_area, case_summary } = session.collected;
+  const name = full_name || 'Unknown';
+  const area = practice_area || 'General';
+  const summary = String(case_summary || '').slice(0, 100);
+  const body = `New Ava lead: ${name}, ${area}. Call: ${callback_number || session.fromPhone}. Summary: ${summary}`;
+
+  const creds = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64');
+  const res = await fetch(
+    `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`,
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Basic ${creds}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        To:   firmConfig.notification_phone,
+        From: TWILIO_FROM_NUMBER,
+        Body: body,
+      }).toString(),
+    }
+  );
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`Twilio SMS error ${res.status}: ${errText}`);
+  }
+}
+
+function fireNotifications(session, firmConfig) {
+  if (!session.done) return;
+  sendEmailNotification(session, firmConfig)
+    .catch((err) => app.log.warn({ err: String(err), leadId: session.leadId }, 'email notification failed'));
+  sendSmsNotification(session, firmConfig)
+    .catch((err) => app.log.warn({ err: String(err), leadId: session.leadId }, 'sms notification failed'));
+}
+
 // ── Core controller ───────────────────────────────────────────────────────────
 
 async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
@@ -687,6 +774,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   saveSessions(sessions).catch((err) => app.log.warn({ err: String(err), callSid }, 'saveSessions failed'));
   persistSessionArtifacts(session, { assistantText: speakText, callerText, done: session.done })
     .catch((err) => app.log.warn({ err: String(err), callSid }, 'persistArtifacts failed'));
+  fireNotifications(session, firmConfig);
 
   return {
     firmConfig,
@@ -849,6 +937,7 @@ app.post('/twiml', async (req, reply) => {
         saveSessions(sessions).catch((err) => app.log.warn({ err: String(err), callSid }, 'saveSessions failed'));
         persistSessionArtifacts(session, { assistantText: speakText, callerText: '', done })
           .catch((err) => app.log.warn({ err: String(err), callSid }, 'persistArtifacts failed'));
+        fireNotifications(session, firmConfig);
         ttsKey = await ttsPromise;
       }
     } else {

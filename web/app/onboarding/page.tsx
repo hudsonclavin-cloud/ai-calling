@@ -114,6 +114,8 @@ interface OnboardingForm {
   contactName: string;
   contactEmail: string;
   twilioPhone: string;
+  notificationEmail: string;
+  notificationPhone: string;
   assistantName: string;
   tone: string;
   serviceAreas: string[];
@@ -128,6 +130,8 @@ const INITIAL_FORM: OnboardingForm = {
   contactName: "",
   contactEmail: "",
   twilioPhone: "",
+  notificationEmail: "",
+  notificationPhone: "",
   assistantName: "Ava",
   tone: "warm-professional",
   serviceAreas: [],
@@ -222,6 +226,8 @@ export default function OnboardingPage() {
         practice_areas: form.serviceAreas,
         max_questions: form.maxQuestions,
         intake_rules: INTAKE_RULES[form.industry] ?? INTAKE_RULES.Other,
+        notification_email: form.notificationEmail,
+        notification_phone: form.notificationPhone,
       });
       setCreatedFirmId(firmId);
     } catch {
@@ -408,6 +414,32 @@ export default function OnboardingPage() {
               />
               <p className="text-xs text-slate-400">The number Ava will answer calls on.</p>
             </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="grid gap-2">
+                <Label htmlFor="notificationEmail">Notification Email</Label>
+                <Input
+                  id="notificationEmail"
+                  type="email"
+                  placeholder="alerts@example.com"
+                  value={form.notificationEmail}
+                  onChange={(e) => set("notificationEmail", e.target.value)}
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="notificationPhone">Notification SMS</Label>
+                <Input
+                  id="notificationPhone"
+                  type="tel"
+                  placeholder="+14155550199"
+                  value={form.notificationPhone}
+                  onChange={(e) => set("notificationPhone", e.target.value)}
+                />
+              </div>
+            </div>
+            <p className="text-xs text-slate-400">
+              Where to send alerts when a call completes. Leave blank to skip.
+            </p>
           </CardContent>
         </Card>
 
@@ -567,6 +599,8 @@ export default function OnboardingPage() {
               value={[form.contactName, form.contactEmail].filter(Boolean).join(" · ")}
             />
             <ReviewRow label="Twilio Number" value={form.twilioPhone} />
+            <ReviewRow label="Notification Email" value={form.notificationEmail} />
+            <ReviewRow label="Notification SMS" value={form.notificationPhone} />
             <ReviewRow label="Firm ID" value={firmId} />
           </CardContent>
         </Card>

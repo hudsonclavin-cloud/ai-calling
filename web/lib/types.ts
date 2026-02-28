@@ -78,4 +78,6 @@ export interface FirmSettings {
   office_hours: string;
   disclaimer: string;
   intake_rules: string;
+  notification_email: string;
+  notification_phone: string;
 }

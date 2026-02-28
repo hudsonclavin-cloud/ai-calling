@@ -1,0 +1,42 @@
+{
+  "id": "firm_default",
+  "name": "Redwood Legal Group",
+
+  "ava_name": "Ava",
+  "tone": "warm-professional",
+
+  "opening": "Hi, this is Ava with Redwood Legal Group. I'm going to ask you a few quick questions so the attorney can review your case before calling you back.",
+  "closing": "Perfect. I've got everything I need. An attorney from Redwood Legal will review this and reach out to you soon.",
+
+  "practice_areas": ["Personal Injury", "Family Law", "Employment"],
+
+  "required_fields": ["full_name", "callback_number", "practice_area", "case_summary"],
+
+  "question_overrides": {
+    "full_name": "First — what's your name?",
+    "callback_number": "And the best number to reach you?",
+    "practice_area": "What type of legal matter is this about?",
+    "case_summary": "Briefly — what happened and what kind of help are you looking for?",
+    "final_clarify": "One last thing — anything else the attorney should know?"
+  },
+
+  "acknowledgments": [
+    "Got it.",
+    "Sure.",
+    "Of course.",
+    "Okay.",
+    "Perfect.",
+    "Thanks for that.",
+    "Understood."
+  ],
+
+  "max_questions": 8,
+  "max_reprompts": 2,
+
+  "office_hours": "Mon-Fri 8:00 AM - 6:00 PM",
+  "disclaimer": "This call is informational only and does not create an attorney-client relationship. We do not provide legal advice on this line.",
+  "intake_rules": "Collect caller contact details and a short case summary. Escalate emergency threats to 911 guidance.",
+
+  "notification_email": "hudsonclavin@gmail.com",
+  "notification_phone": "7045910644"
+}
