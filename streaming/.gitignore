@@ -1,0 +1,6 @@
+node_modules/
+data/ava.db
+data/ava.db-shm
+data/ava.db-wal
+data/*.backup
+data/tts_audio/
