@@ -1,50 +1,81 @@
-export type CallStatus = "answered" | "missed" | "voicemail";
+export type CallStatus = "in_progress" | "completed";
+
+export interface TranscriptEntry {
+  role: "caller" | "assistant";
+  text: string;
+  ts: string;
+}
 
 export interface CallRecord {
   id: string;
-  time: string;
-  caller: string;
-  practiceArea: string;
+  callSid: string;
+  firmId: string;
+  fromPhone: string;
+  leadId: string;
   status: CallStatus;
-  duration: string;
+  startedAt: string;
+  updatedAt: string;
+  endedAt: string | null;
   outcome: string;
-  leadId?: string;
+  collected: {
+    full_name?: string;
+    callback_number?: string;
+    practice_area?: string;
+    case_summary?: string;
+  };
+  transcript: TranscriptEntry[];
 }
 
 export interface TimelineEvent {
-  id: string;
-  timestamp: string;
+  ts: string;
   type: string;
-  description: string;
+  detail: string;
 }
 
 export interface LeadSummary {
   id: string;
-  caller: string;
-  practiceArea: string;
+  firmId: string;
+  fromPhone: string;
+  full_name: string;
+  callback_number: string;
+  practice_area: string;
+  case_summary: string;
   status: string;
-  lastContactAt: string;
+  lastCallSid: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface LeadDetail {
   id: string;
-  caller: string;
-  phone: string;
-  email: string;
-  practiceArea: string;
+  firmId: string;
+  fromPhone: string;
+  full_name: string;
+  callback_number: string;
+  practice_area: string;
+  case_summary: string;
   status: string;
-  summary: string;
-  transcript: string;
-  suggestedNextAction: string;
+  lastCallSid: string;
+  createdAt: string;
+  updatedAt: string;
+  transcript: TranscriptEntry[];
   timeline: TimelineEvent[];
 }
 
 export interface FirmSettings {
-  firmName: string;
-  practiceAreas: string[];
-  officeHours: string;
-  intakeRules: string;
-  disclaimers: string;
-  escalationPhone: string;
-  escalationEmail: string;
+  id: string;
+  name: string;
+  ava_name: string;
+  tone: string;
+  opening: string;
+  closing: string;
+  practice_areas: string[];
+  required_fields: string[];
+  question_overrides: Record<string, string>;
+  acknowledgments: string[];
+  max_questions: number;
+  max_reprompts: number;
+  office_hours: string;
+  disclaimer: string;
+  intake_rules: string;
 }

@@ -15,7 +15,7 @@ export function SettingsForm({ initialSettings }: { initialSettings: FirmSetting
   const [form, setForm] = useState(initialSettings);
   const [status, setStatus] = useState<"idle" | "saving" | "saved">("idle");
 
-  const practiceAreasText = useMemo(() => form.practiceAreas.join(", "), [form.practiceAreas]);
+  const practiceAreasText = useMemo(() => form.practice_areas.join(", "), [form.practice_areas]);
 
   async function onSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -23,7 +23,7 @@ export function SettingsForm({ initialSettings }: { initialSettings: FirmSetting
 
     const normalized: FirmSettings = {
       ...form,
-      practiceAreas: practiceAreasText
+      practice_areas: practiceAreasText
         .split(",")
         .map((value) => value.trim())
         .filter(Boolean),
@@ -44,19 +44,19 @@ export function SettingsForm({ initialSettings }: { initialSettings: FirmSetting
       <CardContent>
         <form className="grid gap-5" onSubmit={onSubmit}>
           <div className="grid gap-2">
-            <Label htmlFor="firmName">Firm Name</Label>
-            <Input id="firmName" value={form.firmName} onChange={(event) => setForm((prev) => ({ ...prev, firmName: event.target.value }))} />
+            <Label htmlFor="name">Firm Name</Label>
+            <Input id="name" value={form.name} onChange={(event) => setForm((prev) => ({ ...prev, name: event.target.value }))} />
           </div>
 
           <div className="grid gap-2">
-            <Label htmlFor="practiceAreas">Practice Areas (comma separated)</Label>
+            <Label htmlFor="practice_areas">Practice Areas (comma separated)</Label>
             <Input
-              id="practiceAreas"
+              id="practice_areas"
               value={practiceAreasText}
               onChange={(event) =>
                 setForm((prev) => ({
                   ...prev,
-                  practiceAreas: event.target.value
+                  practice_areas: event.target.value
                     .split(",")
                     .map((value) => value.trim())
                     .filter(Boolean),
@@ -66,46 +66,26 @@ export function SettingsForm({ initialSettings }: { initialSettings: FirmSetting
           </div>
 
           <div className="grid gap-2">
-            <Label htmlFor="officeHours">Office Hours</Label>
-            <Input id="officeHours" value={form.officeHours} onChange={(event) => setForm((prev) => ({ ...prev, officeHours: event.target.value }))} />
+            <Label htmlFor="office_hours">Office Hours</Label>
+            <Input id="office_hours" value={form.office_hours} onChange={(event) => setForm((prev) => ({ ...prev, office_hours: event.target.value }))} />
           </div>
 
           <div className="grid gap-2">
-            <Label htmlFor="intakeRules">Intake Rules</Label>
+            <Label htmlFor="intake_rules">Intake Rules</Label>
             <Textarea
-              id="intakeRules"
-              value={form.intakeRules}
-              onChange={(event) => setForm((prev) => ({ ...prev, intakeRules: event.target.value }))}
+              id="intake_rules"
+              value={form.intake_rules}
+              onChange={(event) => setForm((prev) => ({ ...prev, intake_rules: event.target.value }))}
             />
           </div>
 
           <div className="grid gap-2">
-            <Label htmlFor="disclaimers">Disclaimers</Label>
+            <Label htmlFor="disclaimer">Disclaimer</Label>
             <Textarea
-              id="disclaimers"
-              value={form.disclaimers}
-              onChange={(event) => setForm((prev) => ({ ...prev, disclaimers: event.target.value }))}
+              id="disclaimer"
+              value={form.disclaimer}
+              onChange={(event) => setForm((prev) => ({ ...prev, disclaimer: event.target.value }))}
             />
-          </div>
-
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            <div className="grid gap-2">
-              <Label htmlFor="escalationPhone">Escalation Phone</Label>
-              <Input
-                id="escalationPhone"
-                value={form.escalationPhone}
-                onChange={(event) => setForm((prev) => ({ ...prev, escalationPhone: event.target.value }))}
-              />
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="escalationEmail">Escalation Email</Label>
-              <Input
-                id="escalationEmail"
-                type="email"
-                value={form.escalationEmail}
-                onChange={(event) => setForm((prev) => ({ ...prev, escalationEmail: event.target.value }))}
-              />
-            </div>
           </div>
 
           <div className="flex items-center gap-3">

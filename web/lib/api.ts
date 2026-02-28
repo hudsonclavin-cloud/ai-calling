@@ -1,4 +1,3 @@
-import { defaultLeadDetail, mockCalls, mockLeadDetails, mockLeads, mockSettings } from "@/lib/mock-data";
 import type { CallRecord, FirmSettings, LeadDetail, LeadSummary } from "@/lib/types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:5050";
@@ -31,42 +30,43 @@ function unwrap<T>(payload: unknown, fallback: T): T {
 export async function getCalls(): Promise<CallRecord[]> {
   try {
     const payload = await fetchJson<CallRecord[] | { data: CallRecord[] }>("/api/calls");
-    return unwrap(payload, mockCalls);
+    return unwrap(payload, []);
   } catch {
-    return mockCalls;
+    return [];
   }
 }
 
 export async function getLeads(): Promise<LeadSummary[]> {
   try {
     const payload = await fetchJson<LeadSummary[] | { data: LeadSummary[] }>("/api/leads");
-    return unwrap(payload, mockLeads);
+    return unwrap(payload, []);
   } catch {
-    return mockLeads;
+    return [];
   }
 }
 
-export async function getLeadById(id: string): Promise<LeadDetail> {
+export async function getLeadById(id: string): Promise<LeadDetail | null> {
   try {
     const payload = await fetchJson<LeadDetail | { data: LeadDetail }>(`/api/leads/${id}`);
-    return unwrap(payload, defaultLeadDetail(id));
+    return unwrap(payload, null);
   } catch {
-    return mockLeadDetails[id] ?? defaultLeadDetail(id);
+    return null;
   }
 }
 
-export async function getSettings(): Promise<FirmSettings> {
+export async function getSettings(): Promise<FirmSettings | null> {
   try {
-    const payload = await fetchJson<FirmSettings | { data: FirmSettings }>("/api/settings");
-    return unwrap(payload, mockSettings);
+    const payload = await fetchJson<FirmSettings | { data: FirmSettings }>("/api/firms/firm_default");
+    return unwrap(payload, null);
   } catch {
-    return mockSettings;
+    return null;
   }
 }
 
 export async function saveSettings(nextSettings: FirmSettings): Promise<FirmSettings> {
   try {
-    const payload = await fetchJson<FirmSettings | { data: FirmSettings }>("/api/settings", {
+    const firmId = nextSettings.id ?? "firm_default";
+    const payload = await fetchJson<FirmSettings | { data: FirmSettings }>(`/api/firms/${firmId}`, {
       method: "POST",
       body: JSON.stringify(nextSettings),
     });

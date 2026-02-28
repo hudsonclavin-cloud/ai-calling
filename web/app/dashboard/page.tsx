@@ -10,16 +10,16 @@ function metric(label: string, value: string, note: string, icon: React.ReactNod
 
 export default async function DashboardPage() {
   const calls = await getCalls();
-  const callsToday = calls.length;
-  const bookedConsults = calls.filter((call) => call.outcome.toLowerCase().includes("booked")).length;
-  const missedCalls = calls.filter((call) => call.status === "missed").length;
-  const conversion = callsToday > 0 ? `${Math.round((bookedConsults / callsToday) * 100)}%` : "0%";
+  const totalCalls = calls.length;
+  const completedIntakes = calls.filter((call) => call.outcome === "intake_complete").length;
+  const inProgress = calls.filter((call) => call.status === "in_progress").length;
+  const conversion = totalCalls > 0 ? `${Math.round((completedIntakes / totalCalls) * 100)}%` : "0%";
 
   const metrics = [
-    metric("Calls Today", `${callsToday}`, "Compared to current day volume", <PhoneCall className="h-4 w-4" />),
-    metric("Booked Consults", `${bookedConsults}`, "Qualified and scheduled", <CalendarCheck2 className="h-4 w-4" />),
-    metric("Missed Calls", `${missedCalls}`, "Needs callback queue review", <PhoneMissed className="h-4 w-4" />),
-    metric("Conversion", conversion, "Booked consults / inbound calls", <TrendingUp className="h-4 w-4" />),
+    metric("Total Calls", `${totalCalls}`, "All inbound calls on record", <PhoneCall className="h-4 w-4" />),
+    metric("Completed Intakes", `${completedIntakes}`, "Calls with full intake collected", <CalendarCheck2 className="h-4 w-4" />),
+    metric("In Progress", `${inProgress}`, "Active or incomplete calls", <PhoneMissed className="h-4 w-4" />),
+    metric("Conversion", conversion, "Completed intakes / inbound calls", <TrendingUp className="h-4 w-4" />),
   ];
 
   return (
