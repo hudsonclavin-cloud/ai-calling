@@ -80,6 +80,13 @@ function getNextAck(callSid, firmConfig) {
   return acks[next];
 }
 
+// Read the next ack without advancing the index (used for speculative TTS prefetch)
+function peekNextAck(callSid, firmConfig) {
+  const acks = firmConfig.acknowledgments?.length ? firmConfig.acknowledgments : DEFAULT_FIRM_CONFIG.acknowledgments;
+  const last = sessionAckIndex.get(callSid) ?? -1;
+  return acks[(last + 1) % acks.length];
+}
+
 // ── Utilities ────────────────────────────────────────────────────────────────
 
 function nowIso() { return new Date().toISOString(); }
@@ -576,13 +583,25 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
 
   const deterministicExtracted = extractStructuredDeterministic(callerText);
 
-  // Fire OpenAI immediately (parallel with any sync work)
+  // Fire OpenAI immediately (parallel with TTS prefetch below)
   let llmPromise = null;
   if (callerText && OPENAI_API_KEY) {
     llmPromise = callOpenAiForNextStep({ firmConfig, session, userText: callerText }).catch((err) => {
       app.log.warn({ err: String(err), callSid }, 'OpenAI failed; using deterministic fallback');
       return null;
     });
+  }
+
+  // Speculatively start TTS on the most likely next phrase while OpenAI is thinking.
+  // buildDeterministicQuestion is sync with no side effects — safe to call early.
+  const deterministicDecision = buildDeterministicQuestion(session, firmConfig);
+  let speculativeText = '';
+  let ttsPrefetch = null;
+  if (!deterministicDecision.done && deterministicDecision.nextQuestionText) {
+    speculativeText = session.disclaimerShown
+      ? `${peekNextAck(callSid, firmConfig)} ${deterministicDecision.nextQuestionText}`
+      : (firmConfig.opening || `Hi, this is ${firmConfig.ava_name || 'Ava'}, the attorney's assistant.`);
+    ttsPrefetch = synthesizeToDisk(speculativeText).catch(() => null);
   }
 
   const llm = llmPromise ? await llmPromise : null;
@@ -594,7 +613,8 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   const requiredFields = firmConfig.required_fields || REQUIRED_FIELDS_DEFAULT;
   const allCollected = requiredFields.every((f) => String(session.collected[f] || '').trim());
 
-  let nextDecision = buildDeterministicQuestion(session, firmConfig);
+  // Reuse the deterministic decision already computed above; override with LLM if it gives better guidance
+  let nextDecision = deterministicDecision;
   if (!allCollected && !reachedQuestionCap && llm) {
     const nextId = String(llm.next_question_id || '').trim();
     const nextText = String(llm.next_question_text || '').trim();
@@ -626,14 +646,28 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   appendTranscript(session, 'assistant', speakText);
   session.updatedAt = nowIso();
   sessions[callSid] = session;
-  await saveSessions(sessions);
-  await persistSessionArtifacts(session, { assistantText: speakText, callerText, done: session.done });
+
+  // Resolve TTS: if the prefetch already covers the final text, just await it
+  // (likely already done); otherwise let it cache quietly and start fresh.
+  let ttsKey;
+  if (speakText === speculativeText && ttsPrefetch) {
+    ttsKey = await ttsPrefetch;
+  } else {
+    if (ttsPrefetch) ttsPrefetch.catch(() => {});  // cache quietly, don't block
+    ttsKey = await synthesizeToDisk(speakText);
+  }
+
+  // Fire-and-forget — the TwiML response doesn't depend on write completion
+  saveSessions(sessions).catch((err) => app.log.warn({ err: String(err), callSid }, 'saveSessions failed'));
+  persistSessionArtifacts(session, { assistantText: speakText, callerText, done: session.done })
+    .catch((err) => app.log.warn({ err: String(err), callSid }, 'persistArtifacts failed'));
 
   return {
     firmConfig,
     session,
     payload: {
       speakText,
+      ttsKey,
       done: session.done,
       updates: { ...fieldUpdates, turnCount: session.turnCount, repromptCount: session.repromptCount },
       nextField,
@@ -768,29 +802,37 @@ app.post('/twiml', async (req, reply) => {
 
     let speakText = '';
     let done = false;
+    let ttsKey = null;
 
     if (!userText) {
       if (!session.lastQuestionId) {
+        // First turn — controller handles TTS prefetch internally
         const firstStep = await runNextStepController({ firmId, callSid, fromPhone, userText: '' });
         speakText = firstStep.payload.speakText;
         done = firstStep.payload.done;
+        ttsKey = firstStep.payload.ttsKey;
       } else {
+        // Reprompt — start TTS and fire-and-forget saves in parallel
         if (isEmptyRedirect || !userText) session.repromptCount += 1;
         speakText = applyRepromptText(session, firmConfig);
         done = session.done;
         appendTranscript(session, 'assistant', speakText);
         session.updatedAt = nowIso();
         sessions[callSid] = session;
-        await saveSessions(sessions);
-        await persistSessionArtifacts(session, { assistantText: speakText, callerText: '', done });
+        const ttsPromise = synthesizeToDisk(speakText);
+        saveSessions(sessions).catch((err) => app.log.warn({ err: String(err), callSid }, 'saveSessions failed'));
+        persistSessionArtifacts(session, { assistantText: speakText, callerText: '', done })
+          .catch((err) => app.log.warn({ err: String(err), callSid }, 'persistArtifacts failed'));
+        ttsKey = await ttsPromise;
       }
     } else {
+      // Normal turn — controller handles TTS prefetch internally
       const step = await runNextStepController({ firmId, callSid, fromPhone, userText });
       speakText = step.payload.speakText;
       done = step.payload.done;
+      ttsKey = step.payload.ttsKey;
     }
 
-    const ttsKey = await synthesizeToDisk(speakText);
     reply.header('Content-Type', 'text/xml');
 
     if (done) return reply.send(doneTwiml({ speakText, ttsKey }));
