@@ -63,6 +63,14 @@ export async function getSettings(): Promise<FirmSettings | null> {
   }
 }
 
+export async function createFirm(id: string, config: Partial<FirmSettings>): Promise<FirmSettings> {
+  const payload = await fetchJson<FirmSettings | { data: FirmSettings }>(`/api/firms/${id}`, {
+    method: "POST",
+    body: JSON.stringify(config),
+  });
+  return unwrap(payload, config as FirmSettings);
+}
+
 export async function saveSettings(nextSettings: FirmSettings): Promise<FirmSettings> {
   try {
     const firmId = nextSettings.id ?? "firm_default";

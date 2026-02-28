@@ -1,6 +1,8 @@
-import { ArrowUpRight, CalendarCheck2, PhoneCall, PhoneMissed, TrendingUp } from "lucide-react";
+import Link from "next/link";
+import { ArrowUpRight, CalendarCheck2, PhoneCall, PhoneMissed, Plus, TrendingUp } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
+import { buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { getCalls } from "@/lib/api";
 
@@ -24,9 +26,15 @@ export default async function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold text-slate-900 md:text-3xl">Dashboard</h1>
-        <p className="text-sm text-slate-500">Live intake visibility for calls, outcomes, and follow-up load.</p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold text-slate-900 md:text-3xl">Dashboard</h1>
+          <p className="text-sm text-slate-500">Live intake visibility for calls, outcomes, and follow-up load.</p>
+        </div>
+        <Link href="/onboarding" className={buttonVariants({ size: "sm" })}>
+          <Plus className="h-4 w-4" />
+          Add Client
+        </Link>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
