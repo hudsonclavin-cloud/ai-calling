@@ -222,9 +222,18 @@ function createSession({ callSid, firmId, fromPhone, firmConfig }) {
 
 // ── Deterministic extraction ──────────────────────────────────────────────────
 
+// Short filler words that should never be treated as extractable content
+const FILLER_WORDS = new Set([
+  'ok', 'okay', 'yes', 'no', 'sure', 'go ahead', 'ready', 'hi', 'hello',
+  'yeah', 'yep', 'yup', 'alright', 'sounds good', 'got it', 'uh huh',
+]);
+
 function extractStructuredDeterministic(userText) {
   const text = String(userText || '').trim();
   if (!text) return {};
+
+  // Skip extraction entirely for short acknowledgments and filler phrases
+  if (text.length < 10 || FILLER_WORDS.has(text.toLowerCase())) return {};
 
   const extracted = {};
   const phoneMatch = text.match(/(\+?\d[\d\s().-]{8,}\d)/);
@@ -240,7 +249,8 @@ function extractStructuredDeterministic(userText) {
   else if (lower.includes('immigration') || lower.includes('visa') || lower.includes('deportation')) extracted.practice_area = 'Immigration';
   else if (lower.includes('criminal') || lower.includes('arrested') || lower.includes('charged')) extracted.practice_area = 'Criminal Defense';
 
-  if (text.length > 24 && !nameMatch && !phoneMatch) extracted.case_summary = text;
+  const words = text.split(/\s+/).filter(Boolean);
+  if (text.length >= 40 && words.length >= 4 && !nameMatch && !phoneMatch) extracted.case_summary = text;
   return extracted;
 }
 
@@ -261,7 +271,8 @@ function isLikelyPhone(value) {
 }
 
 function isLikelySummary(value) {
-  return String(value || '').trim().length >= 20;
+  const v = String(value || '').trim();
+  return v.length >= 40 && v.split(/\s+/).filter(Boolean).length >= 4;
 }
 
 // ── Question building (uses firm config) ──────────────────────────────────────
