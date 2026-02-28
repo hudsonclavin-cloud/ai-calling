@@ -41,3 +41,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# runtime data / caches
+public/tts/
+streaming/data/db.json
+streaming/data/firms.json
+streaming/data/memory.json
+streaming/data/tts_cache.json
