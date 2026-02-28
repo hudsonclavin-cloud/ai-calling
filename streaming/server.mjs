@@ -33,7 +33,7 @@ const REQUIRED_FIELDS_DEFAULT = ['full_name', 'callback_number', 'practice_area'
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DATA_DIR = path.join(__dirname, 'data');
-const FIRMS_DIR = path.join(DATA_DIR, 'firms');       // NEW: per-firm config files live here
+const FIRMS_DIR = path.join(DATA_DIR, 'firms');       // per-firm config JSON files
 const CALLS_FILE = path.join(DATA_DIR, 'calls.json');
 const LEADS_FILE = path.join(DATA_DIR, 'leads.json');
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
@@ -111,9 +111,9 @@ async function writeJsonAtomic(filePath, data) {
 }
 
 // ── Firm config loading ───────────────────────────────────────────────────────
-// Firms are now loaded from individual JSON files in streaming/data/firms/
-// Each file is named {firm_id}.json  e.g. firm_default.json, firm_silva.json
-// Falls back to DEFAULT_FIRM_CONFIG if file not found.
+// Firm configs are individual JSON files in streaming/data/firms/.
+// Each file is named {firm_id}.json — e.g. firm_default.json, firm_acme.json
+// Falls back to DEFAULT_FIRM_CONFIG if the file is not found.
 
 async function loadFirmConfig(firmId) {
   const id = String(firmId || 'firm_default').trim();
@@ -293,9 +293,9 @@ function buildDeterministicQuestion(session, firmConfig) {
   const missing = requiredFields.filter((field) => !String(session.collected[field] || '').trim());
   if (!missing.length) return { done: true, nextField: null, nextQuestionId: null, nextQuestionText: '' };
 
-  // Scan ALL missing fields for the first one not yet asked (not just missing[0]).
-  // Bug was here: checking only missing[0] meant one filler response could exhaust
-  // the only "unasked" slot and jump straight to final_clarify, skipping all other fields.
+  // Scan all missing fields for the first one not yet asked, not just missing[0].
+  // Checking only missing[0] would allow a filler response to exhaust the "unasked"
+  // slot and jump to final_clarify, skipping intermediate required fields.
   const nextField = missing.find((f) => !session.askedQuestionIds.includes(f)) ?? missing[0];
 
   if (!session.askedQuestionIds.includes(nextField)) {
@@ -432,10 +432,8 @@ function composeSpeakText({ session, bodyText, callSid, firmConfig }) {
 
   if (!session.disclaimerShown) {
     session.disclaimerShown = true;
-    // Use firm's custom opening instead of hardcoded greeting
+    // First turn: play the firm's opening greeting, ignoring bodyText
     const opening = firmConfig.opening || `Hi, this is ${firmConfig.ava_name || 'Ava'}, the attorney's assistant.`;
-    // If the bodyText is already the opening (first turn), don't double up
-    if (trimmed === opening) return opening;
     return opening;
   }
 
@@ -630,10 +628,6 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   const requiredFields = firmConfig.required_fields || REQUIRED_FIELDS_DEFAULT;
   const allCollected = requiredFields.every((f) => String(session.collected[f] || '').trim());
 
-  // DEBUG — remove once call flow is verified stable
-  console.log(`[DEBUG][${callSid}] collected=${JSON.stringify(session.collected)}`);
-  console.log(`[DEBUG][${callSid}] askedQuestionIds=${JSON.stringify(session.askedQuestionIds)} turnCount=${session.turnCount} allCollected=${allCollected} reachedQuestionCap=${reachedQuestionCap}`);
-
   // Recompute after mergeExtracted so nextDecision reflects the updated collected fields.
   // The speculative decision above may be stale if extraction filled a previously missing field.
   let nextDecision = buildDeterministicQuestion(session, firmConfig);
@@ -648,8 +642,6 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
 
   const done = allCollected || reachedQuestionCap || nextDecision.done;
 
-  // DEBUG — remove once call flow is verified stable
-  console.log(`[DEBUG][${callSid}] nextDecision=${JSON.stringify(nextDecision)} done=${done}`);
   let speakText = firmConfig.closing || DEFAULT_FIRM_CONFIG.closing;
   let nextField = null;
 
