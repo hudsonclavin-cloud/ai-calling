@@ -291,8 +291,12 @@ function getQuestionText(questionId, firmConfig) {
 function buildDeterministicQuestion(session, firmConfig) {
   const requiredFields = firmConfig.required_fields || REQUIRED_FIELDS_DEFAULT;
   const missing = requiredFields.filter((field) => !String(session.collected[field] || '').trim());
-  const nextField = missing[0] || null;
-  if (!nextField) return { done: true, nextField: null, nextQuestionId: null, nextQuestionText: '' };
+  if (!missing.length) return { done: true, nextField: null, nextQuestionId: null, nextQuestionText: '' };
+
+  // Scan ALL missing fields for the first one not yet asked (not just missing[0]).
+  // Bug was here: checking only missing[0] meant one filler response could exhaust
+  // the only "unasked" slot and jump straight to final_clarify, skipping all other fields.
+  const nextField = missing.find((f) => !session.askedQuestionIds.includes(f)) ?? missing[0];
 
   if (!session.askedQuestionIds.includes(nextField)) {
     return {
@@ -303,10 +307,11 @@ function buildDeterministicQuestion(session, firmConfig) {
     };
   }
 
+  // Every missing required field has been asked at least once — one final chance
   if (!session.askedQuestionIds.includes('final_clarify')) {
     return {
       done: false,
-      nextField,
+      nextField: missing[0],
       nextQuestionId: 'final_clarify',
       nextQuestionText: getQuestionText('final_clarify', firmConfig),
     };
@@ -625,6 +630,10 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   const requiredFields = firmConfig.required_fields || REQUIRED_FIELDS_DEFAULT;
   const allCollected = requiredFields.every((f) => String(session.collected[f] || '').trim());
 
+  // DEBUG — remove once call flow is verified stable
+  console.log(`[DEBUG][${callSid}] collected=${JSON.stringify(session.collected)}`);
+  console.log(`[DEBUG][${callSid}] askedQuestionIds=${JSON.stringify(session.askedQuestionIds)} turnCount=${session.turnCount} allCollected=${allCollected} reachedQuestionCap=${reachedQuestionCap}`);
+
   // Recompute after mergeExtracted so nextDecision reflects the updated collected fields.
   // The speculative decision above may be stale if extraction filled a previously missing field.
   let nextDecision = buildDeterministicQuestion(session, firmConfig);
@@ -638,6 +647,9 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   }
 
   const done = allCollected || reachedQuestionCap || nextDecision.done;
+
+  // DEBUG — remove once call flow is verified stable
+  console.log(`[DEBUG][${callSid}] nextDecision=${JSON.stringify(nextDecision)} done=${done}`);
   let speakText = firmConfig.closing || DEFAULT_FIRM_CONFIG.closing;
   let nextField = null;
 
