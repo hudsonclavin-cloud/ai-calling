@@ -348,12 +348,13 @@ async function callOpenAiForNextStep({ firmConfig, session, userText }) {
           practice_area: { type: 'string' },
           case_summary: { type: 'string' },
         },
+        required: ['full_name', 'callback_number', 'practice_area', 'case_summary'],
       },
       next_question_id: { type: 'string' },
       next_question_text: { type: 'string' },
-      done_reason: { type: 'string' },
+      done_reason: { anyOf: [{ type: 'string' }, { type: 'null' }] },
     },
-    required: ['extracted', 'next_question_id', 'next_question_text'],
+    required: ['extracted', 'next_question_id', 'next_question_text', 'done_reason'],
   };
 
   const prompt = {
@@ -617,6 +618,7 @@ async function sendEmailNotification(session, firmConfig) {
     }),
   });
 
+  app.log.info({ status: res.status, leadId: session.leadId, to: firmConfig.notification_email }, 'sendEmailNotification response');
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
     throw new Error(`Resend error ${res.status}: ${errText}`);
@@ -650,6 +652,7 @@ async function sendSmsNotification(session, firmConfig) {
     }
   );
 
+  app.log.info({ status: res.status, leadId: session.leadId, to: firmConfig.notification_phone }, 'sendSmsNotification response');
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
     throw new Error(`Twilio SMS error ${res.status}: ${errText}`);
@@ -657,7 +660,14 @@ async function sendSmsNotification(session, firmConfig) {
 }
 
 function fireNotifications(session, firmConfig) {
+  app.log.info({
+    done: session.done,
+    leadId: session.leadId,
+    notification_email: firmConfig.notification_email || '(none)',
+    notification_phone: firmConfig.notification_phone || '(none)',
+  }, 'fireNotifications called');
   if (!session.done) return;
+  app.log.info({ leadId: session.leadId }, 'firing email + SMS notifications');
   sendEmailNotification(session, firmConfig)
     .catch((err) => app.log.warn({ err: String(err), leadId: session.leadId }, 'email notification failed'));
   sendSmsNotification(session, firmConfig)
