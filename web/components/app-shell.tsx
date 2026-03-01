@@ -1,12 +1,13 @@
 import Link from "next/link";
-import { BarChart3, PhoneCall, Settings } from "lucide-react";
+import { BarChart3, Building2, PhoneCall, Settings } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
 const navItems = [
-  { href: "/dashboard", label: "Dashboard", icon: BarChart3 },
-  { href: "/calls", label: "Calls", icon: PhoneCall },
-  { href: "/settings", label: "Settings", icon: Settings },
+  { href: "/dashboard", label: "Dashboard", icon: BarChart3, badge: null },
+  { href: "/clients", label: "Clients", icon: Building2, badge: "ADMIN" },
+  { href: "/calls", label: "Calls", icon: PhoneCall, badge: null },
+  { href: "/settings", label: "Settings", icon: Settings, badge: null },
 ];
 
 export function AppShell({
@@ -51,6 +52,11 @@ export function AppShell({
               >
                 <Icon className="h-4 w-4 shrink-0" />
                 {item.label}
+                {item.badge && (
+                  <span className="ml-auto rounded px-1 py-0.5 text-[9px] font-bold uppercase tracking-wide bg-amber-500/20 text-amber-400">
+                    {item.badge}
+                  </span>
+                )}
               </Link>
             );
           })}

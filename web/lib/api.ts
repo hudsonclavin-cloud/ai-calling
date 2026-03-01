@@ -63,6 +63,23 @@ export async function getSettings(): Promise<FirmSettings | null> {
   }
 }
 
+export async function getFirms(): Promise<FirmSettings[]> {
+  try {
+    const payload = await fetchJson<FirmSettings[] | { data: FirmSettings[] }>("/api/firms");
+    return unwrap(payload, []);
+  } catch {
+    return [];
+  }
+}
+
+export async function updateFirm(id: string, config: Partial<FirmSettings>): Promise<FirmSettings> {
+  const payload = await fetchJson<FirmSettings | { data: FirmSettings }>(`/api/firms/${id}`, {
+    method: "POST",
+    body: JSON.stringify({ ...config, id }),
+  });
+  return unwrap(payload, config as FirmSettings);
+}
+
 export async function createFirm(id: string, config: Partial<FirmSettings>): Promise<FirmSettings> {
   const payload = await fetchJson<FirmSettings | { data: FirmSettings }>(`/api/firms/${id}`, {
     method: "POST",
