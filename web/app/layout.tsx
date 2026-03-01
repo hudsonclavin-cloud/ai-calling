@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 
+import { auth } from "@/auth";
 import { ShellLayout } from "@/components/shell-layout";
 import { getSettings } from "@/lib/api";
 import "./globals.css";
@@ -14,13 +15,14 @@ export default async function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  const settings = await getSettings();
+  const [settings, session] = await Promise.all([getSettings(), auth()]);
   const firmName = settings?.name ?? "Your Firm";
+  const isAdmin = !!session?.user;
 
   return (
     <html lang="en">
       <body className="antialiased">
-        <ShellLayout firmName={firmName}>{children}</ShellLayout>
+        <ShellLayout firmName={firmName} isAdmin={isAdmin}>{children}</ShellLayout>
       </body>
     </html>
   );

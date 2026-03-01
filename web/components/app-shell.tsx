@@ -1,24 +1,31 @@
+"use client";
+
 import Link from "next/link";
-import { BarChart3, Building2, PhoneCall, Settings } from "lucide-react";
+import { BarChart3, Building2, LogOut, PhoneCall, Settings } from "lucide-react";
+import { signOut } from "next-auth/react";
 
 import { cn } from "@/lib/utils";
 
 const navItems = [
-  { href: "/dashboard", label: "Dashboard", icon: BarChart3, badge: null },
-  { href: "/clients", label: "Clients", icon: Building2, badge: "ADMIN" },
-  { href: "/calls", label: "Calls", icon: PhoneCall, badge: null },
-  { href: "/settings", label: "Settings", icon: Settings, badge: null },
+  { href: "/dashboard", label: "Dashboard", icon: BarChart3 },
+  { href: "/clients", label: "Clients", icon: Building2, adminOnly: true },
+  { href: "/calls", label: "Calls", icon: PhoneCall },
+  { href: "/settings", label: "Settings", icon: Settings },
 ];
 
 export function AppShell({
   children,
   pathname,
   firmName,
+  isAdmin,
 }: {
   children: React.ReactNode;
   pathname: string;
   firmName: string;
+  isAdmin: boolean;
 }) {
+  const visibleNav = navItems.filter((item) => !item.adminOnly || isAdmin);
+
   return (
     <div className="flex min-h-screen bg-slate-50">
       {/* ── Sidebar ── */}
@@ -36,7 +43,7 @@ export function AppShell({
 
         {/* Nav */}
         <nav className="flex-1 space-y-0.5 px-3 py-4">
-          {navItems.map((item) => {
+          {visibleNav.map((item) => {
             const Icon = item.icon;
             const active = pathname === item.href || pathname.startsWith(item.href + "/");
             return (
@@ -52,19 +59,32 @@ export function AppShell({
               >
                 <Icon className="h-4 w-4 shrink-0" />
                 {item.label}
-                {item.badge && (
-                  <span className="ml-auto rounded px-1 py-0.5 text-[9px] font-bold uppercase tracking-wide bg-amber-500/20 text-amber-400">
-                    {item.badge}
-                  </span>
-                )}
               </Link>
             );
           })}
         </nav>
 
         {/* Footer */}
-        <div className="border-t border-slate-800 px-5 py-4">
-          <p className="text-xs text-slate-600">Ava Intake v2</p>
+        <div className="border-t border-slate-800 px-4 py-4 space-y-1">
+          {isAdmin && (
+            <button
+              onClick={() => signOut({ callbackUrl: "/login" })}
+              className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-xs font-medium text-slate-500 transition-colors hover:bg-slate-800 hover:text-slate-300"
+            >
+              <LogOut className="h-3.5 w-3.5" />
+              Sign out
+            </button>
+          )}
+          {!isAdmin && (
+            <Link
+              href="/login"
+              className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-xs font-medium text-slate-500 transition-colors hover:bg-slate-800 hover:text-slate-300"
+            >
+              <LogOut className="h-3.5 w-3.5" />
+              Sign out
+            </Link>
+          )}
+          <p className="px-3 text-xs text-slate-700">Ava Intake v2</p>
         </div>
       </aside>
 
