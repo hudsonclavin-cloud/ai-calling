@@ -225,6 +225,10 @@ function createSession({ callSid, firmId, fromPhone, firmConfig }) {
     repromptCount: 0,
     callerType: null,          // null | 'new' | 'returning'
     callerTypeReprompts: 0,    // failed detection attempts before defaulting
+    isUrgent: false,           // true when urgency keywords detected
+    urgencySpoken: false,      // true after urgency acknowledgment has been spoken
+    phoneRetryPending: false,  // true when caller gave digits but extraction failed
+    phoneRetryUsed: false,     // ensures only one phone retry per session
     askedQuestionIds: [],
     collected,
     lastQuestionId: '',
@@ -278,6 +282,11 @@ function detectCallerType(text) {
   return null;
 }
 
+function detectUrgency(text) {
+  const lower = String(text || '').toLowerCase();
+  return /\b(arrested|in jail|emergency|evicted today|court tomorrow|restraining order|accident just happened|in the hospital|at the hospital|injured right now|going to jail|being evicted)\b/.test(lower);
+}
+
 function isLikelyName(value, sourceText) {
   const v = String(value || '').trim();
   if (!v) return false;
@@ -297,6 +306,33 @@ function isLikelyPhone(value) {
 function isLikelySummary(value) {
   const v = String(value || '').trim();
   return v.length >= 40 && v.split(/\s+/).filter(Boolean).length >= 4;
+}
+
+// Aggressive extraction for rambling callers (>100 words).
+// Differs from extractStructuredDeterministic in two ways:
+//  1. Captures case_summary even when name/phone are also present
+//  2. Lowers the case_summary word threshold to 15 words
+function extractAllFieldsFromLongResponse(text) {
+  const words = String(text || '').trim().split(/\s+/).filter(Boolean);
+  if (words.length <= 100) return extractStructuredDeterministic(text);
+
+  const extracted = {};
+  const phoneMatch = text.match(/(\+?\d[\d\s().-]{8,}\d)/);
+  if (phoneMatch) extracted.callback_number = normalizePhone(phoneMatch[1]);
+
+  const nameMatch = text.match(/(?:my name is|this is)\s+([A-Za-z.'\-\s]{2,})/i);
+  if (nameMatch) extracted.full_name = nameMatch[1].trim();
+
+  const lower = text.toLowerCase();
+  if (lower.includes('injury') || lower.includes('accident')) extracted.practice_area = 'Personal Injury';
+  else if (lower.includes('divorce') || lower.includes('custody') || lower.includes('family')) extracted.practice_area = 'Family Law';
+  else if (lower.includes('employment') || lower.includes('termination') || lower.includes('harassment')) extracted.practice_area = 'Employment';
+  else if (lower.includes('immigration') || lower.includes('visa') || lower.includes('deportation')) extracted.practice_area = 'Immigration';
+  else if (lower.includes('criminal') || lower.includes('arrested') || lower.includes('charged')) extracted.practice_area = 'Criminal Defense';
+
+  // Capture full text as case_summary regardless of name/phone presence
+  if (words.length >= 15) extracted.case_summary = text;
+  return extracted;
 }
 
 // ── Question building (uses firm config) ──────────────────────────────────────
@@ -333,6 +369,16 @@ function buildDeterministicQuestion(session, firmConfig) {
       nextField: '__caller_type__',
       nextQuestionId: '__caller_type__',
       nextQuestionText: 'Are you a new or existing client?',
+    };
+  }
+
+  // Phone retry gate: caller gave digits but extraction failed on the callback_number turn
+  if (session.phoneRetryPending) {
+    return {
+      done: false,
+      nextField: 'callback_number',
+      nextQuestionId: '__phone_retry__',
+      nextQuestionText: "I want to make sure I have your number right — could you repeat it slowly?",
     };
   }
 
@@ -393,10 +439,12 @@ async function callOpenAiForNextStep({ firmConfig, session, userText }) {
       next_question_id: { type: 'string' },
       next_question_text: { type: 'string' },
       done_reason: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+      clarifying_note: { anyOf: [{ type: 'string' }, { type: 'null' }] },
     },
-    required: ['extracted', 'next_question_id', 'next_question_text', 'done_reason'],
+    required: ['extracted', 'next_question_id', 'next_question_text', 'done_reason', 'clarifying_note'],
   };
 
+  const wordCount = userText.split(/\s+/).filter(Boolean).length;
   const prompt = {
     firm_name: firmConfig.name,
     ava_name: firmConfig.ava_name || 'Ava',
@@ -407,6 +455,9 @@ async function callOpenAiForNextStep({ firmConfig, session, userText }) {
     asked_question_ids: session.askedQuestionIds,
     current_collected: session.collected,
     user_text: userText,
+    is_rambling: wordCount > 150,
+    word_count: wordCount,
+    caller_is_urgent: session.isUrgent,
     constraints: {
       never_repeat_same_question: true,
       never_legal_advice: true,
@@ -430,7 +481,12 @@ async function callOpenAiForNextStep({ firmConfig, session, userText }) {
           role: 'system',
           content: [{
             type: 'input_text',
-            text: `You are ${firmConfig.ava_name || 'Ava'}, the intake assistant for ${firmConfig.name}. Return only strict JSON per schema. Never provide legal advice. Keep next_question_text short and conversational — under 20 words. If the caller indicates they are new or returning, set caller_type to 'new' or 'returning'. Otherwise set null.`,
+            text: `You are ${firmConfig.ava_name || 'Ava'}, the intake assistant for ${firmConfig.name}. Return only strict JSON per schema. Never provide legal advice. Follow these rules:
+1. Keep next_question_text under 20 words and conversational.
+2. CALLER TYPE: If the caller says they are new or returning, set caller_type to 'new' or 'returning'. Otherwise null.
+3. RAMBLING (is_rambling=true): Extract ALL useful fields from the long response. Move directly to the first MISSING required field — never ask for information already given.
+4. CLARIFYING NOTE: If the caller's answer was vague or ambiguous, set clarifying_note to a brief confirming phrase (max 20 words, e.g. "Just to confirm — you mentioned a car accident."). If the answer was clear, set clarifying_note to null.
+5. URGENCY: caller_is_urgent is set by the server — you do not need to detect it, just ensure next_question_text stays warm and concise.`,
           }],
         },
         { role: 'user', content: [{ type: 'input_text', text: JSON.stringify(prompt) }] },
@@ -729,7 +785,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   const callerText = String(userText || '').trim();
   if (callerText) appendTranscript(session, 'caller', callerText);
 
-  const deterministicExtracted = extractStructuredDeterministic(callerText);
+  const deterministicExtracted = extractAllFieldsFromLongResponse(callerText);
 
   // If callerType is already known from a prior turn, use effectiveConfig for the LLM
   // so it only suggests questions for the fields actually required in this caller's path.
@@ -766,6 +822,11 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   }
   const fieldUpdates = mergeExtracted(session, extracted, callerText, firmConfig);
 
+  // ── Urgency detection ──────────────────────────────────────────────────────
+  if (!session.isUrgent && callerText && detectUrgency(callerText)) {
+    session.isUrgent = true;
+  }
+
   // ── Caller type detection phase ────────────────────────────────────────────
   if (session.callerType === null && callerText) {
     const detected = detectCallerType(callerText)
@@ -782,6 +843,31 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   }
 
   const effectiveConfig = getEffectiveConfig(session, firmConfig);
+
+  // ── Phone retry logic ──────────────────────────────────────────────────────
+  if (!session.phoneRetryUsed && callerText) {
+    if (session.lastQuestionId === '__phone_retry__') {
+      // Retry turn: mark consumed, then try harder digit-stripping extraction
+      session.phoneRetryPending = false;
+      session.phoneRetryUsed = true;
+      if (!fieldUpdates.callback_number) {
+        const digits = callerText.replace(/\D/g, '');
+        if (digits.length >= 10) {
+          const candidate = digits.length === 10 ? `+1${digits}`
+            : digits.length === 11 && digits[0] === '1' ? `+${digits}` : null;
+          if (candidate && isLikelyPhone(candidate)) {
+            session.collected.callback_number = candidate;
+          }
+        }
+      }
+    } else if (session.lastQuestionId === 'callback_number') {
+      // Normal phone turn: if caller gave digits but extraction failed, schedule a retry
+      const digits = callerText.replace(/\D/g, '');
+      if (digits.length >= 7 && !fieldUpdates.callback_number) {
+        session.phoneRetryPending = true;
+      }
+    }
+  }
 
   const maxQ = firmConfig.max_questions || 8;
   const reachedQuestionCap = session.turnCount >= maxQ;
@@ -811,7 +897,22 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
     session.lastQuestionText = nextDecision.nextQuestionText;
     session.askedQuestionIds.push(nextDecision.nextQuestionId);
     nextField = nextDecision.nextField;
-    speakText = composeSpeakText({ session, bodyText: nextDecision.nextQuestionText, callSid, firmConfig: effectiveConfig });
+
+    // Apply optional clarifying note from LLM (capped at 20 words)
+    let questionBody = nextDecision.nextQuestionText;
+    const clarifyNote = String(llm?.clarifying_note || '').trim();
+    if (clarifyNote) {
+      const capped = clarifyNote.split(/\s+/).filter(Boolean).slice(0, 20).join(' ');
+      questionBody = `${capped} ${questionBody}`;
+    }
+
+    speakText = composeSpeakText({ session, bodyText: questionBody, callSid, firmConfig: effectiveConfig });
+
+    // Urgency: replace normal ack with empathetic acknowledgment on first urgent turn
+    if (session.isUrgent && !session.urgencySpoken) {
+      session.urgencySpoken = true;
+      speakText = `That sounds really stressful — I want to make sure we get someone to help you quickly. ${nextDecision.nextQuestionText}`;
+    }
   } else {
     session.done = true;
     session.lastQuestionId = '';
