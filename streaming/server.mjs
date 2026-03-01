@@ -618,7 +618,6 @@ async function sendEmailNotification(session, firmConfig) {
     }),
   });
 
-  app.log.info({ status: res.status, leadId: session.leadId, to: firmConfig.notification_email }, 'sendEmailNotification response');
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
     throw new Error(`Resend error ${res.status}: ${errText}`);
@@ -658,28 +657,14 @@ async function sendSmsNotification(session, firmConfig) {
     }
   );
 
-  const resBody = await res.text().catch(() => '');
-  app.log.info({
-    status: res.status,
-    leadId: session.leadId,
-    from: TWILIO_FROM_NUMBER,
-    to: toPhone,
-    body: resBody,
-  }, 'sendSmsNotification response');
   if (!res.ok) {
+    const resBody = await res.text().catch(() => '');
     throw new Error(`Twilio SMS error ${res.status}: ${resBody}`);
   }
 }
 
 function fireNotifications(session, firmConfig) {
-  app.log.info({
-    done: session.done,
-    leadId: session.leadId,
-    notification_email: firmConfig.notification_email || '(none)',
-    notification_phone: firmConfig.notification_phone || '(none)',
-  }, 'fireNotifications called');
   if (!session.done) return;
-  app.log.info({ leadId: session.leadId }, 'firing email + SMS notifications');
   sendEmailNotification(session, firmConfig)
     .catch((err) => app.log.warn({ err: String(err), leadId: session.leadId }, 'email notification failed'));
   sendSmsNotification(session, firmConfig)
