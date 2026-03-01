@@ -918,6 +918,11 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
     session.lastQuestionId = '';
     session.lastQuestionText = '';
     speakText = effectiveConfig.closing || DEFAULT_FIRM_CONFIG.closing;
+    // Urgency on the final turn: prefix the closing so the caller still hears acknowledgment
+    if (session.isUrgent && !session.urgencySpoken) {
+      session.urgencySpoken = true;
+      speakText = `That sounds really stressful — I want to make sure we get someone to help you quickly. ${speakText}`;
+    }
     sessionAckIndex.delete(callSid);
   }
 
