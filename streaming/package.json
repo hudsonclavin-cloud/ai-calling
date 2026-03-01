@@ -7,7 +7,8 @@
     "dev": "node server.mjs",
     "start:clean": "node scripts/kill-port.mjs && node server.mjs",
     "start": "node server.mjs",
-    "doctor": "node scripts/doctor.mjs"
+    "doctor": "node scripts/doctor.mjs",
+    "postinstall": "npm rebuild better-sqlite3 --build-from-source || npx @mapbox/node-pre-gyp install --fallback-to-build --directory node_modules/better-sqlite3"
   },
   "dependencies": {
     "@fastify/formbody": "^8.0.2",
