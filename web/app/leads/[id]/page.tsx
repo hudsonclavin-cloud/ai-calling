@@ -4,6 +4,7 @@ import { Clock3, ScrollText } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
+import { CopySummaryButton } from "@/components/copy-button";
 import { getLeadById } from "@/lib/api";
 
 export default async function LeadDetailPage({ params }: { params: Promise<{ id: string }> }) {
@@ -18,6 +19,7 @@ export default async function LeadDetailPage({ params }: { params: Promise<{ id:
 
   return (
     <div className="space-y-6">
+      {/* ── Header ── */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold text-slate-900 md:text-3xl">{displayName}</h1>
@@ -28,18 +30,19 @@ export default async function LeadDetailPage({ params }: { params: Promise<{ id:
         <div className="flex items-center gap-2">
           <Badge variant="outline">{lead.status}</Badge>
           {lead.caller_type && (
-            <Badge variant={lead.caller_type === 'returning' ? 'outline' : 'default'}>
-              {lead.caller_type === 'returning' ? 'Returning Client' : 'New Client'}
+            <Badge variant={lead.caller_type === "returning" ? "outline" : "default"}>
+              {lead.caller_type === "returning" ? "Returning Client" : "New Client"}
             </Badge>
           )}
         </div>
       </div>
 
       <div className="grid gap-4 lg:grid-cols-3">
+        {/* Timeline */}
         <Card className="lg:col-span-2">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              <Clock3 className="h-4 w-4 text-sky-700" />
+              <Clock3 className="h-4 w-4 text-violet-600" />
               Timeline
             </CardTitle>
             <CardDescription>Call events and workflow milestones.</CardDescription>
@@ -51,7 +54,7 @@ export default async function LeadDetailPage({ params }: { params: Promise<{ id:
               lead.timeline.map((event, index) => (
                 <div key={`${event.ts}-${index}`} className="rounded-lg border border-slate-200 p-4">
                   <p className="text-sm font-semibold text-slate-900">{event.type}</p>
-                  <p className="text-xs text-slate-500">{new Date(event.ts).toLocaleString()}</p>
+                  <p className="text-xs text-slate-400">{new Date(event.ts).toLocaleString()}</p>
                   <p className="mt-2 text-sm text-slate-700">{event.detail}</p>
                   {index !== lead.timeline.length - 1 ? <Separator className="mt-4" /> : null}
                 </div>
@@ -60,16 +63,21 @@ export default async function LeadDetailPage({ params }: { params: Promise<{ id:
           </CardContent>
         </Card>
 
+        {/* Case Summary */}
         <Card>
-          <CardHeader>
+          <CardHeader className="flex flex-row items-start justify-between gap-2 space-y-0">
             <CardTitle>Case Summary</CardTitle>
+            {lead.case_summary && <CopySummaryButton text={lead.case_summary} />}
           </CardHeader>
           <CardContent>
-            <p className="text-sm text-slate-700">{lead.case_summary || "No summary collected yet."}</p>
+            <p className="text-sm leading-relaxed text-slate-700">
+              {lead.case_summary || "No summary collected yet."}
+            </p>
           </CardContent>
         </Card>
       </div>
 
+      {/* ── Transcript ── */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -82,29 +90,43 @@ export default async function LeadDetailPage({ params }: { params: Promise<{ id:
           {lead.transcript.length === 0 ? (
             <p className="text-sm text-slate-500">No transcript available.</p>
           ) : (
-            <div className="flex max-h-96 flex-col gap-3 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 p-4">
+            <div className="flex max-h-[480px] flex-col gap-4 overflow-y-auto rounded-xl border border-slate-200 bg-slate-50/50 p-4">
               {lead.transcript.map((entry, index) => {
                 const isAssistant = entry.role === "assistant";
                 return (
                   <div
                     key={index}
-                    className={`flex flex-col gap-0.5 ${isAssistant ? "items-start" : "items-end"}`}
+                    className={`flex items-end gap-2.5 ${isAssistant ? "flex-row" : "flex-row-reverse"}`}
                   >
-                    <span className="text-xs font-medium text-slate-400">
-                      {isAssistant ? "Ava" : "Caller"}
-                    </span>
+                    {/* Avatar */}
                     <div
-                      className={`max-w-[80%] rounded-2xl px-4 py-2 text-sm ${
+                      className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${
                         isAssistant
-                          ? "rounded-tl-sm bg-white text-slate-700 shadow-sm ring-1 ring-slate-200"
-                          : "rounded-tr-sm bg-sky-600 text-white"
+                          ? "bg-violet-100 text-violet-700"
+                          : "bg-blue-500 text-white"
                       }`}
                     >
-                      {entry.text}
+                      {isAssistant ? "A" : "C"}
                     </div>
-                    <span className="text-xs text-slate-400">
-                      {new Date(entry.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                    </span>
+
+                    {/* Bubble */}
+                    <div className={`flex max-w-[75%] flex-col gap-1 ${isAssistant ? "items-start" : "items-end"}`}>
+                      <span className="text-xs font-medium text-slate-400">
+                        {isAssistant ? "Ava" : "Caller"}
+                      </span>
+                      <div
+                        className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
+                          isAssistant
+                            ? "rounded-tl-sm bg-white text-slate-700 shadow-sm ring-1 ring-slate-200"
+                            : "rounded-tr-sm bg-blue-50 text-slate-800 ring-1 ring-blue-100"
+                        }`}
+                      >
+                        {entry.text}
+                      </div>
+                      <span className="text-xs text-slate-400">
+                        {new Date(entry.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                      </span>
+                    </div>
                   </div>
                 );
               })}

@@ -816,9 +816,12 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   const llm = llmPromise ? await llmPromise : null;
   // Merge: LLM values win, but only if non-empty — never let an LLM empty string
   // wipe out a good deterministic extraction (e.g. case_summary from long text).
+  // Also, don't let a short LLM case_summary overwrite a good long deterministic one.
   const extracted = { ...deterministicExtracted };
   for (const [k, v] of Object.entries(llm?.extracted || {})) {
-    if (v != null && String(v).trim() !== '') extracted[k] = v;
+    if (v == null || String(v).trim() === '') continue;
+    if (k === 'case_summary' && extracted[k] && !isLikelySummary(String(v).trim())) continue;
+    extracted[k] = v;
   }
   const fieldUpdates = mergeExtracted(session, extracted, callerText, firmConfig);
 

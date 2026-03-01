@@ -1,22 +1,26 @@
 import type { Metadata } from "next";
 
 import { ShellLayout } from "@/components/shell-layout";
+import { getSettings } from "@/lib/api";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "AI Calling Dashboard",
+  title: "Ava — AI Legal Intake",
   description: "Operational command center for legal intake calls and lead workflows.",
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const settings = await getSettings();
+  const firmName = settings?.name ?? "Your Firm";
+
   return (
     <html lang="en">
       <body className="antialiased">
-        <ShellLayout>{children}</ShellLayout>
+        <ShellLayout firmName={firmName}>{children}</ShellLayout>
       </body>
     </html>
   );
