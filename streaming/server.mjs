@@ -731,10 +731,14 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
 
   const deterministicExtracted = extractStructuredDeterministic(callerText);
 
+  // If callerType is already known from a prior turn, use effectiveConfig for the LLM
+  // so it only suggests questions for the fields actually required in this caller's path.
+  const llmConfig = getEffectiveConfig(session, firmConfig);
+
   // Fire OpenAI immediately (parallel with TTS prefetch below)
   let llmPromise = null;
   if (callerText && OPENAI_API_KEY) {
-    llmPromise = callOpenAiForNextStep({ firmConfig, session, userText: callerText }).catch((err) => {
+    llmPromise = callOpenAiForNextStep({ firmConfig: llmConfig, session, userText: callerText }).catch((err) => {
       app.log.warn({ err: String(err), callSid }, 'OpenAI failed; using deterministic fallback');
       return null;
     });
@@ -754,7 +758,12 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   }
 
   const llm = llmPromise ? await llmPromise : null;
-  const extracted = { ...deterministicExtracted, ...(llm?.extracted || {}) };
+  // Merge: LLM values win, but only if non-empty — never let an LLM empty string
+  // wipe out a good deterministic extraction (e.g. case_summary from long text).
+  const extracted = { ...deterministicExtracted };
+  for (const [k, v] of Object.entries(llm?.extracted || {})) {
+    if (v != null && String(v).trim() !== '') extracted[k] = v;
+  }
   const fieldUpdates = mergeExtracted(session, extracted, callerText, firmConfig);
 
   // ── Caller type detection phase ────────────────────────────────────────────
@@ -786,7 +795,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
     const nextId = String(llm.next_question_id || '').trim();
     const nextText = String(llm.next_question_text || '').trim();
     const missing = requiredFields.filter((field) => !String(session.collected[field] || '').trim());
-    if (nextId && nextText && !session.askedQuestionIds.includes(nextId) && missing.length) {
+    if (nextId && nextText && !session.askedQuestionIds.includes(nextId) && missing.includes(nextId) && missing.length) {
       nextDecision = { done: false, nextField: missing[0], nextQuestionId: nextId, nextQuestionText: nextText };
     }
   }
