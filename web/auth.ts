@@ -6,8 +6,8 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   callbacks: {
     async signIn({ profile }) {
       const allowed = process.env.ADMIN_GITHUB_USERNAME;
-      if (!allowed) return false;
       const login = (profile as { login?: string } | null)?.login;
+      if (!allowed) return false;
       return login === allowed;
     },
   },
