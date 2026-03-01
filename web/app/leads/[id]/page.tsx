@@ -25,7 +25,14 @@ export default async function LeadDetailPage({ params }: { params: Promise<{ id:
             {lead.practice_area || "General"} • {lead.callback_number || lead.fromPhone}
           </p>
         </div>
-        <Badge variant="outline">{lead.status}</Badge>
+        <div className="flex items-center gap-2">
+          <Badge variant="outline">{lead.status}</Badge>
+          {lead.caller_type && (
+            <Badge variant={lead.caller_type === 'returning' ? 'outline' : 'default'}>
+              {lead.caller_type === 'returning' ? 'Returning Client' : 'New Client'}
+            </Badge>
+          )}
+        </div>
       </div>
 
       <div className="grid gap-4 lg:grid-cols-3">

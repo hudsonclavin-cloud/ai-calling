@@ -64,6 +64,12 @@ export function initSchema() {
       updatedAt TEXT NOT NULL
     );
   `);
+
+  // Migration: add caller_type column if it doesn't exist yet
+  const leadCols = db.prepare('PRAGMA table_info(leads)').all().map(c => c.name);
+  if (!leadCols.includes('caller_type')) {
+    db.exec("ALTER TABLE leads ADD COLUMN caller_type TEXT NOT NULL DEFAULT ''");
+  }
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -106,13 +112,14 @@ function _saveCalls(calls) {
 function _saveLeads(leads) {
   const db = getDb();
   const stmt = db.prepare(`
-    INSERT INTO leads (id, firmId, fromPhone, full_name, callback_number, practice_area, case_summary, status, lastCallSid, createdAt, updatedAt, transcript, timeline)
-    VALUES (@id, @firmId, @fromPhone, @full_name, @callback_number, @practice_area, @case_summary, @status, @lastCallSid, @createdAt, @updatedAt, @transcript, @timeline)
+    INSERT INTO leads (id, firmId, fromPhone, full_name, callback_number, practice_area, case_summary, caller_type, status, lastCallSid, createdAt, updatedAt, transcript, timeline)
+    VALUES (@id, @firmId, @fromPhone, @full_name, @callback_number, @practice_area, @case_summary, @caller_type, @status, @lastCallSid, @createdAt, @updatedAt, @transcript, @timeline)
     ON CONFLICT(id) DO UPDATE SET
       full_name       = excluded.full_name,
       callback_number = excluded.callback_number,
       practice_area   = excluded.practice_area,
       case_summary    = excluded.case_summary,
+      caller_type     = excluded.caller_type,
       status          = excluded.status,
       lastCallSid     = excluded.lastCallSid,
       updatedAt       = excluded.updatedAt,
@@ -123,6 +130,7 @@ function _saveLeads(leads) {
     for (const l of list) {
       stmt.run({
         ...l,
+        caller_type: l.caller_type || '',
         transcript: JSON.stringify(l.transcript || []),
         timeline:   JSON.stringify(l.timeline   || []),
       });
@@ -225,14 +233,15 @@ export async function persistSessionArtifacts(session, { assistantText, callerTe
 
     if (!existingLead) {
       db.prepare(`
-        INSERT INTO leads (id, firmId, fromPhone, full_name, callback_number, practice_area, case_summary, status, lastCallSid, createdAt, updatedAt, transcript, timeline)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO leads (id, firmId, fromPhone, full_name, callback_number, practice_area, case_summary, caller_type, status, lastCallSid, createdAt, updatedAt, transcript, timeline)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         session.leadId, session.firmId, session.fromPhone,
         session.collected.full_name       || '',
         session.collected.callback_number || session.fromPhone,
         session.collected.practice_area   || '',
         session.collected.case_summary    || '',
+        session.callerType                || '',
         done ? 'ready_for_review' : 'in_progress',
         session.callSid,
         now, now,
@@ -245,7 +254,7 @@ export async function persistSessionArtifacts(session, { assistantText, callerTe
       const timeline = JSON.parse(existingLead.timeline || '[]');
       db.prepare(`
         UPDATE leads
-        SET full_name = ?, callback_number = ?, practice_area = ?, case_summary = ?,
+        SET full_name = ?, callback_number = ?, practice_area = ?, case_summary = ?, caller_type = ?,
             status = ?, lastCallSid = ?, updatedAt = ?, transcript = ?, timeline = ?
         WHERE id = ?
       `).run(
@@ -253,6 +262,7 @@ export async function persistSessionArtifacts(session, { assistantText, callerTe
         session.collected.callback_number || existingLead.callback_number,
         session.collected.practice_area   || existingLead.practice_area,
         session.collected.case_summary    || existingLead.case_summary,
+        session.callerType                || existingLead.caller_type || '',
         done ? 'ready_for_review' : 'in_progress',
         session.callSid, now,
         JSON.stringify(transcript),

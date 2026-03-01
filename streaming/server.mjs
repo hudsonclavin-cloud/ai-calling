@@ -204,9 +204,16 @@ function normalizePhone(raw) {
 // ── Session ───────────────────────────────────────────────────────────────────
 
 function createSession({ callSid, firmId, fromPhone, firmConfig }) {
+  // Always initialize all default fields; effectiveConfig controls which are required
   const collected = {};
-  for (const field of (firmConfig.required_fields || REQUIRED_FIELDS_DEFAULT)) {
+  for (const field of REQUIRED_FIELDS_DEFAULT) {
     collected[field] = field === 'callback_number' ? (fromPhone || '') : '';
+  }
+  // Also initialize any firm-specific fields not in the default set
+  for (const field of (firmConfig.required_fields || REQUIRED_FIELDS_DEFAULT)) {
+    if (!(field in collected)) {
+      collected[field] = field === 'callback_number' ? (fromPhone || '') : '';
+    }
   }
   return {
     callSid,
@@ -216,6 +223,8 @@ function createSession({ callSid, firmId, fromPhone, firmConfig }) {
     leadId: `lead_${sha1(`${firmId}|${fromPhone}`)}`,
     turnCount: 0,
     repromptCount: 0,
+    callerType: null,          // null | 'new' | 'returning'
+    callerTypeReprompts: 0,    // failed detection attempts before defaulting
     askedQuestionIds: [],
     collected,
     lastQuestionId: '',
@@ -262,6 +271,13 @@ function extractStructuredDeterministic(userText) {
   return extracted;
 }
 
+function detectCallerType(text) {
+  const lower = String(text || '').toLowerCase();
+  if (/\b(new|first[\s-]?time|never called|first call|new client)\b/.test(lower)) return 'new';
+  if (/\b(existing|returning|current client|already (working|have a case)|i have a case)\b/.test(lower)) return 'returning';
+  return null;
+}
+
 function isLikelyName(value, sourceText) {
   const v = String(value || '').trim();
   if (!v) return false;
@@ -296,7 +312,30 @@ function getQuestionText(questionId, firmConfig) {
   return base;
 }
 
+function getEffectiveConfig(session, firmConfig) {
+  if (session.callerType !== 'returning') return firmConfig;
+  return {
+    ...firmConfig,
+    required_fields: ['full_name', 'case_summary'],
+    question_overrides: {
+      ...firmConfig.question_overrides,
+      case_summary: "Got it. And briefly, what's the reason for your call today?",
+    },
+    closing: "Perfect. I'll let the team know you called. Someone will be in touch shortly.",
+  };
+}
+
 function buildDeterministicQuestion(session, firmConfig) {
+  // Pre-intake gate: must determine caller type before normal questions
+  if (session.callerType === null) {
+    return {
+      done: false,
+      nextField: '__caller_type__',
+      nextQuestionId: '__caller_type__',
+      nextQuestionText: 'Are you a new or existing client?',
+    };
+  }
+
   const requiredFields = firmConfig.required_fields || REQUIRED_FIELDS_DEFAULT;
   const missing = requiredFields.filter((field) => !String(session.collected[field] || '').trim());
   if (!missing.length) return { done: true, nextField: null, nextQuestionId: null, nextQuestionText: '' };
@@ -347,8 +386,9 @@ async function callOpenAiForNextStep({ firmConfig, session, userText }) {
           callback_number: { type: 'string' },
           practice_area: { type: 'string' },
           case_summary: { type: 'string' },
+          caller_type: { anyOf: [{ type: 'string' }, { type: 'null' }] },
         },
-        required: ['full_name', 'callback_number', 'practice_area', 'case_summary'],
+        required: ['full_name', 'callback_number', 'practice_area', 'case_summary', 'caller_type'],
       },
       next_question_id: { type: 'string' },
       next_question_text: { type: 'string' },
@@ -390,7 +430,7 @@ async function callOpenAiForNextStep({ firmConfig, session, userText }) {
           role: 'system',
           content: [{
             type: 'input_text',
-            text: `You are ${firmConfig.ava_name || 'Ava'}, the intake assistant for ${firmConfig.name}. Return only strict JSON per schema. Never provide legal advice. Keep next_question_text short and conversational — under 20 words.`,
+            text: `You are ${firmConfig.ava_name || 'Ava'}, the intake assistant for ${firmConfig.name}. Return only strict JSON per schema. Never provide legal advice. Keep next_question_text short and conversational — under 20 words. If the caller indicates they are new or returning, set caller_type to 'new' or 'returning'. Otherwise set null.`,
           }],
         },
         { role: 'user', content: [{ type: 'input_text', text: JSON.stringify(prompt) }] },
@@ -441,9 +481,9 @@ function composeSpeakText({ session, bodyText, callSid, firmConfig }) {
 
   if (!session.disclaimerShown) {
     session.disclaimerShown = true;
-    // First turn: play the firm's opening greeting, ignoring bodyText
     const opening = firmConfig.opening || `Hi, this is ${firmConfig.ava_name || 'Ava'}, the attorney's assistant.`;
-    return opening;
+    // On first turn, append the caller type question so the caller knows what to say
+    return session.callerType === null && trimmed ? `${opening} ${trimmed}` : opening;
   }
 
   const ack = getNextAck(callSid || session.callSid, firmConfig);
@@ -717,14 +757,31 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   const extracted = { ...deterministicExtracted, ...(llm?.extracted || {}) };
   const fieldUpdates = mergeExtracted(session, extracted, callerText, firmConfig);
 
+  // ── Caller type detection phase ────────────────────────────────────────────
+  if (session.callerType === null && callerText) {
+    const detected = detectCallerType(callerText)
+      || (llm?.extracted?.caller_type && ['new', 'returning'].includes(llm.extracted.caller_type)
+          ? llm.extracted.caller_type : null);
+    if (detected) {
+      session.callerType = detected;
+    } else {
+      session.callerTypeReprompts += 1;
+      if (session.callerTypeReprompts > 1) {
+        session.callerType = 'new'; // default after 1 failed reprompt
+      }
+    }
+  }
+
+  const effectiveConfig = getEffectiveConfig(session, firmConfig);
+
   const maxQ = firmConfig.max_questions || 8;
   const reachedQuestionCap = session.turnCount >= maxQ;
-  const requiredFields = firmConfig.required_fields || REQUIRED_FIELDS_DEFAULT;
+  const requiredFields = effectiveConfig.required_fields || REQUIRED_FIELDS_DEFAULT;
   const allCollected = requiredFields.every((f) => String(session.collected[f] || '').trim());
 
   // Recompute after mergeExtracted so nextDecision reflects the updated collected fields.
   // The speculative decision above may be stale if extraction filled a previously missing field.
-  let nextDecision = buildDeterministicQuestion(session, firmConfig);
+  let nextDecision = buildDeterministicQuestion(session, effectiveConfig);
   if (!allCollected && !reachedQuestionCap && llm) {
     const nextId = String(llm.next_question_id || '').trim();
     const nextText = String(llm.next_question_text || '').trim();
@@ -736,7 +793,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
 
   const done = allCollected || reachedQuestionCap || nextDecision.done;
 
-  let speakText = firmConfig.closing || DEFAULT_FIRM_CONFIG.closing;
+  let speakText = effectiveConfig.closing || DEFAULT_FIRM_CONFIG.closing;
   let nextField = null;
 
   if (!done) {
@@ -745,12 +802,12 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
     session.lastQuestionText = nextDecision.nextQuestionText;
     session.askedQuestionIds.push(nextDecision.nextQuestionId);
     nextField = nextDecision.nextField;
-    speakText = composeSpeakText({ session, bodyText: nextDecision.nextQuestionText, callSid, firmConfig });
+    speakText = composeSpeakText({ session, bodyText: nextDecision.nextQuestionText, callSid, firmConfig: effectiveConfig });
   } else {
     session.done = true;
     session.lastQuestionId = '';
     session.lastQuestionText = '';
-    speakText = firmConfig.closing || DEFAULT_FIRM_CONFIG.closing;
+    speakText = effectiveConfig.closing || DEFAULT_FIRM_CONFIG.closing;
     sessionAckIndex.delete(callSid);
   }
 
