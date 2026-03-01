@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { BarChart3, Building2, LogOut, PhoneCall, Settings } from "lucide-react";
+import { BarChart3, Building2, LogOut, PhoneCall, Settings, Users } from "lucide-react";
 import { signOut } from "next-auth/react";
 
 import { cn } from "@/lib/utils";
@@ -9,6 +9,7 @@ import { cn } from "@/lib/utils";
 const navItems = [
   { href: "/dashboard", label: "Dashboard", icon: BarChart3 },
   { href: "/clients", label: "Clients", icon: Building2, adminOnly: true },
+  { href: "/leads", label: "Leads", icon: Users },
   { href: "/calls", label: "Calls", icon: PhoneCall },
   { href: "/settings", label: "Settings", icon: Settings },
 ];

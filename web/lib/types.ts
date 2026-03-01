@@ -40,6 +40,7 @@ export interface LeadSummary {
   callback_number: string;
   practice_area: string;
   case_summary: string;
+  caller_type: string;
   status: string;
   lastCallSid: string;
   createdAt: string;
