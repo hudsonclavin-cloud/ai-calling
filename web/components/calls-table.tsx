@@ -1,6 +1,8 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import { PhoneCall } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -10,9 +12,9 @@ import type { CallRecord, CallStatus } from "@/lib/types";
 
 const statusOrder: Array<CallStatus | "all"> = ["all", "in_progress", "completed"];
 
-function statusVariant(status: CallStatus): "success" | "warning" | "danger" {
+function statusVariant(status: CallStatus): "success" | "info" {
   if (status === "completed") return "success";
-  return "warning";
+  return "info";
 }
 
 function formatDuration(startedAt: string, endedAt: string | null): string {
@@ -36,6 +38,7 @@ function formatStatus(status: CallStatus): string {
 }
 
 export function CallsTable({ calls }: { calls: CallRecord[] }) {
+  const router = useRouter();
   const [statusFilter, setStatusFilter] = useState<(typeof statusOrder)[number]>("all");
   const [practiceAreaFilter, setPracticeAreaFilter] = useState("all");
 
@@ -91,13 +94,25 @@ export function CallsTable({ calls }: { calls: CallRecord[] }) {
           <TableBody>
             {filtered.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={6} className="py-8 text-center text-sm text-slate-500">
-                  No calls to display.
+                <TableCell colSpan={6}>
+                  <div className="flex flex-col items-center justify-center gap-2 py-16 text-slate-400">
+                    <PhoneCall className="h-8 w-8 opacity-40" />
+                    <p className="text-sm font-medium text-slate-500">No calls found</p>
+                    <p className="text-xs">
+                      {statusFilter !== "all" || practiceAreaFilter !== "all"
+                        ? "Try adjusting your filters"
+                        : "Calls will appear here as they come in"}
+                    </p>
+                  </div>
                 </TableCell>
               </TableRow>
             ) : (
               filtered.map((call) => (
-                <TableRow key={call.id}>
+                <TableRow
+                  key={call.id}
+                  className="cursor-pointer hover:bg-slate-50"
+                  onClick={() => router.push(`/leads/${call.leadId}`)}
+                >
                   <TableCell>
                     {new Date(call.startedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                   </TableCell>
