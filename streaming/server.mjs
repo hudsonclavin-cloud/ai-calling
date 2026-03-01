@@ -658,10 +658,16 @@ async function sendSmsNotification(session, firmConfig) {
     }
   );
 
-  app.log.info({ status: res.status, leadId: session.leadId, to: toPhone }, 'sendSmsNotification response');
+  const resBody = await res.text().catch(() => '');
+  app.log.info({
+    status: res.status,
+    leadId: session.leadId,
+    from: TWILIO_FROM_NUMBER,
+    to: toPhone,
+    body: resBody,
+  }, 'sendSmsNotification response');
   if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    throw new Error(`Twilio SMS error ${res.status}: ${errText}`);
+    throw new Error(`Twilio SMS error ${res.status}: ${resBody}`);
   }
 }
 
