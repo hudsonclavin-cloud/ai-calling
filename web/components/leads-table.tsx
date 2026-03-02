@@ -104,8 +104,15 @@ export function LeadsTable({ leads }: { leads: LeadSummary[] }) {
                   className="cursor-pointer hover:bg-slate-50"
                   onClick={() => router.push(`/leads/${lead.id}`)}
                 >
-                  <TableCell className="font-medium text-slate-900">
-                    {lead.full_name || lead.fromPhone || "—"}
+                  <TableCell>
+                    <div className="flex items-center gap-3">
+                      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-xs font-semibold text-slate-600">
+                        {(lead.full_name || lead.fromPhone || "?").charAt(0).toUpperCase()}
+                      </div>
+                      <span className="font-medium text-slate-900">
+                        {lead.full_name || lead.fromPhone || "—"}
+                      </span>
+                    </div>
                   </TableCell>
                   <TableCell>{lead.practice_area || "—"}</TableCell>
                   <TableCell>
