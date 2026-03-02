@@ -7,12 +7,11 @@
     "dev": "node server.mjs",
     "start:clean": "node scripts/kill-port.mjs && node server.mjs",
     "start": "node server.mjs",
-    "doctor": "node scripts/doctor.mjs",
-    "postinstall": "npm rebuild better-sqlite3 --build-from-source || npx @mapbox/node-pre-gyp install --fallback-to-build --directory node_modules/better-sqlite3"
+    "doctor": "node scripts/doctor.mjs"
   },
   "dependencies": {
     "@fastify/formbody": "^8.0.2",
-    "better-sqlite3": "^12.6.2",
+    "@libsql/client": "^0.14.0",
     "dotenv": "^17.2.3",
     "fastify": "^5.6.2",
     "wavefile": "^11.0.0"

@@ -178,7 +178,7 @@ async function ensureDataFiles() {
   }
 
   // Initialize SQLite schema and migrate any existing JSON data on first run
-  initSchema();
+  await initSchema();
   await migrateFromJson({
     callsFile:    CALLS_FILE,
     leadsFile:    LEADS_FILE,
