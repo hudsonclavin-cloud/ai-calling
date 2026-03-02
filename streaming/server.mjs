@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import Fastify from 'fastify';
 import formbody from '@fastify/formbody';
+import Stripe from 'stripe';
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -33,6 +34,11 @@ const RESEND_FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.de
 const TWILIO_ACCOUNT_SID  = process.env.TWILIO_ACCOUNT_SID  || '';
 const TWILIO_AUTH_TOKEN   = process.env.TWILIO_AUTH_TOKEN   || '';
 const TWILIO_FROM_NUMBER  = process.env.TWILIO_FROM_NUMBER  || '';
+
+const STRIPE_SECRET_KEY     = process.env.STRIPE_SECRET_KEY     || '';
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
+const STRIPE_PRICE_ID       = process.env.STRIPE_PRICE_ID       || '';
+const WEB_BASE_URL          = process.env.WEB_BASE_URL          || 'http://localhost:3000';
 
 const REQUIRED_FIELDS_DEFAULT = ['full_name', 'callback_number', 'practice_area', 'case_summary'];
 
@@ -74,8 +80,17 @@ const DEFAULT_FIRM_CONFIG = {
   notification_phone: '',
 };
 
+const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
+
 const app = Fastify({ logger: true });
 await app.register(formbody);
+
+// Capture raw body for Stripe webhook signature verification
+app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (req, body, done) => {
+  req.rawBody = body;
+  try { done(null, JSON.parse(body.toString())); }
+  catch (err) { done(err); }
+});
 
 // ── Per-session ack index (avoids repeated acknowledgments) ──────────────────
 const sessionAckIndex = new Map();
@@ -1153,6 +1168,106 @@ app.post('/twiml', async (req, reply) => {
     reply.header('Content-Type', 'text/xml');
     return reply.send(doneTwiml({ speakText: 'Sorry, there was a technical issue. Please call again.', ttsKey: null }));
   }
+});
+
+// ── Stripe billing routes ─────────────────────────────────────────────────────
+
+// POST /api/billing/checkout — creates a Stripe Checkout session for a firm
+app.post('/api/billing/checkout', async (req, reply) => {
+  if (!stripe) return reply.code(503).send({ error: 'Billing not configured' });
+  const firmId = String(req.body?.firmId || '').trim();
+  if (!firmId) return reply.code(400).send({ error: 'firmId required' });
+  if (!STRIPE_PRICE_ID) return reply.code(503).send({ error: 'STRIPE_PRICE_ID not set' });
+
+  const firm = await loadFirmConfig(firmId);
+
+  // Reuse existing customer or create a new one
+  let customerId = firm.stripe_customer_id || null;
+  if (!customerId) {
+    const customer = await stripe.customers.create({
+      name: firm.name || firmId,
+      metadata: { firmId },
+    });
+    customerId = customer.id;
+    await saveFirmConfig(firmId, { ...firm, stripe_customer_id: customerId });
+  }
+
+  const session = await stripe.checkout.sessions.create({
+    customer: customerId,
+    mode: 'subscription',
+    line_items: [{ price: STRIPE_PRICE_ID, quantity: 1 }],
+    success_url: `${WEB_BASE_URL}/billing/success?firmId=${encodeURIComponent(firmId)}`,
+    cancel_url: `${WEB_BASE_URL}/billing/cancel?firmId=${encodeURIComponent(firmId)}`,
+    metadata: { firmId },
+  });
+
+  return { url: session.url };
+});
+
+// POST /api/billing/portal — opens Stripe Customer Portal for a firm
+app.post('/api/billing/portal', async (req, reply) => {
+  if (!stripe) return reply.code(503).send({ error: 'Billing not configured' });
+  const firmId = String(req.body?.firmId || '').trim();
+  if (!firmId) return reply.code(400).send({ error: 'firmId required' });
+
+  const firm = await loadFirmConfig(firmId);
+  if (!firm.stripe_customer_id) {
+    return reply.code(400).send({ error: 'No billing account found for this firm' });
+  }
+
+  const session = await stripe.billingPortal.sessions.create({
+    customer: firm.stripe_customer_id,
+    return_url: `${WEB_BASE_URL}/clients/${firmId}`,
+  });
+
+  return { url: session.url };
+});
+
+// POST /api/billing/webhook — Stripe webhook handler
+app.post('/api/billing/webhook', async (req, reply) => {
+  if (!stripe) return reply.code(503).send({ error: 'Billing not configured' });
+
+  const sig = req.headers['stripe-signature'];
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(req.rawBody, sig, STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    app.log.warn({ err: String(err) }, 'Stripe webhook signature verification failed');
+    return reply.code(400).send({ error: 'Invalid signature' });
+  }
+
+  const obj = event.data.object;
+
+  if (event.type === 'checkout.session.completed') {
+    const firmId = obj.metadata?.firmId;
+    if (firmId) {
+      const firm = await loadFirmConfig(firmId);
+      await saveFirmConfig(firmId, {
+        ...firm,
+        stripe_customer_id: obj.customer,
+        stripe_subscription_id: obj.subscription,
+        billing_status: 'active',
+      });
+    }
+  } else if (event.type === 'customer.subscription.updated') {
+    const firmId = obj.metadata?.firmId;
+    if (firmId) {
+      const firm = await loadFirmConfig(firmId);
+      await saveFirmConfig(firmId, {
+        ...firm,
+        stripe_subscription_id: obj.id,
+        billing_status: obj.status === 'active' ? 'active' : obj.status,
+      });
+    }
+  } else if (event.type === 'customer.subscription.deleted') {
+    const firmId = obj.metadata?.firmId;
+    if (firmId) {
+      const firm = await loadFirmConfig(firmId);
+      await saveFirmConfig(firmId, { ...firm, billing_status: 'canceled' });
+    }
+  }
+
+  return { received: true };
 });
 
 // ── Boot ──────────────────────────────────────────────────────────────────────

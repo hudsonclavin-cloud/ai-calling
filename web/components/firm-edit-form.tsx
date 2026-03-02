@@ -10,7 +10,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { SelectNative } from "@/components/ui/select-native";
 import { Textarea } from "@/components/ui/textarea";
-import { updateFirm } from "@/lib/api";
+import { createBillingPortal, createCheckoutSession, updateFirm } from "@/lib/api";
+import { Badge } from "@/components/ui/badge";
 import type { FirmSettings } from "@/lib/types";
 
 const TONES = [
@@ -32,6 +33,7 @@ export function FirmEditForm({
   );
   const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [copied, setCopied] = useState(false);
+  const [billingLoading, setBillingLoading] = useState(false);
 
   function set<K extends keyof FirmSettings>(key: K, value: FirmSettings[K]) {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -41,6 +43,18 @@ export function FirmEditForm({
     await navigator.clipboard.writeText(webhookUrl);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  }
+
+  async function handleBilling() {
+    setBillingLoading(true);
+    try {
+      const url = form.stripe_customer_id
+        ? await createBillingPortal(form.id)
+        : await createCheckoutSession(form.id);
+      window.location.href = url;
+    } catch {
+      setBillingLoading(false);
+    }
   }
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
@@ -207,6 +221,46 @@ export function FirmEditForm({
               onChange={(e) => set("closing", e.target.value)}
             />
           </div>
+        </CardContent>
+      </Card>
+
+      {/* ── Billing ── */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Billing</CardTitle>
+        </CardHeader>
+        <CardContent className="flex items-center justify-between gap-4">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-slate-700">Subscription</span>
+              {form.billing_status === "active" ? (
+                <Badge variant="success">Active</Badge>
+              ) : form.billing_status === "canceled" ? (
+                <Badge variant="danger">Canceled</Badge>
+              ) : form.billing_status ? (
+                <Badge variant="warning">{form.billing_status}</Badge>
+              ) : (
+                <Badge variant="outline">Not set up</Badge>
+              )}
+            </div>
+            <p className="text-xs text-slate-400">
+              {form.stripe_customer_id
+                ? "Manage your plan, invoices, and payment method."
+                : "Subscribe to activate intake calls for this firm."}
+            </p>
+          </div>
+          <Button
+            type="button"
+            variant={form.stripe_customer_id ? "outline" : "default"}
+            disabled={billingLoading}
+            onClick={handleBilling}
+          >
+            {billingLoading
+              ? "Redirecting…"
+              : form.stripe_customer_id
+              ? "Manage Billing"
+              : "Set Up Billing"}
+          </Button>
         </CardContent>
       </Card>
 

@@ -82,4 +82,7 @@ export interface FirmSettings {
   intake_rules: string;
   notification_email: string;
   notification_phone: string;
+  stripe_customer_id?: string;
+  stripe_subscription_id?: string;
+  billing_status?: string;
 }
