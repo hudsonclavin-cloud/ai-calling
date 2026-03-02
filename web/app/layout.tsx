@@ -15,7 +15,7 @@ export default async function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  const [settings, session] = await Promise.all([getSettings(), auth()]);
+  const [settings, session] = await Promise.all([getSettings(), auth().catch(() => null)]);
   const firmName = settings?.name ?? "Your Firm";
   const isAdmin = !!session?.user;
 
