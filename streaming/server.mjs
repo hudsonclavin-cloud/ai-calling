@@ -1019,22 +1019,28 @@ app.post('/api/firms/:id', async (req, reply) => {
   return { data: updated };
 });
 
-app.get('/api/calls', async () => {
-  const calls = await loadCalls();
+app.get('/api/calls', async (req) => {
+  const firmId = String(req.query?.firmId || '').trim();
+  let calls = await loadCalls();
+  if (firmId) calls = calls.filter((c) => c.firmId === firmId);
   calls.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
   return { data: calls.slice(0, 100) };
 });
 
-app.get('/api/leads', async () => {
-  const leads = await loadLeads();
+app.get('/api/leads', async (req) => {
+  const firmId = String(req.query?.firmId || '').trim();
+  let leads = await loadLeads();
+  if (firmId) leads = leads.filter((l) => l.firmId === firmId);
   leads.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
   return { data: leads };
 });
 
 app.get('/api/leads/:id', async (req, reply) => {
+  const firmId = String(req.query?.firmId || '').trim();
   const leads = await loadLeads();
   const lead = leads.find((x) => x.id === req.params.id);
   if (!lead) return reply.code(404).send({ error: 'Lead not found' });
+  if (firmId && lead.firmId !== firmId) return reply.code(404).send({ error: 'Lead not found' });
   return { data: lead };
 });
 
