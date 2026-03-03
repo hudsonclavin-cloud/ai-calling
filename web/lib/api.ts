@@ -102,12 +102,19 @@ export async function saveSettings(nextSettings: FirmSettings): Promise<FirmSett
   }
 }
 
-export async function createCheckoutSession(firmId: string): Promise<string> {
+export async function createCheckoutSession(firmId: string, fromSignup = false): Promise<string> {
   const payload = await fetchJson<{ url: string }>("/api/billing/checkout", {
+    method: "POST",
+    body: JSON.stringify({ firmId, fromSignup }),
+  });
+  return payload.url;
+}
+
+export async function sendSetupInstructions(firmId: string): Promise<void> {
+  await fetchJson("/api/resend-instructions", {
     method: "POST",
     body: JSON.stringify({ firmId }),
   });
-  return payload.url;
 }
 
 export async function createBillingPortal(firmId: string): Promise<string> {

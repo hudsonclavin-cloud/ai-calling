@@ -698,6 +698,61 @@ function appendTranscript(session, role, text) {
   session.transcript.push({ role, text: t, ts: nowIso() });
 }
 
+// ── Welcome email (sent once when a new firm is created via self-serve signup) ─
+
+function buildWelcomeEmailHtml({ firm, webhookUrl, dashboardUrl }) {
+  const name = firm.ava_name || 'Ava';
+  return `
+<!DOCTYPE html>
+<html>
+<body style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;color:#1e293b">
+  <h2 style="color:#0ea5e9">Your ${name} AI assistant is ready!</h2>
+  <p>Hi ${firm.contact_name || 'there'},</p>
+  <p>Your AI intake assistant is set up and ready to go. Follow the steps below to connect it to your Twilio phone number.</p>
+
+  <h3>Your Webhook URL</h3>
+  <div style="background:#f1f5f9;border-radius:6px;padding:12px;font-family:monospace;font-size:13px;word-break:break-all">
+    ${webhookUrl}
+  </div>
+
+  <h3>Twilio Setup Steps</h3>
+  <ol style="line-height:1.8">
+    <li>Go to <a href="https://console.twilio.com">console.twilio.com</a> → Phone Numbers</li>
+    <li>Click your phone number</li>
+    <li>Under <strong>Voice &amp; Fax</strong> → "A Call Comes In", set to <strong>Webhook (HTTP POST)</strong></li>
+    <li>Paste your webhook URL above</li>
+    <li>Click <strong>Save</strong></li>
+  </ol>
+
+  <p>Once configured, ${name} will automatically answer calls and capture lead information for your team.</p>
+
+  <p><a href="${dashboardUrl}" style="display:inline-block;background:#0ea5e9;color:white;padding:10px 20px;border-radius:6px;text-decoration:none;font-weight:600">Go to my dashboard →</a></p>
+
+  <p style="color:#64748b;font-size:13px">Questions? Reply to this email and we'll help you get set up.</p>
+</body>
+</html>
+`.trim();
+}
+
+async function sendWelcomeEmail(firm) {
+  const webhookUrl = `${PUBLIC_BASE_URL}/twiml?firmId=${firm.id}`;
+  const dashboardUrl = `${WEB_BASE_URL}/dashboard?firmId=${firm.id}`;
+  const res = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      from: RESEND_FROM_EMAIL,
+      to: [firm.notification_email],
+      subject: `Your ${firm.ava_name || 'Ava'} AI assistant is ready — Twilio setup instructions`,
+      html: buildWelcomeEmailHtml({ firm, webhookUrl, dashboardUrl }),
+    }),
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`Resend error ${res.status}: ${errText}`);
+  }
+}
+
 // ── Notifications ─────────────────────────────────────────────────────────────
 // Both functions are async and throw on failure so the caller can log the error.
 // Use fireNotifications() to call them fire-and-forget after a call completes.
@@ -1024,6 +1079,7 @@ app.post('/api/firms/:id', async (req, reply) => {
   if (!id) return reply.code(400).send({ error: 'firm id required' });
 
   const existing = await loadFirmConfig(id);
+  const isNew = existing.id !== id;
   const updated = {
     ...DEFAULT_FIRM_CONFIG,
     ...existing,
@@ -1032,6 +1088,11 @@ app.post('/api/firms/:id', async (req, reply) => {
     question_overrides: { ...DEFAULT_FIRM_CONFIG.question_overrides, ...(existing.question_overrides || {}), ...(req.body?.question_overrides || {}) },
   };
   await saveFirmConfig(id, updated);
+  if (isNew && updated.notification_email && RESEND_API_KEY) {
+    sendWelcomeEmail(updated).catch((err) =>
+      app.log.warn({ err: String(err) }, 'welcome email failed')
+    );
+  }
   return { data: updated };
 });
 
@@ -1193,11 +1254,13 @@ app.post('/api/billing/checkout', async (req, reply) => {
     await saveFirmConfig(firmId, { ...firm, stripe_customer_id: customerId });
   }
 
+  const fromSignup = req.body?.fromSignup === true;
+  const successUrl = `${WEB_BASE_URL}/billing/success?firmId=${encodeURIComponent(firmId)}${fromSignup ? '&signup=1' : ''}`;
   const session = await stripe.checkout.sessions.create({
     customer: customerId,
     mode: 'subscription',
     line_items: [{ price: STRIPE_PRICE_ID, quantity: 1 }],
-    success_url: `${WEB_BASE_URL}/billing/success?firmId=${encodeURIComponent(firmId)}`,
+    success_url: successUrl,
     cancel_url: `${WEB_BASE_URL}/billing/cancel?firmId=${encodeURIComponent(firmId)}`,
     metadata: { firmId },
   });
@@ -1222,6 +1285,17 @@ app.post('/api/billing/portal', async (req, reply) => {
   });
 
   return { url: session.url };
+});
+
+// POST /api/resend-instructions — resend Twilio setup email to a firm
+app.post('/api/resend-instructions', async (req, reply) => {
+  const firmId = String(req.body?.firmId || '').trim();
+  if (!firmId) return reply.code(400).send({ error: 'firmId required' });
+  const firm = await loadFirmConfig(firmId);
+  if (!firm.notification_email) return reply.code(400).send({ error: 'No notification email on file' });
+  if (!RESEND_API_KEY) return reply.code(503).send({ error: 'Email not configured' });
+  await sendWelcomeEmail(firm);
+  return { ok: true };
 });
 
 // POST /api/billing/webhook — Stripe webhook handler

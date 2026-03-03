@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import { signIn } from "next-auth/react";
 import { Github, LogIn } from "lucide-react";
 
+import Link from "next/link";
+
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -90,9 +92,15 @@ export default function LoginPage() {
           </CardContent>
         </Card>
 
-        <p className="text-center text-xs text-slate-400">
-          Don&apos;t know your Firm ID? Contact your administrator.
-        </p>
+        <div className="space-y-2 text-center">
+          <p className="text-xs text-slate-400">Don&apos;t know your Firm ID? Contact your administrator.</p>
+          <p className="text-xs text-slate-400">
+            New business?{" "}
+            <Link href="/signup" className="text-sky-600 underline underline-offset-2 hover:text-sky-800">
+              Get started with Ava
+            </Link>
+          </p>
+        </div>
       </div>
     </div>
   );
