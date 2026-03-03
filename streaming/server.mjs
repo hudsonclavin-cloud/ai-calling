@@ -605,7 +605,8 @@ async function synthesizeToDisk(text) {
   const safeText = truncateForSpeech(text, MAX_TTS_CHARS);
   if (!safeText || !ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) return null;
 
-  const key = sha1(`${ELEVENLABS_VOICE_ID}|${ELEVENLABS_MODEL_ID}|${safeText}`);
+  const voiceSettingsKey = `${process.env.ELEVEN_STABILITY ?? '0.55'}|${process.env.ELEVEN_SIMILARITY ?? '0.85'}|${process.env.ELEVEN_STYLE ?? '0.15'}|${process.env.ELEVEN_SPEAKER_BOOST ?? 'true'}`;
+  const key = sha1(`${ELEVENLABS_VOICE_ID}|${ELEVENLABS_MODEL_ID}|${voiceSettingsKey}|${safeText}`);
   const filePath = path.join(AUDIO_DIR, `${key}.mp3`);
   const already = await fs.readFile(filePath).catch(() => null);
   if (already) return key;
@@ -1279,6 +1280,14 @@ app.log.info({
   TWILIO_ACCOUNT_SID_prefix: TWILIO_ACCOUNT_SID ? TWILIO_ACCOUNT_SID.slice(0, 4) : '(unset)',
   TWILIO_FROM_NUMBER,
 }, 'BOOT notification config');
+app.log.info({
+  ELEVENLABS_MODEL_ID,
+  ELEVENLABS_VOICE_ID: ELEVENLABS_VOICE_ID ? ELEVENLABS_VOICE_ID.slice(0, 8) + '...' : '(unset)',
+  ELEVEN_STABILITY:     process.env.ELEVEN_STABILITY     ?? '(default 0.55)',
+  ELEVEN_SIMILARITY:    process.env.ELEVEN_SIMILARITY    ?? '(default 0.85)',
+  ELEVEN_STYLE:         process.env.ELEVEN_STYLE         ?? '(default 0.15)',
+  ELEVEN_SPEAKER_BOOST: process.env.ELEVEN_SPEAKER_BOOST ?? '(default true)',
+}, 'BOOT ElevenLabs voice config');
 
 try {
   await app.listen({ port: PORT, host: '0.0.0.0' });
