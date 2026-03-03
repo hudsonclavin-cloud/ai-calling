@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { XCircle } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button";
 
 export default function BillingCancelPage() {
   return (
@@ -13,9 +13,7 @@ export default function BillingCancelPage() {
           No charges were made. You can set up billing any time from the client settings page.
         </p>
       </div>
-      <Button variant="outline" asChild>
-        <Link href="/clients">Back to Clients</Link>
-      </Button>
+      <Link href="/clients" className={buttonVariants({ variant: "outline" })}>Back to Clients</Link>
     </div>
   );
 }

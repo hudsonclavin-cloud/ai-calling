@@ -5,7 +5,7 @@ import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { Check, CheckCircle2, Copy } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { sendSetupInstructions } from "@/lib/api";
 
@@ -141,9 +141,7 @@ function BillingSuccessInner() {
                 "Email me these instructions"
               )}
             </Button>
-            <Button asChild className="flex-1">
-              <Link href={`/dashboard?firmId=${firmId}`}>Go to my dashboard</Link>
-            </Button>
+            <Link href={`/dashboard?firmId=${firmId}`} className={buttonVariants({ className: "flex-1" })}>Go to my dashboard</Link>
           </div>
         </div>
       </div>
@@ -160,9 +158,7 @@ function BillingSuccessInner() {
           Your subscription is now active. Ava is ready to take calls for your firm.
         </p>
       </div>
-      <Button asChild>
-        <Link href="/clients">Back to Clients</Link>
-      </Button>
+      <Link href="/clients" className={buttonVariants()}>Back to Clients</Link>
     </div>
   );
 }
