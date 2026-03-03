@@ -15,9 +15,6 @@ export function ShellLayout({
 }) {
   const pathname = usePathname();
 
-  // Login page renders without any shell
-  if (pathname === "/login" || pathname === "/signup") return <>{children}</>;
-
   return (
     <AppShell pathname={pathname} firmName={firmName} isAdmin={isAdmin}>
       {children}
