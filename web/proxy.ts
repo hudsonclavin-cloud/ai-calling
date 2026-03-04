@@ -2,7 +2,7 @@ import { auth } from "@/auth";
 import { NextResponse } from "next/server";
 
 // Routes only the GitHub admin can access
-const ADMIN_ONLY = ["/clients", "/onboarding"];
+const ADMIN_ONLY = ["/clients", "/onboarding", "/admin"];
 
 // Routes accessible to admin OR a client with a firmId query param
 const PROTECTED = ["/dashboard", "/leads", "/calls", "/settings"];
@@ -43,6 +43,7 @@ export const config = {
     "/settings/:path*",
     "/clients/:path*",
     "/onboarding/:path*",
+    "/admin/:path*",
     "/login",
   ],
 };

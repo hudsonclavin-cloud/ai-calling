@@ -42,6 +42,7 @@ const STRIPE_SECRET_KEY     = process.env.STRIPE_SECRET_KEY     || '';
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
 const STRIPE_PRICE_ID       = process.env.STRIPE_PRICE_ID       || '';
 const WEB_BASE_URL          = process.env.WEB_BASE_URL          || 'http://localhost:3000';
+const ADMIN_API_KEY         = process.env.ADMIN_API_KEY         || '';
 
 const REQUIRED_FIELDS_DEFAULT = ['full_name', 'callback_number', 'practice_area', 'case_summary'];
 
@@ -1686,7 +1687,18 @@ app.post('/api/billing/portal', async (req, reply) => {
 });
 
 // POST /api/resend-instructions — resend Twilio setup email to a firm
-app.get('/api/admin/rate-limits', async () => {
+function requireAdminKey(req, reply) {
+  if (!ADMIN_API_KEY) return; // No key configured — skip check (dev mode)
+  const provided = req.headers?.['x-admin-key'] || '';
+  if (provided !== ADMIN_API_KEY) {
+    reply.code(401).send({ error: 'Unauthorized' });
+    return false;
+  }
+  return true;
+}
+
+app.get('/api/admin/rate-limits', async (req, reply) => {
+  if (requireAdminKey(req, reply) === false) return;
   const now = Date.now();
   const entries = [];
   for (const [key, hits] of rateLimitStore.entries()) {
@@ -1698,6 +1710,7 @@ app.get('/api/admin/rate-limits', async () => {
 });
 
 app.get('/api/admin/overview', async (req, reply) => {
+  if (requireAdminKey(req, reply) === false) return;
   const [allCalls, allLeads, allFirms] = await Promise.all([loadCalls(), loadLeads(), listFirmConfigs()]);
   const now = Date.now();
   const monthCutoff = new Date(now - 30 * 86_400_000).toISOString();

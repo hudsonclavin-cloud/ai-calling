@@ -5,6 +5,7 @@ import { Building2, PhoneCall, TrendingUp, Users } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:5050";
+const ADMIN_KEY = process.env.NEXT_PUBLIC_ADMIN_KEY ?? "";
 
 interface FirmStat {
   id: string;
@@ -45,7 +46,9 @@ export default function AdminPage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch(`${API_BASE}/api/admin/overview`)
+    fetch(`${API_BASE}/api/admin/overview`, {
+      headers: ADMIN_KEY ? { "x-admin-key": ADMIN_KEY } : {},
+    })
       .then((r) => r.json())
       .then(setData)
       .catch(() => {})
