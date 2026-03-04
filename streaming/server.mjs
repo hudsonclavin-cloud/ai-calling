@@ -95,6 +95,31 @@ app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (req, body, 
   catch (err) { done(err); }
 });
 
+// ── Rate limiting ────────────────────────────────────────────────────────────
+// Sliding window: track hit timestamps per key, evict entries older than windowMs
+
+const rateLimitStore = new Map(); // key → timestamp[]
+
+function checkRateLimit(key, maxHits, windowMs) {
+  const now = Date.now();
+  const cutoff = now - windowMs;
+  const hits = (rateLimitStore.get(key) || []).filter((t) => t > cutoff);
+  if (hits.length >= maxHits) return false; // exceeded
+  hits.push(now);
+  rateLimitStore.set(key, hits);
+  return true; // allowed
+}
+
+// Purge stale entries every 5 minutes to prevent memory growth
+setInterval(() => {
+  const cutoff = Date.now() - 5 * 60_000;
+  for (const [key, hits] of rateLimitStore.entries()) {
+    const fresh = hits.filter((t) => t > cutoff);
+    if (!fresh.length) rateLimitStore.delete(key);
+    else rateLimitStore.set(key, fresh);
+  }
+}, 5 * 60_000);
+
 // ── Per-session ack index (avoids repeated acknowledgments) ──────────────────
 const sessionAckIndex = new Map();
 
@@ -575,15 +600,16 @@ function xmlEscape(s) {
     .replaceAll("'", '&#39;');
 }
 
-function gatherTwiml({ actionUrl, speakText, ttsKey, emptyCount = 0 }) {
+function gatherTwiml({ actionUrl, speakText, ttsKey, emptyCount = 0, hints = '' }) {
   const speakerNode = ttsKey
     ? `<Play>${xmlEscape(`${PUBLIC_BASE_URL}/api/tts?key=${encodeURIComponent(ttsKey)}`)}</Play>`
     : `<Say>${xmlEscape(speakText)}</Say>`;
   const redirectUrl = addQueryParam(addQueryParam(actionUrl, 'empty', '1'), 'rc', Number(emptyCount) + 1);
+  const hintsAttr = hints ? ` hints="${xmlEscape(hints)}"` : '';
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Gather input="speech" action="${xmlEscape(actionUrl)}" method="POST" speechTimeout="1" timeout="5" actionOnEmptyResult="true" bargeIn="true">
+  <Gather input="speech" action="${xmlEscape(actionUrl)}" method="POST" speechTimeout="2" timeout="6" actionOnEmptyResult="true" bargeIn="true" enhanced="true" language="en-US" profanityFilter="false"${hintsAttr}>
     ${speakerNode}
   </Gather>
   <Redirect method="POST">${xmlEscape(redirectUrl)}</Redirect>
@@ -1402,6 +1428,19 @@ app.post('/twiml', async (req, reply) => {
     return reply.send(doneTwiml({ speakText: 'Unable to continue this call right now.', ttsKey: null }));
   }
 
+  // Rate limiting: per-IP (10 req/min) and per-firmId (100 calls/day)
+  const clientIp = req.headers?.['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || 'unknown';
+  if (!checkRateLimit(`ip:${clientIp}`, 10, 60_000)) {
+    reply.header('Content-Type', 'text/xml');
+    app.log.warn({ clientIp, firmId }, 'rate limit hit (IP)');
+    return reply.send(doneTwiml({ speakText: "We're experiencing high call volume. Please try again in a moment.", ttsKey: null }));
+  }
+  if (!checkRateLimit(`firm:${firmId}`, 100, 86_400_000)) {
+    reply.header('Content-Type', 'text/xml');
+    app.log.warn({ firmId }, 'rate limit hit (firm)');
+    return reply.send(doneTwiml({ speakText: "We're currently at capacity. Please try again later.", ttsKey: null }));
+  }
+
   // Answering machine / voicemail detection
   const answeredBy = String(req.body?.AnsweredBy || '').trim();
   if (answeredBy === 'machine_start' || answeredBy === 'fax') {
@@ -1470,12 +1509,14 @@ app.post('/twiml', async (req, reply) => {
 
     if (done) return reply.send(doneTwiml({ speakText, ttsKey }));
 
+    const practiceHints = (firmConfig.practice_areas || []).join(', ');
     return reply.send(
       gatherTwiml({
         actionUrl: `${PUBLIC_BASE_URL}/twiml?firmId=${encodeURIComponent(firmId)}`,
         speakText,
         ttsKey,
         emptyCount: session.repromptCount,
+        hints: practiceHints,
       })
     );
   } catch (err) {
@@ -1645,6 +1686,17 @@ app.post('/api/billing/portal', async (req, reply) => {
 });
 
 // POST /api/resend-instructions — resend Twilio setup email to a firm
+app.get('/api/admin/rate-limits', async () => {
+  const now = Date.now();
+  const entries = [];
+  for (const [key, hits] of rateLimitStore.entries()) {
+    const recentHits = hits.filter((t) => t > now - 60_000).length;
+    const dayHits = hits.filter((t) => t > now - 86_400_000).length;
+    entries.push({ key, hitsLastMinute: recentHits, hitsToday: dayHits });
+  }
+  return { entries: entries.sort((a, b) => b.hitsToday - a.hitsToday) };
+});
+
 app.get('/api/admin/overview', async (req, reply) => {
   const [allCalls, allLeads, allFirms] = await Promise.all([loadCalls(), loadLeads(), listFirmConfigs()]);
   const now = Date.now();
