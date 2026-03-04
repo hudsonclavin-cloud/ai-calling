@@ -2,12 +2,12 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { ArrowUpRight, CalendarCheck2, PhoneCall, PhoneMissed, Plus, TrendingUp, Users, AlertCircle } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpRight, CalendarCheck2, PhoneCall, PhoneMissed, Plus, TrendingUp, Users, AlertCircle, Voicemail } from "lucide-react";
 
 import { buttonVariants } from "@/components/ui/button";
-import { getCalls, getLeads, getHealth } from "@/lib/api";
+import { getCalls, getLeads, getHealth, getAnalytics } from "@/lib/api";
 import type { HealthData } from "@/lib/api";
-import type { CallRecord, LeadSummary } from "@/lib/types";
+import type { AnalyticsData, CallRecord, LeadSummary } from "@/lib/types";
 
 function timeAgo(isoString: string): string {
   const diffMs = Date.now() - new Date(isoString).getTime();
@@ -39,15 +39,19 @@ function statusBadgeClass(status: string): string {
   return "bg-slate-100 text-slate-600";
 }
 
-function CallsSparkline({ calls }: { calls: CallRecord[] }) {
-  const days = Array.from({ length: 7 }, (_, i) => {
-    const d = new Date();
-    d.setDate(d.getDate() - (6 - i));
-    return d.toDateString();
-  });
-  const counts = days.map((day) => calls.filter((c) => new Date(c.startedAt).toDateString() === day).length);
+function CallsSparkline({ data }: { data: { date: string; count: number }[] | null; calls: CallRecord[] }) {
+  // Prefer analytics data; fall back to computing from raw calls
+  const counts = data
+    ? data.slice(-7).map((d) => d.count)
+    : Array.from({ length: 7 }, (_, i) => {
+        const d = new Date();
+        d.setDate(d.getDate() - (6 - i));
+        return 0; // placeholder when no data
+      });
+  const labels = (data ? data.slice(-7) : []).map((d) =>
+    new Date(d.date).toLocaleDateString([], { weekday: "short" })
+  );
   const max = Math.max(...counts, 1);
-  const labels = days.map((d) => new Date(d).toLocaleDateString([], { weekday: "short" }));
 
   return (
     <div className="rounded-xl border border-slate-200 bg-white px-5 py-4 shadow-sm">
@@ -58,9 +62,33 @@ function CallsSparkline({ calls }: { calls: CallRecord[] }) {
             <div
               className="w-full rounded-sm bg-sky-500 transition-all"
               style={{ height: `${Math.max((count / max) * 48, count > 0 ? 4 : 0)}px` }}
-              title={`${labels[i]}: ${count} call${count !== 1 ? "s" : ""}`}
+              title={`${labels[i] ?? `Day ${i + 1}`}: ${count} call${count !== 1 ? "s" : ""}`}
             />
-            <span className="text-[9px] text-slate-400">{labels[i]}</span>
+            <span className="text-[9px] text-slate-400">{labels[i] ?? ""}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PracticeAreaChart({ areas }: { areas: { area: string; count: number }[] }) {
+  if (!areas.length) return null;
+  const max = areas[0].count;
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white px-5 py-4 shadow-sm">
+      <p className="mb-3 text-xs font-medium uppercase tracking-wide text-slate-500">Top Practice Areas</p>
+      <div className="space-y-2">
+        {areas.map(({ area, count }) => (
+          <div key={area} className="flex items-center gap-2">
+            <span className="w-28 shrink-0 truncate text-xs text-slate-600">{area}</span>
+            <div className="flex-1 rounded-full bg-slate-100 h-2">
+              <div
+                className="h-2 rounded-full bg-violet-500 transition-all"
+                style={{ width: `${(count / max) * 100}%` }}
+              />
+            </div>
+            <span className="w-6 text-right text-xs text-slate-400">{count}</span>
           </div>
         ))}
       </div>
@@ -84,14 +112,16 @@ export default function DashboardPage() {
   const [calls, setCalls] = useState<CallRecord[]>([]);
   const [leads, setLeads] = useState<LeadSummary[]>([]);
   const [health, setHealth] = useState<HealthData | null>(null);
+  const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [secondsAgo, setSecondsAgo] = useState(0);
 
   async function refresh() {
-    const [c, l, h] = await Promise.all([getCalls(), getLeads(), getHealth()]);
+    const [c, l, h, a] = await Promise.all([getCalls(), getLeads(), getHealth(), getAnalytics("firm_default", 30)]);
     setCalls(c);
     setLeads(l);
     setHealth(h);
+    setAnalytics(a);
     setLastUpdated(new Date());
     setSecondsAgo(0);
   }
@@ -111,19 +141,25 @@ export default function DashboardPage() {
     return () => clearInterval(tick);
   }, [lastUpdated]);
 
-  const totalCalls = calls.length;
-  const completedIntakes = calls.filter((c) => c.outcome === "intake_complete").length;
+  const totalCalls = analytics?.totalCalls ?? calls.length;
+  const completedIntakes = analytics?.completed ?? calls.filter((c) => c.outcome === "intake_complete").length;
   const inProgress = calls.filter((c) => c.status === "in_progress").length;
-  const conversionRate = totalCalls > 0 ? Math.round((completedIntakes / totalCalls) * 100) : 0;
-  const todayStr = new Date().toDateString();
-  const callsToday = calls.filter((c) => new Date(c.startedAt).toDateString() === todayStr).length;
-  const partialLeads = leads.filter((l) => l.status === "partial").length;
+  const conversionRate = analytics?.completionRate ?? (totalCalls > 0 ? Math.round((completedIntakes / totalCalls) * 100) : 0);
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const callsToday = analytics
+    ? (analytics.callsByDay.find((d) => d.date === todayStr)?.count ?? 0)
+    : calls.filter((c) => new Date(c.startedAt).toISOString().slice(0, 10) === todayStr).length;
+  const yesterdayStr = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+  const callsYesterday = analytics?.callsByDay.find((d) => d.date === yesterdayStr)?.count ?? 0;
+  const todayDelta = callsToday - callsYesterday;
+  const partialLeads = analytics?.partial ?? leads.filter((l) => l.status === "partial").length;
+  const voicemailLeads = analytics?.voicemails ?? leads.filter((l) => l.status === "voicemail").length;
 
   const metrics = [
     { label: "Total Calls", value: `${totalCalls}`, note: "All inbound calls on record", icon: <PhoneCall className="h-4 w-4" /> },
     { label: "Completed Intakes", value: `${completedIntakes}`, note: "Full intake collected", icon: <CalendarCheck2 className="h-4 w-4" /> },
     { label: "In Progress", value: `${inProgress}`, note: "Active or incomplete", icon: <PhoneMissed className="h-4 w-4" /> },
-    { label: "Conversion", value: `${conversionRate}%`, note: "Completed / inbound", icon: <TrendingUp className="h-4 w-4" /> },
+    { label: "Completion Rate", value: `${conversionRate}%`, note: "Completed / inbound", icon: <TrendingUp className="h-4 w-4" /> },
   ];
 
   const recentActivity = calls
@@ -194,23 +230,34 @@ export default function DashboardPage() {
           <p className="mt-2 text-2xl font-bold text-slate-900">{partialLeads}</p>
         </div>
         <div className="rounded-xl border border-slate-200 bg-white px-5 py-4 shadow-sm">
-          <div className="flex items-center gap-2 text-slate-500">
-            <TrendingUp className="h-4 w-4" />
-            <span className="text-xs font-medium uppercase tracking-wide">Completion</span>
+          <div className="flex items-center gap-2 text-violet-500">
+            <Voicemail className="h-4 w-4" />
+            <span className="text-xs font-medium uppercase tracking-wide">Voicemails</span>
           </div>
-          <p className="mt-2 text-2xl font-bold text-slate-900">{conversionRate}%</p>
+          <p className="mt-2 text-2xl font-bold text-slate-900">{voicemailLeads}</p>
         </div>
         <div className="rounded-xl border border-slate-200 bg-white px-5 py-4 shadow-sm">
-          <div className="flex items-center gap-2 text-slate-500">
-            <PhoneCall className="h-4 w-4" />
-            <span className="text-xs font-medium uppercase tracking-wide">Today</span>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-slate-500">
+              <PhoneCall className="h-4 w-4" />
+              <span className="text-xs font-medium uppercase tracking-wide">Today</span>
+            </div>
+            {todayDelta !== 0 && (
+              <span className={`flex items-center gap-0.5 text-xs font-medium ${todayDelta > 0 ? "text-emerald-600" : "text-rose-500"}`}>
+                {todayDelta > 0 ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />}
+                {Math.abs(todayDelta)}
+              </span>
+            )}
           </div>
           <p className="mt-2 text-2xl font-bold text-slate-900">{callsToday}</p>
         </div>
       </div>
 
-      {/* ── Sparkline ── */}
-      <CallsSparkline calls={calls} />
+      {/* ── Charts row ── */}
+      <div className="grid gap-4 lg:grid-cols-2">
+        <CallsSparkline data={analytics?.callsByDay ?? null} calls={calls} />
+        <PracticeAreaChart areas={analytics?.topPracticeAreas ?? []} />
+      </div>
 
       {/* ── Recent activity feed ── */}
       <div className="rounded-xl border border-slate-200 bg-white shadow-sm">

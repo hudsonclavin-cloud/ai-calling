@@ -1,4 +1,4 @@
-import type { CallRecord, FirmSettings, LeadDetail, LeadSummary } from "@/lib/types";
+import type { AnalyticsData, CallRecord, FirmSettings, LeadDetail, LeadSummary } from "@/lib/types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:5050";
 
@@ -122,6 +122,14 @@ export async function sendSetupInstructions(firmId: string): Promise<void> {
     method: "POST",
     body: JSON.stringify({ firmId }),
   });
+}
+
+export async function getAnalytics(firmId: string, days = 30): Promise<AnalyticsData | null> {
+  try {
+    return await fetchJson<AnalyticsData>(`/api/analytics/${encodeURIComponent(firmId)}?days=${days}`);
+  } catch {
+    return null;
+  }
 }
 
 export async function testWebhook(firmId: string): Promise<{ ok: boolean; status: number; body: string }> {

@@ -66,6 +66,17 @@ export interface LeadDetail {
   timeline: TimelineEvent[];
 }
 
+export interface AnalyticsData {
+  totalCalls: number;
+  completed: number;
+  partial: number;
+  voicemails: number;
+  avgDuration: number;
+  completionRate: number;
+  callsByDay: { date: string; count: number }[];
+  topPracticeAreas: { area: string; count: number }[];
+}
+
 export interface FirmSettings {
   id: string;
   name: string;

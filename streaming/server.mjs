@@ -1548,6 +1548,53 @@ app.post('/api/billing/portal', async (req, reply) => {
 });
 
 // POST /api/resend-instructions — resend Twilio setup email to a firm
+app.get('/api/analytics/:firmId', async (req, reply) => {
+  const { firmId } = req.params;
+  const days = Math.min(Number(req.query?.days || 30), 365);
+  const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
+
+  const [allCalls, allLeads] = await Promise.all([loadCalls(), loadLeads()]);
+  const calls = allCalls.filter((c) => c.firmId === firmId && c.startedAt >= cutoff);
+  const leads = allLeads.filter((l) => l.firmId === firmId && l.createdAt >= cutoff);
+
+  const totalCalls = calls.length;
+  const completed = calls.filter((c) => c.outcome === 'intake_complete').length;
+  const partial = leads.filter((l) => l.status === 'partial').length;
+  const voicemails = leads.filter((l) => l.status === 'voicemail').length;
+  const completionRate = totalCalls > 0 ? Math.round((completed / totalCalls) * 100) : 0;
+
+  // Average duration (endedAt - startedAt in seconds)
+  const durationsMs = calls
+    .filter((c) => c.endedAt && c.startedAt)
+    .map((c) => new Date(c.endedAt).getTime() - new Date(c.startedAt).getTime());
+  const avgDuration = durationsMs.length > 0 ? Math.round(durationsMs.reduce((a, b) => a + b, 0) / durationsMs.length / 1000) : 0;
+
+  // Calls by day (last `days` days)
+  const dayMap = {};
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(Date.now() - i * 86_400_000).toISOString().slice(0, 10);
+    dayMap[d] = 0;
+  }
+  for (const c of calls) {
+    const d = String(c.startedAt || '').slice(0, 10);
+    if (d in dayMap) dayMap[d]++;
+  }
+  const callsByDay = Object.entries(dayMap).map(([date, count]) => ({ date, count }));
+
+  // Top practice areas
+  const areaMap = {};
+  for (const l of leads) {
+    const area = l.practice_area || 'Unknown';
+    areaMap[area] = (areaMap[area] || 0) + 1;
+  }
+  const topPracticeAreas = Object.entries(areaMap)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([area, count]) => ({ area, count }));
+
+  return { totalCalls, completed, partial, voicemails, avgDuration, completionRate, callsByDay, topPracticeAreas };
+});
+
 app.get('/api/webhook-logs/:firmId', async (req, reply) => {
   const { firmId } = req.params;
   const limit = Math.min(Number(req.query?.limit || 50), 200);
