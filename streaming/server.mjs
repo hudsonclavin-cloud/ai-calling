@@ -691,14 +691,19 @@ async function synthesizeToDisk(text) {
     ).finally(() => clearTimeout(timeout));
 
     app.log.info({ key: key.slice(0, 8), ok: resp.ok, status: resp.status, elapsedMs: Date.now() - tFetchStart }, 'tts-fetch-end');
-    if (!resp.ok) return null;
+    if (!resp.ok) {
+      const errBody = await resp.text();
+      console.error('tts-fetch-error', { status: resp.status, body: errBody });
+      return null;
+    }
     const audio = Buffer.from(await resp.arrayBuffer());
+    console.log('tts-audio-bytes', audio.length);
     if (!audio.length) return null;
     await fs.writeFile(filePath, audio);
     console.log('tts-file-written', { key, bytes: audio.length, path: filePath });
     return key;
   } catch (err) {
-    app.log.warn({ err: String(err) }, 'tts-fetch-error');
+    console.error('tts-fetch-exception', err.message);
     return null;
   }
 }
