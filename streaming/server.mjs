@@ -695,6 +695,7 @@ async function synthesizeToDisk(text) {
     const audio = Buffer.from(await resp.arrayBuffer());
     if (!audio.length) return null;
     await fs.writeFile(filePath, audio);
+    console.log('tts-file-written', { key, bytes: audio.length, path: filePath });
     return key;
   } catch (err) {
     app.log.warn({ err: String(err) }, 'tts-fetch-error');
@@ -1955,6 +1956,14 @@ app.log.info({
 try {
   await app.listen({ port: PORT, host: '0.0.0.0' });
   app.log.info(`HTTP listening on http://127.0.0.1:${PORT}`);
+
+  // Ensure audio directory exists before prewarm (critical on Railway — must be under volume mount)
+  await fs.mkdir(AUDIO_DIR, { recursive: true });
+  console.log('AUDIO_DIR ready:', AUDIO_DIR);
+  if (!AUDIO_DIR.startsWith('/app/data') && !AUDIO_DIR.startsWith('/data')) {
+    console.warn('WARNING: AUDIO_DIR is not under a Railway volume mount — cached audio will be lost on redeploy:', AUDIO_DIR);
+  }
+
   prewarmTtsCache().catch((err) => app.log.warn({ err: String(err) }, 'TTS prewarm error'));
 } catch (err) {
   app.log.error({ err: String(err) }, 'Server failed to start');
