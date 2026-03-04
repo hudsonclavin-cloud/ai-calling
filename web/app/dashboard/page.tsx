@@ -1,9 +1,13 @@
+"use client";
+
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { ArrowUpRight, CalendarCheck2, PhoneCall, PhoneMissed, Plus, TrendingUp, Users } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { buttonVariants } from "@/components/ui/button";
 import { getCalls, getLeads } from "@/lib/api";
+import type { CallRecord, LeadSummary } from "@/lib/types";
 
 function timeAgo(isoString: string): string {
   const diffMs = Date.now() - new Date(isoString).getTime();
@@ -12,43 +16,66 @@ function timeAgo(isoString: string): string {
   if (mins < 60) return `${mins}m ago`;
   const hours = Math.floor(mins / 60);
   if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
+  return `${Math.floor(hours / 24)}d ago`;
 }
 
 function formatPhone(phone: string): string {
   const digits = phone.replace(/\D/g, "");
-  if (digits.length === 11 && digits.startsWith("1")) {
+  if (digits.length === 11 && digits.startsWith("1"))
     return `(${digits.slice(1, 4)}) ${digits.slice(4, 7)}-${digits.slice(7)}`;
-  }
-  if (digits.length === 10) {
+  if (digits.length === 10)
     return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
-  }
   return phone;
 }
 
-const METRIC_COLORS = [
-  "border-l-blue-500",
-  "border-l-emerald-500",
-  "border-l-amber-500",
-  "border-l-violet-500",
-];
+const METRIC_COLORS = ["border-l-blue-500", "border-l-emerald-500", "border-l-amber-500", "border-l-violet-500"];
+const METRIC_ICON_COLORS = ["bg-blue-50 text-blue-600", "bg-emerald-50 text-emerald-600", "bg-amber-50 text-amber-600", "bg-violet-50 text-violet-600"];
 
-const METRIC_ICON_COLORS = [
-  "bg-blue-50 text-blue-600",
-  "bg-emerald-50 text-emerald-600",
-  "bg-amber-50 text-amber-600",
-  "bg-violet-50 text-violet-600",
-];
+function LiveDot() {
+  return (
+    <span className="flex items-center gap-1.5 text-xs text-emerald-600">
+      <span className="relative flex h-2 w-2">
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+        <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
+      </span>
+      Live
+    </span>
+  );
+}
 
-export default async function DashboardPage() {
-  const [calls, leads] = await Promise.all([getCalls(), getLeads()]);
+export default function DashboardPage() {
+  const [calls, setCalls] = useState<CallRecord[]>([]);
+  const [leads, setLeads] = useState<LeadSummary[]>([]);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [secondsAgo, setSecondsAgo] = useState(0);
+
+  async function refresh() {
+    const [c, l] = await Promise.all([getCalls(), getLeads()]);
+    setCalls(c);
+    setLeads(l);
+    setLastUpdated(new Date());
+    setSecondsAgo(0);
+  }
+
+  useEffect(() => {
+    refresh();
+    const poll = setInterval(refresh, 30_000);
+    return () => clearInterval(poll);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!lastUpdated) return;
+    const tick = setInterval(() => {
+      setSecondsAgo(Math.floor((Date.now() - lastUpdated.getTime()) / 1000));
+    }, 1000);
+    return () => clearInterval(tick);
+  }, [lastUpdated]);
 
   const totalCalls = calls.length;
   const completedIntakes = calls.filter((c) => c.outcome === "intake_complete").length;
   const inProgress = calls.filter((c) => c.status === "in_progress").length;
   const conversionRate = totalCalls > 0 ? Math.round((completedIntakes / totalCalls) * 100) : 0;
-
   const todayStr = new Date().toDateString();
   const callsToday = calls.filter((c) => new Date(c.startedAt).toDateString() === todayStr).length;
 
@@ -72,19 +99,26 @@ export default async function DashboardPage() {
           <h1 className="text-2xl font-semibold text-slate-900 md:text-3xl">Dashboard</h1>
           <p className="mt-1 text-sm text-slate-500">Live intake visibility for calls, outcomes, and lead status.</p>
         </div>
-        <Link href="/onboarding" className={buttonVariants({ size: "sm" })}>
-          <Plus className="h-4 w-4" />
-          Add Client
-        </Link>
+        <div className="flex items-center gap-3">
+          {lastUpdated && (
+            <span className="hidden items-center gap-2 sm:flex">
+              <LiveDot />
+              <span className="text-xs text-slate-400">
+                Updated {secondsAgo < 5 ? "just now" : `${secondsAgo}s ago`}
+              </span>
+            </span>
+          )}
+          <Link href="/onboarding" className={buttonVariants({ size: "sm" })}>
+            <Plus className="h-4 w-4" />
+            Add Client
+          </Link>
+        </div>
       </div>
 
       {/* ── Metric cards ── */}
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         {metrics.map((item, i) => (
-          <div
-            key={item.label}
-            className={`rounded-xl border border-slate-200 border-l-4 bg-white shadow-sm ${METRIC_COLORS[i]}`}
-          >
+          <div key={item.label} className={`rounded-xl border border-slate-200 border-l-4 bg-white shadow-sm ${METRIC_COLORS[i]}`}>
             <div className="flex items-center justify-between px-5 pt-4 pb-1">
               <p className="text-sm font-medium text-slate-500">{item.label}</p>
               <span className={`rounded-lg p-2 ${METRIC_ICON_COLORS[i]}`}>{item.icon}</span>
@@ -129,34 +163,25 @@ export default async function DashboardPage() {
             <h2 className="text-sm font-semibold text-slate-900">Recent Activity</h2>
             <p className="text-xs text-slate-500">Last {recentActivity.length} calls</p>
           </div>
-          <Link
-            href="/calls"
-            className="flex items-center gap-1 text-xs font-medium text-violet-600 hover:text-violet-700"
-          >
+          <Link href="/calls" className="flex items-center gap-1 text-xs font-medium text-violet-600 hover:text-violet-700">
             View all <ArrowUpRight className="h-3.5 w-3.5" />
           </Link>
         </div>
 
         {recentActivity.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-16 text-slate-400">
-            <PhoneCall className="h-8 w-8 mb-3 opacity-40" />
+            <PhoneCall className="mb-3 h-8 w-8 opacity-40" />
             <p className="text-sm font-medium">No calls recorded yet</p>
-            <p className="text-xs mt-1">Calls will appear here as they come in</p>
+            <p className="mt-1 text-xs">Calls will appear here as they come in</p>
           </div>
         ) : (
           <ul className="divide-y divide-slate-100">
             {recentActivity.map((call) => (
               <li key={call.id}>
-                <Link
-                  href={`/leads/${call.leadId}`}
-                  className="flex items-center gap-4 px-6 py-3.5 transition-colors hover:bg-slate-50"
-                >
-                  {/* Avatar */}
+                <Link href={`/leads/${call.leadId}`} className="flex items-center gap-4 px-6 py-3.5 transition-colors hover:bg-slate-50">
                   <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-xs font-semibold text-slate-600">
                     {(call.collected?.full_name || call.fromPhone || "?").charAt(0).toUpperCase()}
                   </div>
-
-                  {/* Caller info */}
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-sm font-medium text-slate-900">
                       {call.collected?.full_name || formatPhone(call.fromPhone)}
@@ -165,16 +190,9 @@ export default async function DashboardPage() {
                       {call.collected?.practice_area || "Unknown area"} • {formatPhone(call.fromPhone)}
                     </p>
                   </div>
-
-                  {/* Status badge */}
-                  <Badge
-                    variant={call.status === "completed" ? "success" : "warning"}
-                    className="shrink-0 text-xs"
-                  >
+                  <Badge variant={call.status === "completed" ? "success" : "warning"} className="shrink-0 text-xs">
                     {call.status === "completed" ? "Completed" : "In Progress"}
                   </Badge>
-
-                  {/* Time ago */}
                   <span className="shrink-0 text-xs text-slate-400">{timeAgo(call.startedAt)}</span>
                 </Link>
               </li>
