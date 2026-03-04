@@ -22,13 +22,18 @@ function timeAgo(dateStr: string): string {
   return new Date(dateStr).toLocaleDateString();
 }
 
-function statusVariant(status: string): "success" | "warning" {
-  return status === "ready_for_review" ? "success" : "warning";
+function statusClass(status: string): string {
+  if (status === "ready_for_review") return "bg-emerald-100 text-emerald-700";
+  if (status === "partial") return "bg-amber-100 text-amber-700";
+  if (status === "failed") return "bg-rose-100 text-rose-700";
+  return "bg-slate-100 text-slate-600";
 }
 
 function formatStatus(status: string): string {
   if (status === "ready_for_review") return "Ready for Review";
   if (status === "in_progress") return "In Progress";
+  if (status === "partial") return "Partial";
+  if (status === "failed") return "Failed";
   return status;
 }
 
@@ -116,7 +121,9 @@ export function LeadsTable({ leads }: { leads: LeadSummary[] }) {
                   </TableCell>
                   <TableCell>{lead.practice_area || "—"}</TableCell>
                   <TableCell>
-                    <Badge variant={statusVariant(lead.status)}>{formatStatus(lead.status)}</Badge>
+                    <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium ${statusClass(lead.status)}`}>
+                      {formatStatus(lead.status)}
+                    </span>
                   </TableCell>
                   <TableCell>
                     {lead.caller_type ? (

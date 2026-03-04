@@ -2,9 +2,8 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { ArrowUpRight, CalendarCheck2, PhoneCall, PhoneMissed, Plus, TrendingUp, Users } from "lucide-react";
+import { ArrowUpRight, CalendarCheck2, PhoneCall, PhoneMissed, Plus, TrendingUp, Users, AlertCircle } from "lucide-react";
 
-import { Badge } from "@/components/ui/badge";
 import { buttonVariants } from "@/components/ui/button";
 import { getCalls, getLeads, getHealth } from "@/lib/api";
 import type { HealthData } from "@/lib/api";
@@ -31,6 +30,42 @@ function formatPhone(phone: string): string {
 
 const METRIC_COLORS = ["border-l-blue-500", "border-l-emerald-500", "border-l-amber-500", "border-l-violet-500"];
 const METRIC_ICON_COLORS = ["bg-blue-50 text-blue-600", "bg-emerald-50 text-emerald-600", "bg-amber-50 text-amber-600", "bg-violet-50 text-violet-600"];
+
+function statusBadgeClass(status: string): string {
+  if (status === "completed" || status === "ready_for_review") return "bg-emerald-100 text-emerald-700";
+  if (status === "partial") return "bg-amber-100 text-amber-700";
+  if (status === "failed") return "bg-rose-100 text-rose-700";
+  return "bg-slate-100 text-slate-600";
+}
+
+function CallsSparkline({ calls }: { calls: CallRecord[] }) {
+  const days = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date();
+    d.setDate(d.getDate() - (6 - i));
+    return d.toDateString();
+  });
+  const counts = days.map((day) => calls.filter((c) => new Date(c.startedAt).toDateString() === day).length);
+  const max = Math.max(...counts, 1);
+  const labels = days.map((d) => new Date(d).toLocaleDateString([], { weekday: "short" }));
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white px-5 py-4 shadow-sm">
+      <p className="mb-3 text-xs font-medium uppercase tracking-wide text-slate-500">Calls — Last 7 Days</p>
+      <div className="flex items-end gap-1.5 h-14">
+        {counts.map((count, i) => (
+          <div key={i} className="flex flex-1 flex-col items-center gap-1">
+            <div
+              className="w-full rounded-sm bg-sky-500 transition-all"
+              style={{ height: `${Math.max((count / max) * 48, count > 0 ? 4 : 0)}px` }}
+              title={`${labels[i]}: ${count} call${count !== 1 ? "s" : ""}`}
+            />
+            <span className="text-[9px] text-slate-400">{labels[i]}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function LiveDot() {
   return (
@@ -81,6 +116,7 @@ export default function DashboardPage() {
   const conversionRate = totalCalls > 0 ? Math.round((completedIntakes / totalCalls) * 100) : 0;
   const todayStr = new Date().toDateString();
   const callsToday = calls.filter((c) => new Date(c.startedAt).toDateString() === todayStr).length;
+  const partialLeads = leads.filter((l) => l.status === "partial").length;
 
   const metrics = [
     { label: "Total Calls", value: `${totalCalls}`, note: "All inbound calls on record", icon: <PhoneCall className="h-4 w-4" /> },
@@ -141,7 +177,7 @@ export default function DashboardPage() {
       </div>
 
       {/* ── Quick stats row ── */}
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
         <div className="rounded-xl border border-slate-200 bg-white px-5 py-4 shadow-sm">
           <div className="flex items-center gap-2 text-slate-500">
             <Users className="h-4 w-4" />
@@ -150,20 +186,30 @@ export default function DashboardPage() {
           <p className="mt-2 text-2xl font-bold text-slate-900">{leads.length}</p>
         </div>
         <div className="rounded-xl border border-slate-200 bg-white px-5 py-4 shadow-sm">
+          <div className="flex items-center gap-2 text-amber-500">
+            <AlertCircle className="h-4 w-4" />
+            <span className="text-xs font-medium uppercase tracking-wide">Partial</span>
+          </div>
+          <p className="mt-2 text-2xl font-bold text-slate-900">{partialLeads}</p>
+        </div>
+        <div className="rounded-xl border border-slate-200 bg-white px-5 py-4 shadow-sm">
           <div className="flex items-center gap-2 text-slate-500">
             <TrendingUp className="h-4 w-4" />
-            <span className="text-xs font-medium uppercase tracking-wide">Completion Rate</span>
+            <span className="text-xs font-medium uppercase tracking-wide">Completion</span>
           </div>
           <p className="mt-2 text-2xl font-bold text-slate-900">{conversionRate}%</p>
         </div>
         <div className="rounded-xl border border-slate-200 bg-white px-5 py-4 shadow-sm">
           <div className="flex items-center gap-2 text-slate-500">
             <PhoneCall className="h-4 w-4" />
-            <span className="text-xs font-medium uppercase tracking-wide">Calls Today</span>
+            <span className="text-xs font-medium uppercase tracking-wide">Today</span>
           </div>
           <p className="mt-2 text-2xl font-bold text-slate-900">{callsToday}</p>
         </div>
       </div>
+
+      {/* ── Sparkline ── */}
+      <CallsSparkline calls={calls} />
 
       {/* ── Recent activity feed ── */}
       <div className="rounded-xl border border-slate-200 bg-white shadow-sm">
@@ -199,9 +245,9 @@ export default function DashboardPage() {
                       {call.collected?.practice_area || "Unknown area"} • {formatPhone(call.fromPhone)}
                     </p>
                   </div>
-                  <Badge variant={call.status === "completed" ? "success" : "warning"} className="shrink-0 text-xs">
+                  <span className={`shrink-0 rounded-full px-2.5 py-0.5 text-xs font-medium ${statusBadgeClass(call.status as string)}`}>
                     {call.status === "completed" ? "Completed" : "In Progress"}
-                  </Badge>
+                  </span>
                   <span className="shrink-0 text-xs text-slate-400">{timeAgo(call.startedAt)}</span>
                 </Link>
               </li>
