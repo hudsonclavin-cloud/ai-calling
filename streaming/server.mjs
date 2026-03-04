@@ -87,6 +87,17 @@ const DEFAULT_FIRM_CONFIG = {
 const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
 
 const app = Fastify({ logger: true });
+
+// Log which critical env vars are present at boot (no values, just presence flags)
+app.log.info({
+  OPENAI_API_KEY:    !!OPENAI_API_KEY,
+  ELEVENLABS_API_KEY: !!ELEVENLABS_API_KEY,
+  RESEND_API_KEY:    !!RESEND_API_KEY,
+  TWILIO_ACCOUNT_SID: !!TWILIO_ACCOUNT_SID,
+  STRIPE_SECRET_KEY:  !!STRIPE_SECRET_KEY,
+  WEB_BASE_URL,
+  ADMIN_API_KEY:      !!ADMIN_API_KEY,
+}, 'BOOT env check');
 await app.register(formbody);
 
 // Capture raw body for Stripe webhook signature verification
@@ -666,10 +677,11 @@ async function synthesizeToDisk(text) {
           text: safeText,
           model_id: ELEVENLABS_MODEL_ID,
           voice_settings: {
-            stability: Number(process.env.ELEVEN_STABILITY ?? 0.55),
-            similarity_boost: Number(process.env.ELEVEN_SIMILARITY ?? 0.85),
-            style: Number(process.env.ELEVEN_STYLE ?? 0.15),
+            stability:        Number(process.env.ELEVEN_STABILITY      ?? 0.40),
+            similarity_boost: Number(process.env.ELEVEN_SIMILARITY     ?? 0.75),
+            style:            Number(process.env.ELEVEN_STYLE          ?? 0.35),
             use_speaker_boost: String(process.env.ELEVEN_SPEAKER_BOOST ?? 'true').toLowerCase() === 'true',
+            speed:            Number(process.env.ELEVEN_SPEED          ?? 1.0),
           },
         }),
         signal: controller.signal,
@@ -711,6 +723,18 @@ async function prewarmTtsCache() {
     // Reprompts
     allPhrases.add(`Sorry, I didn't catch that. ${firm.question_overrides?.full_name || "What's your name?"}`);
     allPhrases.add(`Could you say that again? ${firm.question_overrides?.full_name || "What's your name?"}`);
+  }
+
+  // Also prewarm ack+question combos — these are the exact strings spoken on turns 2+
+  // e.g. "Got it. And the best number to reach you?" — not individually cached by the above
+  for (const firm of firms) {
+    const acks = firm.acknowledgments || [];
+    const questions = Object.values(firm.question_overrides || {}).filter(Boolean);
+    for (const ack of acks) {
+      for (const q of questions) {
+        allPhrases.add(`${ack} ${q}`);
+      }
+    }
   }
 
   app.log.info(`Prewarming TTS cache for ${allPhrases.size} phrases across ${firms.length} firm(s)...`);
@@ -841,7 +865,8 @@ function ctaButton(text, url, color = '#6d28d9') {
 }
 
 async function sendEmailNotification(session, firmConfig) {
-  if (!RESEND_API_KEY || !firmConfig.notification_email) return;
+  if (!RESEND_API_KEY) { app.log.warn({ leadId: session.leadId }, 'sendEmailNotification: RESEND_API_KEY not set — skipping'); return; }
+  if (!firmConfig.notification_email) { app.log.warn({ leadId: session.leadId, firmId: firmConfig.id }, 'sendEmailNotification: no notification_email on firm — skipping'); return; }
 
   const { full_name, callback_number, practice_area, case_summary } = session.collected;
   const name = full_name || 'Unknown Caller';
@@ -879,6 +904,7 @@ async function sendEmailNotification(session, firmConfig) {
     body: JSON.stringify({ from: RESEND_FROM_EMAIL, to: [firmConfig.notification_email], subject: `New lead — ${name} (${area})`, html }),
   });
   if (!res.ok) { const e = await res.text().catch(() => ''); throw new Error(`Resend error ${res.status}: ${e}`); }
+  app.log.info({ leadId: session.leadId, to: firmConfig.notification_email }, 'lead email sent OK');
 }
 
 async function sendPartialEmailNotification(session, firmConfig) {
@@ -1015,9 +1041,13 @@ async function scoreCallQuality(session) {
 }
 
 function fireNotifications(session, firmConfig) {
+  app.log.info(
+    { leadId: session.leadId, done: session.done, hasResendKey: !!RESEND_API_KEY, notificationEmail: firmConfig?.notification_email || '' },
+    'fireNotifications called',
+  );
   if (!session.done) return;
   sendEmailNotification(session, firmConfig)
-    .catch((err) => app.log.warn({ err: String(err), leadId: session.leadId }, 'email notification failed'));
+    .catch((err) => app.log.error({ err: String(err), leadId: session.leadId }, 'email notification failed'));
   sendSmsNotification(session, firmConfig)
     .catch((err) => app.log.warn({ err: String(err), leadId: session.leadId }, 'sms notification failed'));
   // Build a minimal lead object for the webhook payload
@@ -1238,20 +1268,32 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   session.updatedAt = nowIso();
   sessions[callSid] = session;
 
-  // Resolve TTS: if the prefetch already covers the final text, just await it
-  // (likely already done); otherwise let it cache quietly and start fresh.
+  // Resolve TTS with a hard deadline: we've already spent time waiting for OpenAI,
+  // so cap the additional ElevenLabs wait to TTS_BUDGET_MS. If it's not ready in
+  // time, fall back to Twilio <Say> and let the file cache in the background.
+  const TTS_BUDGET_MS = Number(process.env.TTS_BUDGET_MS ?? 900);
+  const ttsDeadline = new Promise((r) => setTimeout(() => r(null), TTS_BUDGET_MS));
   let ttsKey;
   if (speakText === speculativeText && ttsPrefetch) {
-    ttsKey = await ttsPrefetch;
+    // Speculative hit — audio is likely already cached; race just in case
+    ttsKey = await Promise.race([ttsPrefetch, ttsDeadline]);
+    if (!ttsKey) app.log.info({ callSid }, 'tts-speculative-hit but deadline exceeded, using <Say>');
   } else {
-    if (ttsPrefetch) ttsPrefetch.catch(() => {});  // cache quietly, don't block
-    ttsKey = await synthesizeToDisk(speakText);
+    // Mismatch — start fresh synth; cache the speculative result quietly
+    if (ttsPrefetch) ttsPrefetch.catch(() => {});
+    const freshSynth = synthesizeToDisk(speakText);
+    ttsKey = await Promise.race([freshSynth, ttsDeadline]);
+    if (!ttsKey) {
+      app.log.info({ callSid, speakText: speakText.slice(0, 60) }, 'tts-miss deadline exceeded, using <Say>');
+      freshSynth.catch(() => {}); // keep caching for future turns
+    }
   }
 
   // Fire-and-forget — the TwiML response doesn't depend on write completion
   saveSessions(sessions).catch((err) => app.log.warn({ err: String(err), callSid }, 'saveSessions failed'));
   persistSessionArtifacts(session, { assistantText: speakText, callerText, done: session.done })
-    .catch((err) => app.log.warn({ err: String(err), callSid }, 'persistArtifacts failed'));
+    .then(() => { if (session.done) app.log.info({ callSid, leadId: session.leadId }, 'persistArtifacts OK — lead saved to DB'); })
+    .catch((err) => app.log.error({ err: String(err), callSid, leadId: session.leadId }, 'persistArtifacts FAILED — lead not saved'));
   fireNotifications(session, firmConfig);
 
   return {
