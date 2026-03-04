@@ -50,6 +50,7 @@ function parseLead(row) {
     lastCallSid:     String(row.lastCallSid),
     createdAt:       String(row.createdAt),
     updatedAt:       String(row.updatedAt),
+    contacted_at:    row.contacted_at ? String(row.contacted_at) : null,
     transcript:      JSON.parse(String(row.transcript || '[]')),
     timeline:        JSON.parse(String(row.timeline   || '[]')),
   };
@@ -196,11 +197,14 @@ export async function initSchema() {
     )
   `);
 
-  // Migration: add caller_type column if it doesn't exist yet
+  // Migrations: add columns that may not exist in older schemas
   const colInfo = await client.execute(`PRAGMA table_info(leads)`);
   const cols = colInfo.rows.map(r => String(r.name));
   if (!cols.includes('caller_type')) {
     await client.execute(`ALTER TABLE leads ADD COLUMN caller_type TEXT NOT NULL DEFAULT ''`);
+  }
+  if (!cols.includes('contacted_at')) {
+    await client.execute(`ALTER TABLE leads ADD COLUMN contacted_at TEXT`);
   }
 }
 
@@ -223,6 +227,17 @@ export async function loadLeads() {
 }
 
 export async function saveLeads(leads) { await _saveLeads(leads); }
+
+// Patch arbitrary whitelisted fields on a lead row
+export async function patchLead(id, updates) {
+  const allowed = ['status', 'contacted_at'];
+  const entries = Object.entries(updates).filter(([k]) => allowed.includes(k));
+  if (!entries.length) return;
+  const now = nowIso();
+  const setClauses = [...entries.map(([k]) => `${k} = ?`), 'updatedAt = ?'].join(', ');
+  const args = [...entries.map(([, v]) => v), now, id];
+  await getClient().execute({ sql: `UPDATE leads SET ${setClauses} WHERE id = ?`, args });
+}
 
 export async function loadSessions() {
   const result = await getClient().execute('SELECT callSid, data FROM sessions');

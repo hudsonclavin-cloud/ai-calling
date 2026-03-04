@@ -14,6 +14,7 @@ import {
   loadSessions,
   saveSessions,
   persistSessionArtifacts,
+  patchLead,
 } from './db.mjs';
 
 const fetch = globalThis.fetch;
@@ -791,6 +792,35 @@ async function sendEmailNotification(session, firmConfig) {
   }
 }
 
+async function sendPartialEmailNotification(session, firmConfig) {
+  if (!RESEND_API_KEY || !firmConfig.notification_email) return;
+  const { full_name, callback_number, practice_area } = session.collected || {};
+  const name = full_name || 'Unknown';
+  const area = practice_area || 'General';
+  const res = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      from: RESEND_FROM_EMAIL,
+      to: [firmConfig.notification_email],
+      subject: `[Partial] Lead from ${name} (${area})`,
+      text: [
+        `Partial intake — caller hung up before completion.`,
+        `Name: ${name}`,
+        `Phone: ${callback_number || session.fromPhone}`,
+        `Matter: ${area}`,
+        `Fields captured: ${Object.keys(session.collected || {}).join(', ') || 'none'}`,
+        '',
+        `Review in dashboard: ${PUBLIC_BASE_URL}/leads/${session.leadId}`,
+      ].join('\n'),
+    }),
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`Resend error ${res.status}: ${errText}`);
+  }
+}
+
 async function sendSmsNotification(session, firmConfig) {
   if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_FROM_NUMBER) return;
   if (!firmConfig.notification_phone) return;
@@ -1177,6 +1207,18 @@ app.post('/twiml', async (req, reply) => {
       session = createSession({ callSid, firmId, fromPhone, firmConfig });
       sessions[callSid] = session;
       await saveSessions(sessions);
+      // Register statusCallback on the live call so we capture partial leads on hangup
+      if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
+        const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64');
+        fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Calls/${callSid}.json`, {
+          method: 'POST',
+          headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            StatusCallback: `${PUBLIC_BASE_URL}/call-status`,
+            StatusCallbackMethod: 'POST',
+          }).toString(),
+        }).catch((err) => app.log.warn({ err: String(err), callSid }, 'statusCallback registration failed'));
+      }
     }
 
     let speakText = '';
@@ -1230,6 +1272,36 @@ app.post('/twiml', async (req, reply) => {
     reply.header('Content-Type', 'text/xml');
     return reply.send(doneTwiml({ speakText: 'Sorry, there was a technical issue. Please call again.', ttsKey: null }));
   }
+});
+
+// POST /call-status — Twilio status callback; saves partial leads on hangup
+app.post('/call-status', async (req, reply) => {
+  const callSid = String(req.body?.CallSid || '').trim();
+  const callStatus = String(req.body?.CallStatus || '').trim();
+
+  if (callStatus !== 'completed' || !callSid) return reply.code(204).send();
+
+  const sessions = await loadSessions();
+  const session = sessions[callSid];
+
+  // Session already marked done — full lead already saved, nothing to do
+  if (!session || session.done) return reply.code(204).send();
+
+  // Caller hung up before intake completed — persist as partial lead
+  app.log.info({ callSid, leadId: session.leadId }, 'call-status: saving partial lead');
+
+  try {
+    await persistSessionArtifacts(session, { assistantText: '', callerText: '', done: false });
+    await patchLead(session.leadId, { status: 'partial' });
+
+    const firmConfig = await loadFirmConfig(session.firmId || 'firm_default');
+    sendPartialEmailNotification(session, firmConfig)
+      .catch((err) => app.log.warn({ err: String(err), leadId: session.leadId }, 'partial email failed'));
+  } catch (err) {
+    app.log.warn({ err: String(err), callSid }, 'call-status: partial lead save failed');
+  }
+
+  return reply.code(204).send();
 });
 
 // ── Stripe billing routes ─────────────────────────────────────────────────────
