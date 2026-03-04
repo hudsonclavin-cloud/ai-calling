@@ -125,4 +125,21 @@ export async function createBillingPortal(firmId: string): Promise<string> {
   return payload.url;
 }
 
+export interface HealthData {
+  status: string;
+  uptime: number;
+  activeSessions: number;
+  totalLeads: number;
+  version: string;
+  timestamp: string;
+}
+
+export async function getHealth(): Promise<HealthData | null> {
+  try {
+    return await fetchJson<HealthData>("/health");
+  } catch {
+    return null;
+  }
+}
+
 export { API_BASE };

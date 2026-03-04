@@ -1086,7 +1086,17 @@ function applyRepromptText(session, firmConfig) {
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 
-app.get('/health', async () => ({ ok: true }));
+app.get('/health', async () => {
+  const [leads, sessions] = await Promise.all([loadLeads(), loadSessions()]);
+  return {
+    status: 'ok',
+    uptime: process.uptime(),
+    activeSessions: Object.keys(sessions).length,
+    totalLeads: leads.length,
+    version: '1.0.0',
+    timestamp: new Date().toISOString(),
+  };
+});
 app.get('/favicon.ico', async (_, reply) => reply.code(204).send());
 
 // List all firms

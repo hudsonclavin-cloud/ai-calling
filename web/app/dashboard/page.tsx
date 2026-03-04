@@ -6,7 +6,8 @@ import { ArrowUpRight, CalendarCheck2, PhoneCall, PhoneMissed, Plus, TrendingUp,
 
 import { Badge } from "@/components/ui/badge";
 import { buttonVariants } from "@/components/ui/button";
-import { getCalls, getLeads } from "@/lib/api";
+import { getCalls, getLeads, getHealth } from "@/lib/api";
+import type { HealthData } from "@/lib/api";
 import type { CallRecord, LeadSummary } from "@/lib/types";
 
 function timeAgo(isoString: string): string {
@@ -46,13 +47,15 @@ function LiveDot() {
 export default function DashboardPage() {
   const [calls, setCalls] = useState<CallRecord[]>([]);
   const [leads, setLeads] = useState<LeadSummary[]>([]);
+  const [health, setHealth] = useState<HealthData | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [secondsAgo, setSecondsAgo] = useState(0);
 
   async function refresh() {
-    const [c, l] = await Promise.all([getCalls(), getLeads()]);
+    const [c, l, h] = await Promise.all([getCalls(), getLeads(), getHealth()]);
     setCalls(c);
     setLeads(l);
+    setHealth(h);
     setLastUpdated(new Date());
     setSecondsAgo(0);
   }
@@ -100,6 +103,12 @@ export default function DashboardPage() {
           <p className="mt-1 text-sm text-slate-500">Live intake visibility for calls, outcomes, and lead status.</p>
         </div>
         <div className="flex items-center gap-3">
+          {health && (
+            <span className="hidden items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700 sm:flex">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+              System healthy
+            </span>
+          )}
           {lastUpdated && (
             <span className="hidden items-center gap-2 sm:flex">
               <LiveDot />
