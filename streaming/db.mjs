@@ -197,6 +197,20 @@ export async function initSchema() {
     )
   `);
 
+  // webhook_logs table
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS webhook_logs (
+      id          TEXT PRIMARY KEY,
+      firm_id     TEXT NOT NULL,
+      event       TEXT NOT NULL,
+      url         TEXT NOT NULL,
+      status_code INTEGER,
+      attempts    INTEGER NOT NULL DEFAULT 1,
+      created_at  TEXT NOT NULL
+    )
+  `);
+  await client.execute(`CREATE INDEX IF NOT EXISTS idx_whlogs_firm ON webhook_logs(firm_id, created_at DESC)`);
+
   // Migrations: add columns that may not exist in older schemas
   const colInfo = await client.execute(`PRAGMA table_info(leads)`);
   const cols = colInfo.rows.map(r => String(r.name));
@@ -249,6 +263,28 @@ export async function loadSessions() {
 }
 
 export async function saveSessions(sessions) { await _saveSessions(sessions); }
+
+// ── Webhook logs ──────────────────────────────────────────────────────────────
+
+export async function createWebhookLog({ id, firmId, event, url, statusCode, attempts }) {
+  await getClient().execute({
+    sql: `INSERT OR REPLACE INTO webhook_logs (id, firm_id, event, url, status_code, attempts, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    args: [id, firmId, event, url, statusCode ?? null, attempts ?? 1, new Date().toISOString()],
+  });
+}
+
+export async function getWebhookLogs(firmId, limit = 50) {
+  const result = await getClient().execute({
+    sql: `SELECT * FROM webhook_logs WHERE firm_id = ? ORDER BY created_at DESC LIMIT ?`,
+    args: [firmId, limit],
+  });
+  return result.rows.map(r => ({
+    id: String(r.id), firmId: String(r.firm_id), event: String(r.event),
+    url: String(r.url), statusCode: r.status_code != null ? Number(r.status_code) : null,
+    attempts: Number(r.attempts), createdAt: String(r.created_at),
+  }));
+}
 
 // ── Efficient transactional artifact persist ──────────────────────────────────
 

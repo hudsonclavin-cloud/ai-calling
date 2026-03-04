@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Check, Copy, ExternalLink, Save } from "lucide-react";
+import { Check, Copy, ExternalLink, Save, Zap } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { SelectNative } from "@/components/ui/select-native";
 import { Textarea } from "@/components/ui/textarea";
-import { saveSettings } from "@/lib/api";
+import { saveSettings, testWebhook } from "@/lib/api";
 import type { FirmSettings } from "@/lib/types";
 
 const TONES = ["Professional", "Warm", "Concise", "Friendly", "Formal"];
@@ -45,6 +45,54 @@ function WebhookCopyField({ firmId }: { firmId: string }) {
         <ExternalLink className="h-3.5 w-3.5" />
         Twilio
       </a>
+    </div>
+  );
+}
+
+function WebhookDeliveryField({ firmId, webhookUrl, onChange }: { firmId: string; webhookUrl: string; onChange: (v: string) => void }) {
+  const [testing, setTesting] = useState(false);
+  const [result, setResult] = useState<{ ok: boolean; status: number; body: string } | null>(null);
+
+  async function handleTest() {
+    setTesting(true);
+    setResult(null);
+    try {
+      const r = await testWebhook(firmId);
+      setResult(r);
+    } catch {
+      setResult({ ok: false, status: 0, body: "Request failed" });
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  return (
+    <div className="grid gap-2">
+      <Label htmlFor="webhook_url">Delivery Webhook (Zapier / Make)</Label>
+      <div className="flex gap-2">
+        <Input
+          id="webhook_url"
+          type="url"
+          value={webhookUrl}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder="https://hooks.zapier.com/hooks/catch/..."
+        />
+        <button
+          type="button"
+          onClick={handleTest}
+          disabled={testing || !webhookUrl}
+          className="flex shrink-0 items-center gap-1.5 rounded-md border border-slate-200 px-2.5 py-2 text-xs font-medium text-slate-500 transition-colors hover:bg-slate-50 hover:text-slate-700 disabled:opacity-40"
+        >
+          <Zap className="h-3.5 w-3.5" />
+          {testing ? "Sending…" : "Test"}
+        </button>
+      </div>
+      {result && (
+        <p className={`text-xs ${result.ok ? "text-emerald-600" : "text-rose-600"}`}>
+          {result.ok ? `✓ ${result.status} OK` : `✗ ${result.status || "Error"} — ${result.body.slice(0, 120)}`}
+        </p>
+      )}
+      <p className="text-xs text-slate-400">Optional: POST lead data here after each completed intake.</p>
     </div>
   );
 }
@@ -186,6 +234,7 @@ export function SettingsForm({ initialSettings }: { initialSettings: FirmSetting
               Set this as the "A Call Comes In" webhook (HTTP POST) on your Twilio number.
             </p>
           </div>
+          <WebhookDeliveryField firmId={form.id} webhookUrl={form.webhook_url ?? ""} onChange={(v) => setForm((f) => ({ ...f, webhook_url: v }))} />
         </CardContent>
       </Card>
 

@@ -15,6 +15,8 @@ import {
   saveSessions,
   persistSessionArtifacts,
   patchLead,
+  createWebhookLog,
+  getWebhookLogs,
 } from './db.mjs';
 
 const fetch = globalThis.fetch;
@@ -909,6 +911,46 @@ function fireNotifications(session, firmConfig) {
     .catch((err) => app.log.warn({ err: String(err), leadId: session.leadId }, 'email notification failed'));
   sendSmsNotification(session, firmConfig)
     .catch((err) => app.log.warn({ err: String(err), leadId: session.leadId }, 'sms notification failed'));
+  // Build a minimal lead object for the webhook payload
+  const lead = { id: session.leadId, firmId: session.firmId, fromPhone: session.fromPhone, status: 'ready_for_review', ...session.collected };
+  fireWebhooks(lead, session.firmId, firmConfig);
+}
+
+// ── Webhook delivery ──────────────────────────────────────────────────────────
+
+async function deliverWebhook(event, lead, firmId, firmConfig) {
+  const url = firmConfig?.webhook_url;
+  if (!url) return;
+
+  const logId = `wh_${sha1(`${firmId}|${event}|${lead.id}|${Date.now()}`)}`;
+  const delays = [1000, 3000, 9000];
+  let lastStatus = null;
+
+  for (let attempt = 0; attempt <= delays.length; attempt++) {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ event, lead, firm_id: firmId, timestamp: new Date().toISOString() }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      lastStatus = res.status;
+      await createWebhookLog({ id: logId, firmId, event, url, statusCode: res.status, attempts: attempt + 1 });
+      if (res.ok) return;
+    } catch (err) {
+      app.log.warn({ err: String(err), firmId, event, attempt }, 'webhook delivery attempt failed');
+    }
+    if (attempt < delays.length) await new Promise((r) => setTimeout(r, delays[attempt]));
+  }
+  await createWebhookLog({ id: logId, firmId, event, url, statusCode: lastStatus, attempts: delays.length + 1 });
+}
+
+function fireWebhooks(lead, firmId, firmConfig) {
+  const event = lead.status === 'partial' ? 'lead.partial'
+    : lead.status === 'voicemail' ? 'lead.voicemail'
+    : 'lead.created';
+  deliverWebhook(event, lead, firmId, firmConfig)
+    .catch((err) => app.log.warn({ err: String(err), firmId }, 'webhook delivery error'));
 }
 
 // ── Core controller ───────────────────────────────────────────────────────────
@@ -1369,6 +1411,8 @@ app.post('/call-status', async (req, reply) => {
     const firmConfig = await loadFirmConfig(session.firmId || 'firm_default');
     sendPartialEmailNotification(session, firmConfig)
       .catch((err) => app.log.warn({ err: String(err), leadId: session.leadId }, 'partial email failed'));
+    const partialLead = { id: session.leadId, firmId: session.firmId, fromPhone: session.fromPhone, status: 'partial', ...session.collected };
+    fireWebhooks(partialLead, session.firmId, firmConfig);
   } catch (err) {
     app.log.warn({ err: String(err), callSid }, 'call-status: partial lead save failed');
   }
@@ -1504,6 +1548,45 @@ app.post('/api/billing/portal', async (req, reply) => {
 });
 
 // POST /api/resend-instructions — resend Twilio setup email to a firm
+app.get('/api/webhook-logs/:firmId', async (req, reply) => {
+  const { firmId } = req.params;
+  const limit = Math.min(Number(req.query?.limit || 50), 200);
+  const logs = await getWebhookLogs(firmId, limit);
+  return { data: logs };
+});
+
+app.post('/api/test-webhook', async (req, reply) => {
+  const firmId = String(req.body?.firmId || '').trim();
+  if (!firmId) return reply.code(400).send({ error: 'firmId required' });
+  const firmConfig = await loadFirmConfig(firmId);
+  if (!firmConfig.webhook_url) return reply.code(400).send({ error: 'No webhook_url configured for this firm' });
+
+  const fakeLead = {
+    id: 'lead_test_' + Date.now(),
+    firmId,
+    fromPhone: '+15555550000',
+    full_name: 'Test Caller',
+    callback_number: '+15555550000',
+    practice_area: firmConfig.practice_areas?.[0] || 'General',
+    case_summary: 'This is a test webhook payload from Ava.',
+    status: 'ready_for_review',
+    caller_type: 'new',
+  };
+
+  try {
+    const res = await fetch(firmConfig.webhook_url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ event: 'lead.test', lead: fakeLead, firm_id: firmId, timestamp: new Date().toISOString() }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const body = await res.text().catch(() => '');
+    return { ok: res.ok, status: res.status, body: body.slice(0, 500) };
+  } catch (err) {
+    return reply.code(502).send({ error: String(err) });
+  }
+});
+
 app.post('/api/resend-instructions', async (req, reply) => {
   const firmId = String(req.body?.firmId || '').trim();
   if (!firmId) return reply.code(400).send({ error: 'firmId required' });

@@ -124,6 +124,10 @@ export async function sendSetupInstructions(firmId: string): Promise<void> {
   });
 }
 
+export async function testWebhook(firmId: string): Promise<{ ok: boolean; status: number; body: string }> {
+  return fetchJson("/api/test-webhook", { method: "POST", body: JSON.stringify({ firmId }) });
+}
+
 export async function createBillingPortal(firmId: string): Promise<string> {
   const payload = await fetchJson<{ url: string }>("/api/billing/portal", {
     method: "POST",

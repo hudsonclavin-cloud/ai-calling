@@ -85,6 +85,7 @@ export interface FirmSettings {
   notification_email: string;
   notification_phone: string;
   twilio_phone?: string;
+  webhook_url?: string;
   stripe_customer_id?: string;
   stripe_subscription_id?: string;
   billing_status?: string;
