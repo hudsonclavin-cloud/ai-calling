@@ -27,7 +27,7 @@ const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://127.0.0.1:${PORT}
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || '';
-const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || '21m00Tcm4TlvDq8ikWAM';
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'XrExE9yKIg1WjnnlVkGX'; // Matilda (warm, conversational)
 const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID || 'eleven_turbo_v2_5';
 const TTS_TIMEOUT_MS = Number(process.env.TTS_TIMEOUT_MS || 2500);
 const MAX_TTS_CHARS = Number(process.env.MAX_TTS_CHARS || 180);
@@ -659,13 +659,15 @@ async function synthesizeToDisk(text) {
   const safeText = truncateForSpeech(text, MAX_TTS_CHARS);
   if (!safeText || !ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) return null;
 
-  const voiceSettingsKey = `${process.env.ELEVEN_STABILITY ?? '0.40'}|${process.env.ELEVEN_SIMILARITY ?? '0.75'}|${process.env.ELEVEN_STYLE ?? '0.35'}|${process.env.ELEVEN_SPEAKER_BOOST ?? 'true'}|${process.env.ELEVEN_SPEED ?? '1.0'}`;
+  const voiceSettingsKey = `${process.env.ELEVEN_STABILITY ?? '0.20'}|${process.env.ELEVEN_SIMILARITY ?? '0.75'}|${process.env.ELEVEN_STYLE ?? '0.35'}|${process.env.ELEVEN_SPEAKER_BOOST ?? 'true'}|${process.env.ELEVEN_SPEED ?? '1.15'}`;
   const key = sha1(`${ELEVENLABS_VOICE_ID}|${ELEVENLABS_MODEL_ID}|${voiceSettingsKey}|${safeText}`);
   const filePath = path.join(AUDIO_DIR, `${key}.mp3`);
   const already = await fs.readFile(filePath).catch(() => null);
   if (already) return key;
 
   try {
+    const tFetchStart = Date.now();
+    app.log.info({ key: key.slice(0, 8), textLen: safeText.length }, 'tts-fetch-start');
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), Math.max(500, TTS_TIMEOUT_MS));
     const resp = await fetch(
@@ -677,23 +679,25 @@ async function synthesizeToDisk(text) {
           text: safeText,
           model_id: ELEVENLABS_MODEL_ID,
           voice_settings: {
-            stability:        Number(process.env.ELEVEN_STABILITY      ?? 0.40),
+            stability:        Number(process.env.ELEVEN_STABILITY      ?? 0.20),
             similarity_boost: Number(process.env.ELEVEN_SIMILARITY     ?? 0.75),
             style:            Number(process.env.ELEVEN_STYLE          ?? 0.35),
             use_speaker_boost: String(process.env.ELEVEN_SPEAKER_BOOST ?? 'true').toLowerCase() === 'true',
-            speed:            Number(process.env.ELEVEN_SPEED          ?? 1.0),
+            speed:            Number(process.env.ELEVEN_SPEED          ?? 1.15),
           },
         }),
         signal: controller.signal,
       }
     ).finally(() => clearTimeout(timeout));
 
+    app.log.info({ key: key.slice(0, 8), ok: resp.ok, status: resp.status, elapsedMs: Date.now() - tFetchStart }, 'tts-fetch-end');
     if (!resp.ok) return null;
     const audio = Buffer.from(await resp.arrayBuffer());
     if (!audio.length) return null;
     await fs.writeFile(filePath, audio);
     return key;
-  } catch {
+  } catch (err) {
+    app.log.warn({ err: String(err) }, 'tts-fetch-error');
     return null;
   }
 }
@@ -1118,6 +1122,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   const llmConfig = getEffectiveConfig(session, firmConfig);
 
   // Fire OpenAI immediately (parallel with TTS prefetch below)
+  const tOpenAiStart = Date.now();
   let llmPromise = null;
   if (callerText && OPENAI_API_KEY) {
     llmPromise = callOpenAiForNextStep({ firmConfig: llmConfig, session, userText: callerText }).catch((err) => {
@@ -1140,6 +1145,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   }
 
   const llm = llmPromise ? await llmPromise : null;
+  if (llmPromise) app.log.info({ callSid, elapsedMs: Date.now() - tOpenAiStart }, 'openai-returned');
   // Merge: LLM values win, but only if non-empty — never let an LLM empty string
   // wipe out a good deterministic extraction (e.g. case_summary from long text).
   // Also, don't let a short LLM case_summary overwrite a good long deterministic one.
@@ -1271,18 +1277,21 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   // Resolve TTS with a hard deadline: we've already spent time waiting for OpenAI,
   // so cap the additional ElevenLabs wait to TTS_BUDGET_MS. If it's not ready in
   // time, fall back to Twilio <Say> and let the file cache in the background.
-  const TTS_BUDGET_MS = Number(process.env.TTS_BUDGET_MS ?? 900);
+  const TTS_BUDGET_MS = Number(process.env.TTS_BUDGET_MS ?? 3000);
   const ttsDeadline = new Promise((r) => setTimeout(() => r(null), TTS_BUDGET_MS));
+  const tTtsStart = Date.now();
   let ttsKey;
   if (speakText === speculativeText && ttsPrefetch) {
     // Speculative hit — audio is likely already cached; race just in case
     ttsKey = await Promise.race([ttsPrefetch, ttsDeadline]);
+    app.log.info({ callSid, hit: !!ttsKey, elapsedMs: Date.now() - tTtsStart, totalMs: Date.now() - tOpenAiStart }, 'tts-resolved (speculative)');
     if (!ttsKey) app.log.info({ callSid }, 'tts-speculative-hit but deadline exceeded, using <Say>');
   } else {
     // Mismatch — start fresh synth; cache the speculative result quietly
     if (ttsPrefetch) ttsPrefetch.catch(() => {});
     const freshSynth = synthesizeToDisk(speakText);
     ttsKey = await Promise.race([freshSynth, ttsDeadline]);
+    app.log.info({ callSid, hit: !!ttsKey, elapsedMs: Date.now() - tTtsStart, totalMs: Date.now() - tOpenAiStart }, 'tts-resolved (fresh)');
     if (!ttsKey) {
       app.log.info({ callSid, speakText: speakText.slice(0, 60) }, 'tts-miss deadline exceeded, using <Say>');
       freshSynth.catch(() => {}); // keep caching for future turns
@@ -1460,6 +1469,7 @@ app.get('/api/tts', async (req, reply) => {
 });
 
 app.post('/twiml', async (req, reply) => {
+  const tTwimlStart = Date.now();
   const callSid = String(req.body?.CallSid || '').trim();
   const fromPhone = normalizePhone(req.body?.From);
   const userText = String(req.body?.SpeechResult || '').trim();
@@ -1549,6 +1559,7 @@ app.post('/twiml', async (req, reply) => {
     }
 
     reply.header('Content-Type', 'text/xml');
+    app.log.info({ callSid, ttsHit: !!ttsKey, totalMs: Date.now() - tTwimlStart }, 'twiml-sent');
 
     if (done) return reply.send(doneTwiml({ speakText, ttsKey }));
 
