@@ -1322,6 +1322,20 @@ app.post('/api/next-step', async (req, reply) => {
   }
 });
 
+app.get('/api/voice-preview', async (req, reply) => {
+  const firmId = String(req.query?.firmId || 'firm_default').trim();
+  const firmConfig = await loadFirmConfig(firmId);
+  const aName = firmConfig.ava_name || 'Ava';
+  const firmName = firmConfig.name || 'your firm';
+  const text = String(req.query?.text || `Hi, thanks for calling ${firmName}. I'm ${aName}, your virtual receptionist. How can I help you today?`).slice(0, 200);
+  const key = await synthesizeToDisk(text);
+  if (!key) return reply.code(503).send({ error: 'TTS unavailable' });
+  const audio = await fs.readFile(path.join(AUDIO_DIR, `${key}.mp3`));
+  reply.header('Content-Type', 'audio/mpeg');
+  reply.header('Cache-Control', 'no-store');
+  return reply.send(audio);
+});
+
 app.get('/api/tts', async (req, reply) => {
   const key = String(req.query?.key || '').trim();
   const text = String(req.query?.text || '').trim();

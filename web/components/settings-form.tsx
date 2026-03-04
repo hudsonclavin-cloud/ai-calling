@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Check, Copy, ExternalLink, Save, Zap } from "lucide-react";
+import { Check, Copy, ExternalLink, Save, Volume2, Zap } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -14,7 +14,9 @@ import type { FirmSettings } from "@/lib/types";
 
 const TONES = ["Professional", "Warm", "Concise", "Friendly", "Formal"];
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:5050";
+const API_BASE_CLIENT = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:5050";
+
+const API_BASE = API_BASE_CLIENT;
 
 function WebhookCopyField({ firmId }: { firmId: string }) {
   const [copied, setCopied] = useState(false);
@@ -46,6 +48,49 @@ function WebhookCopyField({ firmId }: { firmId: string }) {
         Twilio
       </a>
     </div>
+  );
+}
+
+function VoicePreviewButton({ firmId }: { firmId: string }) {
+  const [playing, setPlaying] = useState(false);
+
+  async function handlePlay() {
+    if (playing) return;
+    setPlaying(true);
+    try {
+      const url = `${API_BASE_CLIENT}/api/voice-preview?firmId=${encodeURIComponent(firmId)}`;
+      const audio = new Audio(url);
+      audio.onended = () => setPlaying(false);
+      audio.onerror = () => setPlaying(false);
+      await audio.play();
+    } catch {
+      setPlaying(false);
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={handlePlay}
+      disabled={playing}
+      className="flex items-center gap-1.5 rounded-md border border-slate-200 px-2.5 py-1.5 text-xs font-medium text-slate-500 transition-colors hover:bg-slate-50 hover:text-slate-700 disabled:opacity-50"
+    >
+      <Volume2 className="h-3.5 w-3.5" />
+      {playing ? (
+        <span className="flex items-center gap-1">
+          <span className="flex gap-0.5">
+            {[0, 1, 2].map((i) => (
+              <span
+                key={i}
+                className="inline-block w-0.5 rounded-full bg-violet-500"
+                style={{ height: "12px", animation: `bounce 0.8s ${i * 0.15}s infinite alternate` }}
+              />
+            ))}
+          </span>
+          Playing…
+        </span>
+      ) : "Preview Voice"}
+    </button>
   );
 }
 
@@ -130,8 +175,9 @@ export function SettingsForm({ initialSettings }: { initialSettings: FirmSetting
     <form className="space-y-6" onSubmit={onSubmit}>
       {/* ── Assistant ── */}
       <Card>
-        <CardHeader>
+        <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0">
           <CardTitle>Assistant</CardTitle>
+          <VoicePreviewButton firmId={form.id} />
         </CardHeader>
         <CardContent className="grid gap-4 sm:grid-cols-2">
           <div className="grid gap-2">
