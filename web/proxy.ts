@@ -11,24 +11,16 @@ export default auth((req) => {
   const { pathname, searchParams } = req.nextUrl;
   const isAdmin = !!req.auth;
 
-  // Always forward pathname to server components via request header
-  const requestHeaders = new Headers(req.headers);
-  requestHeaders.set("x-pathname", pathname);
-  const next = NextResponse.next({ request: { headers: requestHeaders } });
-
-  // Public routes — no auth required
-  if (pathname === "/signup") return next;
-
   // Already authenticated admin visiting /login — send to dashboard
   if (pathname === "/login") {
     if (isAdmin) return NextResponse.redirect(new URL("/dashboard", req.url));
-    return next;
+    return NextResponse.next();
   }
 
   // Admin-only routes
   if (ADMIN_ONLY.some((p) => pathname.startsWith(p))) {
     if (!isAdmin) return NextResponse.redirect(new URL("/login", req.url));
-    return next;
+    return NextResponse.next();
   }
 
   // Protected routes — admin or client with firmId
@@ -40,9 +32,17 @@ export default auth((req) => {
     }
   }
 
-  return next;
+  return NextResponse.next();
 });
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico|api/).*)" ],
+  matcher: [
+    "/dashboard/:path*",
+    "/leads/:path*",
+    "/calls/:path*",
+    "/settings/:path*",
+    "/clients/:path*",
+    "/onboarding/:path*",
+    "/login",
+  ],
 };
