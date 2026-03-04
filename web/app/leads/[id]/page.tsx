@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { CopySummaryButton } from "@/components/copy-button";
+import { MarkContactedButton } from "@/components/mark-contacted-button";
 import { getLeadById } from "@/lib/api";
 
 export default async function LeadDetailPage({ params }: { params: Promise<{ id: string }> }) {
@@ -34,6 +35,7 @@ export default async function LeadDetailPage({ params }: { params: Promise<{ id:
               {lead.caller_type === "returning" ? "Returning Client" : "New Client"}
             </Badge>
           )}
+          <MarkContactedButton leadId={lead.id} contactedAt={lead.contacted_at} />
         </div>
       </div>
 

@@ -1161,6 +1161,17 @@ app.get('/api/leads/:id', async (req, reply) => {
   return { data: lead };
 });
 
+app.patch('/api/leads/:id', async (req, reply) => {
+  const { id } = req.params;
+  const allowed = ['status', 'contacted_at'];
+  const updates = Object.fromEntries(
+    Object.entries(req.body || {}).filter(([k]) => allowed.includes(k))
+  );
+  if (!Object.keys(updates).length) return reply.code(400).send({ error: 'No valid fields to update' });
+  await patchLead(id, updates);
+  return { ok: true };
+});
+
 app.post('/api/next-step', async (req, reply) => {
   const firmId = String(req.body?.firmId || '').trim();
   const callSid = String(req.body?.callSid || '').trim();

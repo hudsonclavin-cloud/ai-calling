@@ -45,6 +45,7 @@ export interface LeadSummary {
   lastCallSid: string;
   createdAt: string;
   updatedAt: string;
+  contacted_at: string | null;
 }
 
 export interface LeadDetail {
@@ -60,6 +61,7 @@ export interface LeadDetail {
   lastCallSid: string;
   createdAt: string;
   updatedAt: string;
+  contacted_at: string | null;
   transcript: TranscriptEntry[];
   timeline: TimelineEvent[];
 }

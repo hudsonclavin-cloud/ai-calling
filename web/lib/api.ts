@@ -110,6 +110,13 @@ export async function createCheckoutSession(firmId: string, fromSignup = false):
   return payload.url;
 }
 
+export async function patchLead(id: string, updates: { contacted_at?: string; status?: string }): Promise<void> {
+  await fetchJson(`/api/leads/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(updates),
+  });
+}
+
 export async function sendSetupInstructions(firmId: string): Promise<void> {
   await fetchJson("/api/resend-instructions", {
     method: "POST",

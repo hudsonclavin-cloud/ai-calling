@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Users } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
+import { CheckCheck } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { SelectNative } from "@/components/ui/select-native";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -84,13 +85,14 @@ export function LeadsTable({ leads }: { leads: LeadSummary[] }) {
               <TableHead>Practice Area</TableHead>
               <TableHead>Status</TableHead>
               <TableHead>Caller</TableHead>
+              <TableHead>Contacted</TableHead>
               <TableHead>Created</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {filtered.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={5}>
+                <TableCell colSpan={6}>
                   <div className="flex flex-col items-center justify-center gap-2 py-16 text-slate-400">
                     <Users className="h-8 w-8 opacity-40" />
                     <p className="text-sm font-medium text-slate-500">No leads found</p>
@@ -132,6 +134,16 @@ export function LeadsTable({ leads }: { leads: LeadSummary[] }) {
                       </Badge>
                     ) : (
                       <span className="text-slate-400">—</span>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    {lead.contacted_at ? (
+                      <span className="inline-flex items-center gap-1 text-xs text-emerald-600">
+                        <CheckCheck className="h-3.5 w-3.5" />
+                        {new Date(lead.contacted_at).toLocaleDateString()}
+                      </span>
+                    ) : (
+                      <span className="text-slate-300">—</span>
                     )}
                   </TableCell>
                   <TableCell className="text-slate-500">{timeAgo(lead.createdAt)}</TableCell>
