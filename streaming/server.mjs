@@ -1612,6 +1612,34 @@ app.post('/api/billing/portal', async (req, reply) => {
 });
 
 // POST /api/resend-instructions — resend Twilio setup email to a firm
+app.get('/api/admin/overview', async (req, reply) => {
+  const [allCalls, allLeads, allFirms] = await Promise.all([loadCalls(), loadLeads(), listFirmConfigs()]);
+  const now = Date.now();
+  const monthCutoff = new Date(now - 30 * 86_400_000).toISOString();
+
+  const firmStats = allFirms.map((firm) => {
+    const firmCalls = allCalls.filter((c) => c.firmId === firm.id);
+    const monthCalls = firmCalls.filter((c) => c.startedAt >= monthCutoff);
+    const completed = monthCalls.filter((c) => c.outcome === 'intake_complete').length;
+    const completionRate = monthCalls.length > 0 ? Math.round((completed / monthCalls.length) * 100) : 0;
+    const lastCall = firmCalls.sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0]?.startedAt || null;
+    return {
+      id: firm.id,
+      name: firm.name,
+      billing_status: firm.billing_status || 'unknown',
+      callsThisMonth: monthCalls.length,
+      completionRate,
+      lastCallAt: lastCall,
+    };
+  }).sort((a, b) => b.callsThisMonth - a.callsThisMonth);
+
+  const totalFirms = allFirms.length;
+  const totalLeads = allLeads.length;
+  const totalCalls = allCalls.length;
+
+  return { totalFirms, totalLeads, totalCalls, firms: firmStats };
+});
+
 app.get('/api/analytics/:firmId', async (req, reply) => {
   const { firmId } = req.params;
   const days = Math.min(Number(req.query?.days || 30), 365);
