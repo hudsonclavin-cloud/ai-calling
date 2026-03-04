@@ -51,6 +51,7 @@ function parseLead(row) {
     createdAt:       String(row.createdAt),
     updatedAt:       String(row.updatedAt),
     contacted_at:    row.contacted_at ? String(row.contacted_at) : null,
+    quality_score:   row.quality_score ? JSON.parse(String(row.quality_score)) : null,
     transcript:      JSON.parse(String(row.transcript || '[]')),
     timeline:        JSON.parse(String(row.timeline   || '[]')),
   };
@@ -220,6 +221,9 @@ export async function initSchema() {
   if (!cols.includes('contacted_at')) {
     await client.execute(`ALTER TABLE leads ADD COLUMN contacted_at TEXT`);
   }
+  if (!cols.includes('quality_score')) {
+    await client.execute(`ALTER TABLE leads ADD COLUMN quality_score TEXT`);
+  }
 }
 
 // ── Public async API ──────────────────────────────────────────────────────────
@@ -244,7 +248,7 @@ export async function saveLeads(leads) { await _saveLeads(leads); }
 
 // Patch arbitrary whitelisted fields on a lead row
 export async function patchLead(id, updates) {
-  const allowed = ['status', 'contacted_at'];
+  const allowed = ['status', 'contacted_at', 'quality_score'];
   const entries = Object.entries(updates).filter(([k]) => allowed.includes(k));
   if (!entries.length) return;
   const now = nowIso();

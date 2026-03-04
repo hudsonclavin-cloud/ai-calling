@@ -1,5 +1,5 @@
 import { notFound } from "next/navigation";
-import { Clock3, ScrollText } from "lucide-react";
+import { Clock3, ScrollText, Star } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -78,6 +78,43 @@ export default async function LeadDetailPage({ params }: { params: Promise<{ id:
           </CardContent>
         </Card>
       </div>
+
+      {/* ── Quality Score ── */}
+      {lead.quality_score && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Star className="h-4 w-4 text-amber-500" />
+              Call Quality Score
+            </CardTitle>
+            <CardDescription>AI-generated quality assessment.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="grid gap-4 sm:grid-cols-4">
+              {(["naturalness", "completeness", "efficiency", "overall"] as const).map((key) => {
+                const score = lead.quality_score![key];
+                const color = score >= 8 ? "text-emerald-600" : score >= 5 ? "text-amber-600" : "text-rose-500";
+                return (
+                  <div key={key} className="rounded-lg border border-slate-200 p-4 text-center">
+                    <p className={`text-3xl font-bold ${color}`}>{score}</p>
+                    <p className="mt-1 text-xs font-medium capitalize text-slate-500">{key}</p>
+                    <div className="mt-2 h-1.5 w-full rounded-full bg-slate-100">
+                      <div className={`h-1.5 rounded-full ${score >= 8 ? "bg-emerald-500" : score >= 5 ? "bg-amber-500" : "bg-rose-500"}`} style={{ width: `${score * 10}%` }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            {lead.quality_score.flags.length > 0 && (
+              <div className="mt-4 flex flex-wrap gap-2">
+                {lead.quality_score.flags.map((flag, i) => (
+                  <span key={i} className="rounded-full border border-slate-200 px-2.5 py-0.5 text-xs text-slate-500">{flag}</span>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {/* ── Transcript ── */}
       <Card>

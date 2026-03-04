@@ -48,6 +48,14 @@ export interface LeadSummary {
   contacted_at: string | null;
 }
 
+export interface QualityScore {
+  naturalness: number;
+  completeness: number;
+  efficiency: number;
+  overall: number;
+  flags: string[];
+}
+
 export interface LeadDetail {
   id: string;
   firmId: string;
@@ -62,6 +70,7 @@ export interface LeadDetail {
   createdAt: string;
   updatedAt: string;
   contacted_at: string | null;
+  quality_score: QualityScore | null;
   transcript: TranscriptEntry[];
   timeline: TimelineEvent[];
 }

@@ -955,6 +955,38 @@ async function sendSmsNotification(session, firmConfig) {
   }
 }
 
+async function scoreCallQuality(session) {
+  if (!OPENAI_API_KEY || !session.transcript?.length) return;
+  try {
+    const transcript = session.transcript.map((e) => `${e.role}: ${e.text}`).join('\n');
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        temperature: 0,
+        max_tokens: 200,
+        response_format: { type: 'json_object' },
+        messages: [
+          {
+            role: 'system',
+            content: 'You are evaluating an AI phone intake call. Score it 1-10 on three dimensions and return strict JSON: { "naturalness": <int>, "completeness": <int>, "efficiency": <int>, "overall": <int>, "flags": [<string>] }. naturalness=how conversational it felt, completeness=how much info was collected, efficiency=how many turns it took relative to info gathered. flags=array of short observations (max 3, each under 10 words). Be concise.',
+          },
+          { role: 'user', content: `Transcript:\n${transcript.slice(0, 3000)}` },
+        ],
+      }),
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    const raw = data.choices?.[0]?.message?.content || '';
+    const score = JSON.parse(raw);
+    await patchLead(session.leadId, { quality_score: JSON.stringify(score) });
+    app.log.info({ leadId: session.leadId, score }, 'quality score saved');
+  } catch (err) {
+    app.log.warn({ err: String(err), leadId: session.leadId }, 'quality scoring failed');
+  }
+}
+
 function fireNotifications(session, firmConfig) {
   if (!session.done) return;
   sendEmailNotification(session, firmConfig)
@@ -964,6 +996,7 @@ function fireNotifications(session, firmConfig) {
   // Build a minimal lead object for the webhook payload
   const lead = { id: session.leadId, firmId: session.firmId, fromPhone: session.fromPhone, status: 'ready_for_review', ...session.collected };
   fireWebhooks(lead, session.firmId, firmConfig);
+  scoreCallQuality(session); // fire-and-forget
 }
 
 // ── Webhook delivery ──────────────────────────────────────────────────────────
