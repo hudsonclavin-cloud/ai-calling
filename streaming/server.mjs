@@ -718,36 +718,40 @@ function appendTranscript(session, role, text) {
 
 function buildWelcomeEmailHtml({ firm, webhookUrl, dashboardUrl }) {
   const name = firm.ava_name || 'Ava';
-  return `
-<!DOCTYPE html>
-<html>
-<body style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;color:#1e293b">
-  <h2 style="color:#0ea5e9">Your ${name} AI assistant is ready!</h2>
-  <p>Hi ${firm.contact_name || 'there'},</p>
-  <p>Your AI intake assistant is set up and ready to go. Follow the steps below to connect it to your Twilio phone number.</p>
+  const steps = [
+    'Go to <a href="https://console.twilio.com" style="color:#0ea5e9">console.twilio.com</a> → Phone Numbers → Manage → Active Numbers',
+    'Click your phone number',
+    'Under <strong>Voice &amp; Fax</strong> → "A Call Comes In", choose <strong>Webhook</strong>',
+    'Set method to <strong>HTTP POST</strong> and paste your webhook URL below',
+    'Click <strong>Save Configuration</strong>',
+  ];
 
-  <h3>Your Webhook URL</h3>
-  <div style="background:#f1f5f9;border-radius:6px;padding:12px;font-family:monospace;font-size:13px;word-break:break-all">
-    ${webhookUrl}
-  </div>
+  const stepsHtml = steps.map((s, i) => `
+    <tr>
+      <td style="padding:12px 0;vertical-align:top">
+        <span style="display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:50%;background:#0ea5e9;color:#fff;font-size:12px;font-weight:700;flex-shrink:0">${i + 1}</span>
+      </td>
+      <td style="padding:12px 0 12px 12px;font-size:14px;color:#1e293b;line-height:1.6">${s}</td>
+    </tr>`).join('');
 
-  <h3>Twilio Setup Steps</h3>
-  <ol style="line-height:1.8">
-    <li>Go to <a href="https://console.twilio.com">console.twilio.com</a> → Phone Numbers</li>
-    <li>Click your phone number</li>
-    <li>Under <strong>Voice &amp; Fax</strong> → "A Call Comes In", set to <strong>Webhook (HTTP POST)</strong></li>
-    <li>Paste your webhook URL above</li>
-    <li>Click <strong>Save</strong></li>
-  </ol>
+  const body = `
+    <p style="font-size:16px;color:#1e293b;margin:0 0 20px">Hi ${firm.contact_name || 'there'}, your AI intake assistant <strong>${name}</strong> is set up and ready. Complete the 5-step Twilio connection below and you'll start capturing leads immediately.</p>
 
-  <p>Once configured, ${name} will automatically answer calls and capture lead information for your team.</p>
+    <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:16px 20px;margin-bottom:24px">
+      <p style="margin:0 0 8px;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#0369a1">Your Webhook URL</p>
+      <code style="font-size:13px;color:#0c4a6e;word-break:break-all;line-height:1.5">${webhookUrl}</code>
+    </div>
 
-  <p><a href="${dashboardUrl}" style="display:inline-block;background:#0ea5e9;color:white;padding:10px 20px;border-radius:6px;text-decoration:none;font-weight:600">Go to my dashboard →</a></p>
+    <h3 style="margin:0 0 12px;font-size:16px;color:#1e293b">Twilio Setup (5 steps)</h3>
+    <table cellpadding="0" cellspacing="0" style="width:100%">${stepsHtml}</table>
 
-  <p style="color:#64748b;font-size:13px">Questions? Reply to this email and we'll help you get set up.</p>
-</body>
-</html>
-`.trim();
+    <div style="margin-top:28px;background:#f8fafc;border-radius:10px;padding:16px 20px">
+      <p style="margin:0 0 4px;font-size:13px;color:#64748b">Once connected, ${name} will automatically answer calls, run through your intake questions, and send you a summary like this one.</p>
+    </div>
+
+    <p style="margin:28px 0 0"><a href="${dashboardUrl}" style="display:inline-block;background:#0ea5e9;color:#fff;padding:13px 24px;border-radius:8px;text-decoration:none;font-size:14px;font-weight:600">Go to my Dashboard →</a></p>`;
+
+  return emailShell({ headerColor: '#0ea5e9', headerLabel: 'Welcome to Ava', headerTitle: `${name} is ready — Twilio setup`, body, firmName: firm.name });
 }
 
 async function sendWelcomeEmail(firm) {
@@ -773,67 +777,113 @@ async function sendWelcomeEmail(firm) {
 // Both functions are async and throw on failure so the caller can log the error.
 // Use fireNotifications() to call them fire-and-forget after a call completes.
 
+// ── Email HTML builder helpers ────────────────────────────────────────────────
+
+function emailShell({ headerColor, headerLabel, headerTitle, body, firmName }) {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f8fafc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:32px 16px">
+<table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.08)">
+  <tr><td style="background:${headerColor};padding:24px 28px">
+    <p style="margin:0 0 4px;font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:rgba(255,255,255,.75)">${headerLabel}</p>
+    <h1 style="margin:0;font-size:22px;font-weight:700;color:#fff">${headerTitle}</h1>
+  </td></tr>
+  <tr><td style="padding:28px">${body}</td></tr>
+  <tr><td style="padding:16px 28px;background:#f8fafc;border-top:1px solid #e2e8f0">
+    <p style="margin:0;font-size:12px;color:#94a3b8">Powered by <strong>Ava</strong> for ${firmName || 'your firm'}</p>
+  </td></tr>
+</table>
+</td></tr></table>
+</body></html>`;
+}
+
+function badge(text, color) {
+  const colors = { emerald: '#ecfdf5;color:#065f46', amber: '#fffbeb;color:#92400e', violet: '#f5f3ff;color:#5b21b6', sky: '#e0f2fe;color:#075985' };
+  const style = colors[color] || '#f1f5f9;color:#334155';
+  return `<span style="display:inline-block;background:#${style.split(';')[0].replace('#','')};color:${style.split(';')[1]?.replace('color:','')};padding:2px 10px;border-radius:999px;font-size:12px;font-weight:600">${text}</span>`;
+}
+
+function infoRow(label, value) {
+  return `<tr><td style="padding:8px 0;color:#64748b;font-size:14px;width:140px;vertical-align:top">${label}</td><td style="padding:8px 0;color:#1e293b;font-size:14px;font-weight:500">${value || '—'}</td></tr>`;
+}
+
+function ctaButton(text, url, color = '#6d28d9') {
+  return `<p style="margin:24px 0 0"><a href="${url}" style="display:inline-block;background:${color};color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-size:14px;font-weight:600">${text} →</a></p>`;
+}
+
 async function sendEmailNotification(session, firmConfig) {
   if (!RESEND_API_KEY || !firmConfig.notification_email) return;
 
   const { full_name, callback_number, practice_area, case_summary } = session.collected;
-  const name = full_name || 'Unknown';
+  const name = full_name || 'Unknown Caller';
   const area = practice_area || 'General';
+  const phone = callback_number || session.fromPhone;
+  const dashUrl = `${WEB_BASE_URL}/leads/${session.leadId}`;
+
+  const urgencyBanner = session.isUrgent
+    ? `<div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;padding:12px 16px;margin-bottom:20px;color:#991b1b;font-size:14px;font-weight:600">⚠️ Urgent — caller indicated an emergency situation</div>`
+    : '';
+
+  const body = `
+    <h2 style="margin:0 0 4px;font-size:20px;font-weight:700;color:#1e293b">${name}</h2>
+    <p style="margin:0 0 16px"><a href="tel:${phone}" style="color:#6d28d9;text-decoration:none;font-size:15px">${phone}</a></p>
+    ${urgencyBanner}
+    <div style="margin-bottom:20px">${badge(area, 'violet')} ${session.callerType ? badge(session.callerType === 'returning' ? 'Returning Client' : 'New Client', 'sky') : ''}</div>
+    <table cellpadding="0" cellspacing="0" style="width:100%;border-top:1px solid #e2e8f0">
+      ${infoRow('Practice Area', area)}
+      ${infoRow('Callback Number', `<a href="tel:${phone}" style="color:#6d28d9">${phone}</a>`)}
+    </table>
+    ${case_summary ? `<div style="margin-top:20px"><p style="margin:0 0 8px;font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#94a3b8">Case Summary</p><blockquote style="margin:0;padding:14px 16px;background:#f8f5ff;border-left:4px solid #7c3aed;border-radius:0 8px 8px 0;font-size:14px;color:#1e293b;line-height:1.6">${case_summary}</blockquote></div>` : ''}
+    ${ctaButton('View Lead in Dashboard', dashUrl)}`;
+
+  const html = emailShell({
+    headerColor: '#6d28d9',
+    headerLabel: `New Lead — ${firmConfig.name || 'Your Firm'}`,
+    headerTitle: name,
+    body,
+    firmName: firmConfig.name,
+  });
 
   const res = await fetch('https://api.resend.com/emails', {
     method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${RESEND_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      from: RESEND_FROM_EMAIL,
-      to: [firmConfig.notification_email],
-      subject: `New intake lead — ${name} (${area})`,
-      text: [
-        `New lead from ${name}`,
-        `Phone: ${callback_number || session.fromPhone}`,
-        `Matter: ${area}`,
-        `Summary: ${case_summary || '—'}`,
-        '',
-        `Review in dashboard: ${PUBLIC_BASE_URL}/leads/${session.leadId}`,
-      ].join('\n'),
-    }),
+    headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from: RESEND_FROM_EMAIL, to: [firmConfig.notification_email], subject: `New lead — ${name} (${area})`, html }),
   });
-
-  if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    throw new Error(`Resend error ${res.status}: ${errText}`);
-  }
+  if (!res.ok) { const e = await res.text().catch(() => ''); throw new Error(`Resend error ${res.status}: ${e}`); }
 }
 
 async function sendPartialEmailNotification(session, firmConfig) {
   if (!RESEND_API_KEY || !firmConfig.notification_email) return;
   const { full_name, callback_number, practice_area } = session.collected || {};
-  const name = full_name || 'Unknown';
+  const name = full_name || 'Unknown Caller';
+  const phone = callback_number || session.fromPhone;
   const area = practice_area || 'General';
+  const dashUrl = `${WEB_BASE_URL}/leads/${session.leadId}`;
+  const capturedFields = Object.entries(session.collected || {}).filter(([, v]) => v).map(([k]) => k).join(', ') || 'none';
+
+  const body = `
+    <h2 style="margin:0 0 4px;font-size:20px;font-weight:700;color:#1e293b">${name}</h2>
+    <p style="margin:0 0 16px"><a href="tel:${phone}" style="color:#b45309;text-decoration:none;font-size:15px">${phone}</a></p>
+    <div style="background:#fffbeb;border:1px solid #fcd34d;border-radius:8px;padding:12px 16px;margin-bottom:20px;color:#92400e;font-size:14px">
+      Caller hung up before intake was completed.
+    </div>
+    <table cellpadding="0" cellspacing="0" style="width:100%;border-top:1px solid #e2e8f0">
+      ${infoRow('Practice Area', area)}
+      ${infoRow('Phone', `<a href="tel:${phone}" style="color:#b45309">${phone}</a>`)}
+      ${infoRow('Fields Captured', capturedFields)}
+    </table>
+    ${ctaButton('View in Dashboard', dashUrl, '#d97706')}`;
+
+  const html = emailShell({ headerColor: '#d97706', headerLabel: 'Partial Intake', headerTitle: `Partial Lead — ${name}`, body, firmName: firmConfig.name });
+
   const res = await fetch('https://api.resend.com/emails', {
     method: 'POST',
-    headers: { 'Authorization': `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      from: RESEND_FROM_EMAIL,
-      to: [firmConfig.notification_email],
-      subject: `[Partial] Lead from ${name} (${area})`,
-      text: [
-        `Partial intake — caller hung up before completion.`,
-        `Name: ${name}`,
-        `Phone: ${callback_number || session.fromPhone}`,
-        `Matter: ${area}`,
-        `Fields captured: ${Object.keys(session.collected || {}).join(', ') || 'none'}`,
-        '',
-        `Review in dashboard: ${PUBLIC_BASE_URL}/leads/${session.leadId}`,
-      ].join('\n'),
-    }),
+    headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from: RESEND_FROM_EMAIL, to: [firmConfig.notification_email], subject: `[Partial] Lead from ${name} (${area})`, html }),
   });
-  if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    throw new Error(`Resend error ${res.status}: ${errText}`);
-  }
+  if (!res.ok) { const e = await res.text().catch(() => ''); throw new Error(`Resend error ${res.status}: ${e}`); }
 }
 
 async function sendVoicemailEmailNotification({ fromPhone, transcript, firmConfig, leadId }) {
