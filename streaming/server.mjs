@@ -659,7 +659,7 @@ async function synthesizeToDisk(text) {
   const safeText = truncateForSpeech(text, MAX_TTS_CHARS);
   if (!safeText || !ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) return null;
 
-  const voiceSettingsKey = `${process.env.ELEVEN_STABILITY ?? '0.55'}|${process.env.ELEVEN_SIMILARITY ?? '0.85'}|${process.env.ELEVEN_STYLE ?? '0.15'}|${process.env.ELEVEN_SPEAKER_BOOST ?? 'true'}`;
+  const voiceSettingsKey = `${process.env.ELEVEN_STABILITY ?? '0.40'}|${process.env.ELEVEN_SIMILARITY ?? '0.75'}|${process.env.ELEVEN_STYLE ?? '0.35'}|${process.env.ELEVEN_SPEAKER_BOOST ?? 'true'}|${process.env.ELEVEN_SPEED ?? '1.0'}`;
   const key = sha1(`${ELEVENLABS_VOICE_ID}|${ELEVENLABS_MODEL_ID}|${voiceSettingsKey}|${safeText}`);
   const filePath = path.join(AUDIO_DIR, `${key}.mp3`);
   const already = await fs.readFile(filePath).catch(() => null);
@@ -669,7 +669,7 @@ async function synthesizeToDisk(text) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), Math.max(500, TTS_TIMEOUT_MS));
     const resp = await fetch(
-      `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(ELEVENLABS_VOICE_ID)}`,
+      `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(ELEVENLABS_VOICE_ID)}/stream?optimize_streaming_latency=4&output_format=mp3_44100_128`,
       {
         method: 'POST',
         headers: { 'xi-api-key': ELEVENLABS_API_KEY, Accept: 'audio/mpeg', 'Content-Type': 'application/json' },
