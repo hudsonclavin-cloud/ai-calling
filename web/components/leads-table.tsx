@@ -27,6 +27,7 @@ function statusClass(status: string): string {
   if (status === "ready_for_review") return "bg-emerald-100 text-emerald-700";
   if (status === "partial") return "bg-amber-100 text-amber-700";
   if (status === "failed") return "bg-rose-100 text-rose-700";
+  if (status === "voicemail") return "bg-violet-100 text-violet-700";
   return "bg-slate-100 text-slate-600";
 }
 
@@ -35,6 +36,7 @@ function formatStatus(status: string): string {
   if (status === "in_progress") return "In Progress";
   if (status === "partial") return "Partial";
   if (status === "failed") return "Failed";
+  if (status === "voicemail") return "Voicemail";
   return status;
 }
 

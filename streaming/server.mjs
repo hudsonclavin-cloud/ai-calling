@@ -588,6 +588,19 @@ function gatherTwiml({ actionUrl, speakText, ttsKey, emptyCount = 0 }) {
 </Response>`;
 }
 
+function voicemailTwiml({ firmId, callSid, fromPhone, firmConfig }) {
+  const msg = xmlEscape(
+    `Hi, you've reached ${firmConfig?.name || 'our office'}. Please leave your name, phone number, and a brief message after the tone and we'll get back to you shortly.`
+  );
+  const actionUrl = `${PUBLIC_BASE_URL}/voicemail-recording?firmId=${encodeURIComponent(firmId)}&callSid=${encodeURIComponent(callSid)}&from=${encodeURIComponent(fromPhone)}`;
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="alice">${msg}</Say>
+  <Record maxLength="60" transcribe="false" action="${xmlEscape(actionUrl)}" method="POST" playBeep="true"/>
+  <Hangup/>
+</Response>`;
+}
+
 function doneTwiml({ speakText, ttsKey }) {
   const speakerNode = ttsKey
     ? `<Play>${xmlEscape(`${PUBLIC_BASE_URL}/api/tts?key=${encodeURIComponent(ttsKey)}`)}</Play>`
@@ -813,6 +826,36 @@ async function sendPartialEmailNotification(session, firmConfig) {
         '',
         `Review in dashboard: ${PUBLIC_BASE_URL}/leads/${session.leadId}`,
       ].join('\n'),
+    }),
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`Resend error ${res.status}: ${errText}`);
+  }
+}
+
+async function sendVoicemailEmailNotification({ fromPhone, transcript, firmConfig, leadId }) {
+  if (!RESEND_API_KEY || !firmConfig.notification_email) return;
+  const dashUrl = `${WEB_BASE_URL}/leads/${leadId}`;
+  const res = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      from: RESEND_FROM_EMAIL,
+      to: [firmConfig.notification_email],
+      subject: `[Voicemail] from ${fromPhone}`,
+      html: `<!DOCTYPE html><html><body style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;color:#1e293b">
+        <div style="background:#7c3aed;color:white;border-radius:8px 8px 0 0;padding:20px 24px">
+          <p style="margin:0;font-size:12px;text-transform:uppercase;letter-spacing:1px;opacity:0.8">Voicemail</p>
+          <h2 style="margin:4px 0 0">New Voicemail</h2>
+        </div>
+        <div style="border:1px solid #e2e8f0;border-top:0;border-radius:0 0 8px 8px;padding:24px">
+          <p><strong>From:</strong> <a href="tel:${fromPhone}">${fromPhone}</a></p>
+          ${transcript ? `<h3 style="margin-top:16px">Transcription</h3><blockquote style="border-left:4px solid #7c3aed;margin:0;padding:12px 16px;background:#f8f5ff;color:#1e293b;font-style:italic;border-radius:0 6px 6px 0">${transcript}</blockquote>` : '<p style="color:#64748b">No transcription available.</p>'}
+          <p style="margin-top:24px"><a href="${dashUrl}" style="display:inline-block;background:#7c3aed;color:white;padding:10px 20px;border-radius:6px;text-decoration:none;font-weight:600">View in Dashboard →</a></p>
+          <p style="color:#94a3b8;font-size:12px;margin-top:24px">Powered by Ava</p>
+        </div>
+      </body></html>`,
     }),
   });
   if (!res.ok) {
@@ -1220,6 +1263,14 @@ app.post('/twiml', async (req, reply) => {
     return reply.send(doneTwiml({ speakText: 'Unable to continue this call right now.', ttsKey: null }));
   }
 
+  // Answering machine / voicemail detection
+  const answeredBy = String(req.body?.AnsweredBy || '').trim();
+  if (answeredBy === 'machine_start' || answeredBy === 'fax') {
+    const vmConfig = await loadFirmConfig(firmId);
+    reply.header('Content-Type', 'text/xml');
+    return reply.send(voicemailTwiml({ firmId, callSid, fromPhone, firmConfig: vmConfig }));
+  }
+
   try {
     const firmConfig = await loadFirmConfig(firmId);
     const sessions = await loadSessions();
@@ -1323,6 +1374,78 @@ app.post('/call-status', async (req, reply) => {
   }
 
   return reply.code(204).send();
+});
+
+// POST /voicemail-recording — Twilio Record action callback; transcribes + saves voicemail lead
+app.post('/voicemail-recording', async (req, reply) => {
+  reply.header('Content-Type', 'text/xml');
+  const emptyResponse = `<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`;
+
+  const recordingUrl = String(req.body?.RecordingUrl || '').trim();
+  const callSid = String(req.body?.CallSid || req.query?.callSid || '').trim();
+  const firmId = String(req.body?.firmId || req.query?.firmId || 'firm_default').trim();
+  const fromPhone = normalizePhone(req.body?.From || req.query?.from || '');
+
+  if (!callSid) return reply.send(emptyResponse);
+
+  app.log.info({ callSid, recordingUrl, firmId, fromPhone }, 'voicemail-recording received');
+
+  try {
+    let transcript = '';
+    if (recordingUrl && TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && OPENAI_API_KEY) {
+      const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64');
+      const audioRes = await fetch(`${recordingUrl}.mp3`, {
+        headers: { Authorization: `Basic ${auth}` },
+      }).catch(() => null);
+
+      if (audioRes?.ok) {
+        const audioBuffer = Buffer.from(await audioRes.arrayBuffer());
+        const formData = new FormData();
+        formData.append('file', new Blob([audioBuffer], { type: 'audio/mpeg' }), 'voicemail.mp3');
+        formData.append('model', 'whisper-1');
+        const whisperRes = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
+          body: formData,
+        }).catch(() => null);
+        if (whisperRes?.ok) {
+          const data = await whisperRes.json().catch(() => ({}));
+          transcript = String(data.text || '').trim();
+        }
+      }
+    }
+
+    const firmConfig = await loadFirmConfig(firmId);
+    const leadId = `lead_${sha1(`${firmId}|${fromPhone}`)}`;
+    const now = nowIso();
+    const fakeSession = {
+      callSid, firmId, fromPhone,
+      callId: `call_${sha1(`${callSid}|${firmId}`)}`,
+      leadId,
+      collected: {
+        full_name: '',
+        callback_number: fromPhone,
+        practice_area: '',
+        case_summary: transcript,
+      },
+      callerType: null,
+      isUrgent: false,
+      transcript: transcript ? [{ role: 'caller', text: transcript, ts: now }] : [],
+      done: false,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    await persistSessionArtifacts(fakeSession, { assistantText: '', callerText: transcript, done: false });
+    await patchLead(leadId, { status: 'voicemail' });
+
+    sendVoicemailEmailNotification({ fromPhone, transcript, firmConfig, leadId })
+      .catch((err) => app.log.warn({ err: String(err), leadId }, 'voicemail email failed'));
+  } catch (err) {
+    app.log.warn({ err: String(err), callSid }, 'voicemail-recording handler failed');
+  }
+
+  return reply.send(emptyResponse);
 });
 
 // ── Stripe billing routes ─────────────────────────────────────────────────────

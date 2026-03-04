@@ -35,6 +35,7 @@ function statusBadgeClass(status: string): string {
   if (status === "completed" || status === "ready_for_review") return "bg-emerald-100 text-emerald-700";
   if (status === "partial") return "bg-amber-100 text-amber-700";
   if (status === "failed") return "bg-rose-100 text-rose-700";
+  if (status === "voicemail") return "bg-violet-100 text-violet-700";
   return "bg-slate-100 text-slate-600";
 }
 
