@@ -747,10 +747,17 @@ async function prewarmTtsCache() {
     }
   }
 
-  app.log.info(`Prewarming TTS cache for ${allPhrases.size} phrases across ${firms.length} firm(s)...`);
-  const results = await Promise.allSettled([...allPhrases].map((p) => synthesizeToDisk(p)));
-  const succeeded = results.filter((r) => r.status === 'fulfilled' && r.value).length;
-  app.log.info(`TTS prewarm complete: ${succeeded}/${allPhrases.size} phrases cached`);
+  const phrases = [...allPhrases];
+  app.log.info(`Prewarming TTS cache for ${phrases.length} phrases across ${firms.length} firm(s)...`);
+  const BATCH_SIZE = 8;
+  let succeeded = 0;
+  for (let i = 0; i < phrases.length; i += BATCH_SIZE) {
+    const batch = phrases.slice(i, i + BATCH_SIZE);
+    const results = await Promise.allSettled(batch.map((p) => synthesizeToDisk(p)));
+    succeeded += results.filter((r) => r.status === 'fulfilled' && r.value).length;
+    if (i + BATCH_SIZE < phrases.length) await new Promise((r) => setTimeout(r, 500));
+  }
+  app.log.info(`TTS prewarm complete: ${succeeded}/${phrases.length} phrases cached`);
 }
 
 function addQueryParam(url, key, value) {
