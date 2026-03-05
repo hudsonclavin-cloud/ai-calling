@@ -55,6 +55,10 @@ const LEADS_FILE = path.join(DATA_DIR, 'leads.json');
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 const AUDIO_DIR = path.join(DATA_DIR, 'tts_audio');
 
+// Pre-synthesized hold phrase — used as fallback whenever a TTS key is unavailable
+const HOLD_PHRASE = 'One moment please.';
+let holdKey = null; // set at boot before prewarm
+
 // ── Default firm config (used as fallback if no file found) ──────────────────
 // To add a new firm: copy firm_default.json → firm_yourname.json and edit it.
 // That's it. No code changes needed.
@@ -613,8 +617,9 @@ function xmlEscape(s) {
 }
 
 function gatherTwiml({ actionUrl, speakText, ttsKey, emptyCount = 0, hints = '' }) {
-  const speakerNode = ttsKey
-    ? `<Play>${xmlEscape(`${PUBLIC_BASE_URL}/api/tts?key=${encodeURIComponent(ttsKey)}`)}</Play>`
+  const effectiveKey = ttsKey || holdKey;
+  const speakerNode = effectiveKey
+    ? `<Play>${xmlEscape(`${PUBLIC_BASE_URL}/api/tts?key=${encodeURIComponent(effectiveKey)}`)}</Play>`
     : `<Say>${xmlEscape(speakText)}</Say>`;
   const redirectUrl = addQueryParam(addQueryParam(actionUrl, 'empty', '1'), 'rc', Number(emptyCount) + 1);
   const hintsAttr = hints ? ` hints="${xmlEscape(hints)}"` : '';
@@ -642,8 +647,9 @@ function voicemailTwiml({ firmId, callSid, fromPhone, firmConfig }) {
 }
 
 function doneTwiml({ speakText, ttsKey }) {
-  const speakerNode = ttsKey
-    ? `<Play>${xmlEscape(`${PUBLIC_BASE_URL}/api/tts?key=${encodeURIComponent(ttsKey)}`)}</Play>`
+  const effectiveKey = ttsKey || holdKey;
+  const speakerNode = effectiveKey
+    ? `<Play>${xmlEscape(`${PUBLIC_BASE_URL}/api/tts?key=${encodeURIComponent(effectiveKey)}`)}</Play>`
     : `<Say>${xmlEscape(speakText)}</Say>`;
 
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -1290,7 +1296,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   // Resolve TTS with a hard deadline: we've already spent time waiting for OpenAI,
   // so cap the additional ElevenLabs wait to TTS_BUDGET_MS. If it's not ready in
   // time, fall back to Twilio <Say> and let the file cache in the background.
-  const TTS_BUDGET_MS = Number(process.env.TTS_BUDGET_MS ?? 3000);
+  const TTS_BUDGET_MS = Number(process.env.TTS_BUDGET_MS ?? 15000);
   const ttsDeadline = new Promise((r) => setTimeout(() => r(null), TTS_BUDGET_MS));
   const tTtsStart = Date.now();
   let ttsKey;
@@ -1587,7 +1593,7 @@ app.post('/twiml', async (req, reply) => {
       })
     );
   } catch (err) {
-    app.log.error({ err: String(err), callSid }, '/twiml failed');
+    app.log.error({ err: String(err), stack: err?.stack, callSid }, '/twiml failed');
     reply.header('Content-Type', 'text/xml');
     return reply.send(doneTwiml({ speakText: 'Sorry, there was a technical issue. Please call again.', ttsKey: null }));
   }
@@ -1975,6 +1981,10 @@ try {
   if (!AUDIO_DIR.startsWith('/app/data') && !AUDIO_DIR.startsWith('/data')) {
     console.warn('WARNING: AUDIO_DIR is not under a Railway volume mount — cached audio will be lost on redeploy:', AUDIO_DIR);
   }
+
+  // Pre-synthesize hold phrase — must be ready before any call comes in
+  holdKey = await synthesizeToDisk(HOLD_PHRASE);
+  console.log('hold-phrase ready:', holdKey ? `OK (${holdKey.slice(0, 8)})` : 'FAILED — <Say> still used as last resort');
 
   prewarmTtsCache().catch((err) => app.log.warn({ err: String(err) }, 'TTS prewarm error'));
 } catch (err) {
