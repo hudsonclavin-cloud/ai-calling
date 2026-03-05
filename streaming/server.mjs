@@ -498,14 +498,19 @@ async function callOpenAiForNextStep({ firmConfig, session, userText }) {
       },
       next_question_id: { type: 'string' },
       next_question_text: { type: 'string' },
+      acknowledgment: { type: 'string' },
       done_reason: { anyOf: [{ type: 'string' }, { type: 'null' }] },
       clarifying_note: { anyOf: [{ type: 'string' }, { type: 'null' }] },
     },
-    required: ['extracted', 'next_question_id', 'next_question_text', 'done_reason', 'clarifying_note'],
+    required: ['extracted', 'next_question_id', 'next_question_text', 'acknowledgment', 'done_reason', 'clarifying_note'],
   };
 
   const wordCount = userText.split(/\s+/).filter(Boolean).length;
   const prompt = {
+    previous_exchange: {
+      ava_asked: session.lastQuestionText || null,
+      caller_said: userText,
+    },
     firm_name: firmConfig.name,
     ava_name: firmConfig.ava_name || 'Ava',
     tone: firmConfig.tone || 'warm-professional',
@@ -529,9 +534,29 @@ async function callOpenAiForNextStep({ firmConfig, session, userText }) {
     },
   };
 
-  const systemText = `You are ${firmConfig.ava_name || 'Ava'}, a warm and attentive receptionist for ${firmConfig.name}. You are on a live phone call. Your job is to collect intake information naturally — like a real person listening and caring, not reading from a form.\n\nCORE BEHAVIOR:\n- Always acknowledge what the caller just said before asking the next question...`;
+  const systemPrompt = `You are ${firmConfig.ava_name || 'Ava'}, a warm AI receptionist having a real phone conversation with a caller. The caller just spoke to you. First acknowledge what they said like a human would, then ask the next question. Never sound like you're filling out a form.
+
+ACKNOWLEDGMENT IS REQUIRED. Never leave it empty. Always write something that reflects what the caller just said before moving on. Examples:
+- Caller said "I was in a car accident" → acknowledgment: "I'm so sorry to hear that."
+- Caller said "my landlord won't fix anything" → acknowledgment: "That sounds really frustrating."
+- Caller said "John Smith" → acknowledgment: "Got it, John."
+- Caller said something unclear → acknowledgment: "Thanks for sharing that."
+The acknowledgment field must ALWAYS be filled. No exceptions.
+
+next_question_text is the FULL thing Ava says — the acknowledgment woven naturally into the question, in one or two spoken sentences. Natural, warm, human. Never robotic.
+
+RULES:
+- Never ask for info already in current_collected. Never repeat asked_question_ids.
+- Never give legal advice.
+- If caller asks a question back, answer in one warm sentence then return to intake.
+- If is_rambling=true, silently extract everything, move to first missing field.
+- caller_is_urgent=true means open with extra warmth and reassurance.
+- caller_type: 'new', 'returning', or null.
+
+Return only strict JSON per schema.`;
+
   app.log.info({
-    systemPromptSnippet: systemText.substring(0, 500),
+    systemPromptSnippet: systemPrompt.substring(0, 500),
     userMessage: JSON.stringify(prompt).substring(0, 500),
   }, 'openai-prompt');
 
@@ -547,31 +572,7 @@ async function callOpenAiForNextStep({ firmConfig, session, userText }) {
           role: 'system',
           content: [{
             type: 'input_text',
-            text: `You are ${firmConfig.ava_name || 'Ava'}, a warm and attentive receptionist for ${firmConfig.name}. You are on a live phone call. Your job is to collect intake information naturally — like a real person listening and caring, not reading from a form.
-
-CORE BEHAVIOR:
-- Always acknowledge what the caller just said before asking the next question. If they mention an accident, say "I'm so sorry to hear that." If they sound stressed, say "I understand, let's get you to the right person." Match their emotional tone.
-- Never jump straight to a question without first responding to what they shared.
-- Sound like a human receptionist, not a bot. Use natural spoken language. No lists, no stiff phrasing.
-- Keep every response to 1–2 short sentences. Never more.
-- Never provide legal advice or opinions about the case. Never.
-
-QUESTION RULES:
-- next_question_text must be the FULL spoken response — include the acknowledgment AND the question in one natural sentence when possible.
-- Never ask for information already collected. Never repeat a question.
-- If the caller asks you a question back, answer it briefly and warmly in one sentence, then gently return to intake.
-- If is_rambling=true, extract everything you can from what they said and move to the first missing field without summarizing back to them.
-
-CALLER TYPE:
-- If they say they've called before or are a returning client, set caller_type to 'returning'. If new, set 'new'. Otherwise null.
-
-CLARIFYING NOTE:
-- Only set clarifying_note if the answer was genuinely unclear or you need to confirm something specific (max 15 words). Otherwise null.
-
-URGENCY:
-- caller_is_urgent is pre-set by the server. If true, your acknowledgment should be warm and reassuring before moving on.
-
-Return only strict JSON per schema. Never include anything outside the JSON.`,
+            text: systemPrompt,
           }],
         },
         { role: 'user', content: [{ type: 'input_text', text: JSON.stringify(prompt) }] },
@@ -616,7 +617,7 @@ function mergeExtracted(session, extracted, userText, firmConfig) {
 
 // ── Speech composition (firm-aware) ──────────────────────────────────────────
 
-function composeSpeakText({ session, bodyText, callSid, firmConfig }) {
+function composeSpeakText({ session, bodyText, callSid, firmConfig, llmAck = '' }) {
   const trimmed = String(bodyText || '').trim();
   if (!trimmed) return '';
 
@@ -626,6 +627,10 @@ function composeSpeakText({ session, bodyText, callSid, firmConfig }) {
     // On first turn, append the caller type question so the caller knows what to say
     return session.callerType === null && trimmed ? `${opening} ${trimmed}` : opening;
   }
+
+  // LLM provided its own acknowledgment — next_question_text already has it baked in,
+  // so return it directly instead of prepending a redundant deterministic ack.
+  if (llmAck) return trimmed;
 
   const ack = getNextAck(callSid || session.callSid, firmConfig);
   return `${ack} ${trimmed}`;
@@ -1290,7 +1295,10 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
       questionBody = `${capped} ${questionBody}`;
     }
 
-    speakText = composeSpeakText({ session, bodyText: questionBody, callSid, firmConfig: effectiveConfig });
+    // Pass LLM acknowledgment so composeSpeakText skips the deterministic ack
+    // (next_question_text already has the natural ack baked in by the LLM)
+    const llmAck = String(llm?.acknowledgment || '').trim();
+    speakText = composeSpeakText({ session, bodyText: questionBody, callSid, firmConfig: effectiveConfig, llmAck });
 
     // Urgency: replace normal ack with empathetic acknowledgment on first urgent turn
     if (session.isUrgent && !session.urgencySpoken) {
