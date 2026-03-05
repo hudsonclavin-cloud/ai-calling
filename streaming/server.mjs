@@ -533,7 +533,7 @@ async function callOpenAiForNextStep({ firmConfig, session, userText }) {
     headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       model: OPENAI_MODEL,
-      temperature: 0,
+      temperature: 0.7,
       max_output_tokens: 300,
       input: [
         {
