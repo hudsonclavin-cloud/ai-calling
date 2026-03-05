@@ -3,6 +3,7 @@ import Fastify from 'fastify';
 import formbody from '@fastify/formbody';
 import Stripe from 'stripe';
 import crypto from 'node:crypto';
+import { Readable, PassThrough } from 'node:stream';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -635,11 +636,13 @@ function xmlEscape(s) {
     .replaceAll("'", '&#39;');
 }
 
-function gatherTwiml({ actionUrl, speakText, ttsKey, emptyCount = 0, hints = '' }) {
+function gatherTwiml({ actionUrl, speakText, ttsKey, liveUrl = null, emptyCount = 0, hints = '' }) {
   const effectiveKey = ttsKey || holdKey;
   const speakerNode = effectiveKey
     ? `<Play>${xmlEscape(`${PUBLIC_BASE_URL}/api/tts?key=${encodeURIComponent(effectiveKey)}`)}</Play>`
-    : `<Say>${xmlEscape(speakText)}</Say>`;
+    : liveUrl
+      ? `<Play>${xmlEscape(liveUrl)}</Play>`
+      : `<Say>${xmlEscape(speakText)}</Say>`;
   const redirectUrl = addQueryParam(addQueryParam(actionUrl, 'empty', '1'), 'rc', Number(emptyCount) + 1);
   const hintsAttr = hints ? ` hints="${xmlEscape(hints)}"` : '';
 
@@ -665,11 +668,13 @@ function voicemailTwiml({ firmId, callSid, fromPhone, firmConfig }) {
 </Response>`;
 }
 
-function doneTwiml({ speakText, ttsKey }) {
+function doneTwiml({ speakText, ttsKey, liveUrl = null }) {
   const effectiveKey = ttsKey || holdKey;
   const speakerNode = effectiveKey
     ? `<Play>${xmlEscape(`${PUBLIC_BASE_URL}/api/tts?key=${encodeURIComponent(effectiveKey)}`)}</Play>`
-    : `<Say>${xmlEscape(speakText)}</Say>`;
+    : liveUrl
+      ? `<Play>${xmlEscape(liveUrl)}</Play>`
+      : `<Say>${xmlEscape(speakText)}</Say>`;
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -1506,6 +1511,98 @@ app.get('/api/tts', async (req, reply) => {
   return reply.send(audio);
 });
 
+// GET /tts-live — streams ElevenLabs audio directly to Twilio in real time.
+// Cache hit: serves from disk immediately. Cache miss: proxies ElevenLabs stream
+// byte-by-byte so Twilio starts playing within ~300ms, and caches to disk in parallel.
+app.get('/tts-live', async (req, reply) => {
+  const text = String(req.query?.text || '').trim();
+  if (!text) return reply.code(400).send('text required');
+  if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) return reply.code(503).send('TTS unavailable');
+
+  const safeText = truncateForSpeech(text, MAX_TTS_CHARS);
+  const voiceSettingsKey = `${process.env.ELEVEN_STABILITY ?? '0.20'}|${process.env.ELEVEN_SIMILARITY ?? '0.75'}|${process.env.ELEVEN_STYLE ?? '0.35'}|${process.env.ELEVEN_SPEAKER_BOOST ?? 'true'}|${process.env.ELEVEN_SPEED ?? '1.15'}`;
+  const key = sha1(`${ELEVENLABS_VOICE_ID}|${ELEVENLABS_MODEL_ID}|${voiceSettingsKey}|${safeText}`);
+  const filePath = path.join(AUDIO_DIR, `${key}.mp3`);
+
+  // Cache hit — serve from disk immediately
+  const cached = await fs.readFile(filePath).catch(() => null);
+  if (cached) {
+    app.log.info({ key: key.slice(0, 8), bytes: cached.length }, 'tts-live cache-hit');
+    reply.header('Content-Type', 'audio/mpeg');
+    reply.header('Cache-Control', 'public, max-age=31536000, immutable');
+    return reply.send(cached);
+  }
+
+  // Cache miss — stream directly from ElevenLabs, cache to disk in parallel
+  const tStart = Date.now();
+  app.log.info({ key: key.slice(0, 8), textLen: safeText.length }, 'tts-live stream-start');
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Math.max(500, TTS_TIMEOUT_MS));
+
+  let resp;
+  try {
+    resp = await fetch(
+      `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(ELEVENLABS_VOICE_ID)}/stream?optimize_streaming_latency=4&output_format=mp3_44100_128`,
+      {
+        method: 'POST',
+        headers: { 'xi-api-key': ELEVENLABS_API_KEY, Accept: 'audio/mpeg', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: safeText,
+          model_id: ELEVENLABS_MODEL_ID,
+          voice_settings: {
+            stability:        Number(process.env.ELEVEN_STABILITY      ?? 0.20),
+            similarity_boost: Number(process.env.ELEVEN_SIMILARITY     ?? 0.75),
+            style:            Number(process.env.ELEVEN_STYLE          ?? 0.35),
+            use_speaker_boost: String(process.env.ELEVEN_SPEAKER_BOOST ?? 'true').toLowerCase() === 'true',
+            speed:            Number(process.env.ELEVEN_SPEED          ?? 1.15),
+          },
+        }),
+        signal: controller.signal,
+      }
+    ).finally(() => clearTimeout(timeout));
+  } catch (err) {
+    console.error('tts-live fetch-exception', err.message);
+    return reply.code(502).send('TTS fetch failed');
+  }
+
+  if (!resp.ok) {
+    const errBody = await resp.text().catch(() => '');
+    console.error('tts-live fetch-error', { status: resp.status, body: errBody });
+    return reply.code(502).send('TTS unavailable');
+  }
+
+  app.log.info({ key: key.slice(0, 8), firstByteMs: Date.now() - tStart }, 'tts-live first-bytes');
+
+  // Pipe ElevenLabs stream → Twilio via PassThrough, collect chunks for disk cache
+  const passthrough = new PassThrough();
+  const chunks = [];
+  const nodeStream = Readable.fromWeb(resp.body);
+
+  nodeStream.on('data', (chunk) => {
+    chunks.push(chunk);
+    passthrough.write(chunk);
+  });
+  nodeStream.on('end', () => {
+    passthrough.end();
+    const audio = Buffer.concat(chunks);
+    app.log.info({ key: key.slice(0, 8), bytes: audio.length, elapsedMs: Date.now() - tStart }, 'tts-live stream-complete');
+    if (audio.length) {
+      fs.writeFile(filePath, audio)
+        .then(() => console.log('tts-live-cached', { key: key.slice(0, 8), bytes: audio.length }))
+        .catch(() => {});
+    }
+  });
+  nodeStream.on('error', (err) => {
+    console.error('tts-live stream-error', err.message);
+    passthrough.destroy(err);
+  });
+
+  reply.header('Content-Type', 'audio/mpeg');
+  reply.header('Transfer-Encoding', 'chunked');
+  reply.header('Cache-Control', 'no-store');
+  return reply.send(passthrough);
+});
+
 app.post('/twiml', async (req, reply) => {
   const tTwimlStart = Date.now();
   const callSid = String(req.body?.CallSid || '').trim();
@@ -1596,10 +1693,15 @@ app.post('/twiml', async (req, reply) => {
       ttsKey = step.payload.ttsKey;
     }
 
-    reply.header('Content-Type', 'text/xml');
-    app.log.info({ callSid, ttsHit: !!ttsKey, totalMs: Date.now() - tTwimlStart }, 'twiml-sent');
+    // Build a live-stream URL for cache misses — Twilio fetches it and gets audio immediately
+    const liveUrl = !ttsKey
+      ? `${PUBLIC_BASE_URL}/tts-live?text=${encodeURIComponent(speakText)}&firmId=${encodeURIComponent(firmId)}`
+      : null;
 
-    if (done) return reply.send(doneTwiml({ speakText, ttsKey }));
+    reply.header('Content-Type', 'text/xml');
+    app.log.info({ callSid, ttsHit: !!ttsKey, liveStream: !!liveUrl, totalMs: Date.now() - tTwimlStart }, 'twiml-sent');
+
+    if (done) return reply.send(doneTwiml({ speakText, ttsKey, liveUrl }));
 
     const practiceHints = (firmConfig.practice_areas || []).join(', ');
     return reply.send(
@@ -1607,6 +1709,7 @@ app.post('/twiml', async (req, reply) => {
         actionUrl: `${PUBLIC_BASE_URL}/twiml?firmId=${encodeURIComponent(firmId)}`,
         speakText,
         ttsKey,
+        liveUrl,
         emptyCount: session.repromptCount,
         hints: practiceHints,
       })
