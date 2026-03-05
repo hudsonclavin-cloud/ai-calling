@@ -529,6 +529,12 @@ async function callOpenAiForNextStep({ firmConfig, session, userText }) {
     },
   };
 
+  const systemText = `You are ${firmConfig.ava_name || 'Ava'}, a warm and attentive receptionist for ${firmConfig.name}. You are on a live phone call. Your job is to collect intake information naturally — like a real person listening and caring, not reading from a form.\n\nCORE BEHAVIOR:\n- Always acknowledge what the caller just said before asking the next question...`;
+  app.log.info({
+    systemPromptSnippet: systemText.substring(0, 500),
+    userMessage: JSON.stringify(prompt).substring(0, 500),
+  }, 'openai-prompt');
+
   const res = await fetch('https://api.openai.com/v1/responses', {
     method: 'POST',
     headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
