@@ -475,8 +475,10 @@ function buildDeterministicQuestion(session, firmConfig) {
 
 // ── OpenAI call (firm-aware prompt) ──────────────────────────────────────────
 
-async function callOpenAiForNextStep({ firmConfig, session, userText }) {
-  if (!OPENAI_API_KEY) return null;
+function callOpenAiForNextStep({ firmConfig, session, userText }) {
+  if (!OPENAI_API_KEY) {
+    return { earlyTextPromise: Promise.resolve(null), result: Promise.resolve(null) };
+  }
 
   const requiredFields = firmConfig.required_fields || REQUIRED_FIELDS_DEFAULT;
 
@@ -535,14 +537,37 @@ async function callOpenAiForNextStep({ firmConfig, session, userText }) {
 
   const systemPrompt = `You are ${firmConfig.ava_name || 'Ava'}, a warm AI receptionist for ${firmConfig.name} having a real phone conversation. Tone: ${toneInstruction}. The caller just spoke to you. First acknowledge what they said like a human would, then ask the next question. Never sound like you're filling out a form.
 
-ACKNOWLEDGMENT IS REQUIRED. Never leave it empty. Always write something that reflects what the caller just said before moving on. Examples:
-- Caller said "I was in a car accident" → acknowledgment: "I'm so sorry to hear that."
-- Caller said "my landlord won't fix anything" → acknowledgment: "That sounds really frustrating."
-- Caller said "John Smith" → acknowledgment: "Got it, John."
-- Caller said something unclear → acknowledgment: "Thanks for sharing that."
-The acknowledgment field must ALWAYS be filled. No exceptions.
+ACKNOWLEDGMENT IS REQUIRED. Never leave it empty. No exceptions.
 
-next_question_text is the FULL thing Ava says — the acknowledgment woven naturally into the question, in one or two spoken sentences. Natural, warm, human. Never robotic.
+For routine responses (name given, question answered simply): one short sentence is fine.
+- "John Smith" → acknowledgment: "Got it, John."
+- "my landlord won't fix anything" → acknowledgment: "That sounds really frustrating."
+- Something unclear → acknowledgment: "Thanks for sharing that."
+
+EMOTIONAL DISTRESS HANDLING — when a caller volunteers serious distress (accident, injury, death, arrest, crisis, fear, anger):
+1. Acknowledge the SPECIFIC thing they said using their own words — never a generic "I'm so sorry to hear that." Use: "You mentioned you were in an accident..." or "Losing your mom like that..."
+2. Ask ONE grounding question showing you actually heard them (NOT an intake field question):
+   - Accident/injury → "Has everyone been seen by a doctor, or is anyone still hurt?"
+   - Death/loss → "Is this something that just happened?"
+   - Arrest → "Are you somewhere safe you can talk?"
+   - Anger/frustration → "What's been happening?"
+3. THEN in a new sentence, transition to intake: "When you're ready, I'd like to get a few details so we can connect you with the right attorney."
+4. Never combine an emotional acknowledgment with an intake question in the same breath. Let the acknowledgment land first. The intake question comes after, as its own sentence.
+5. next_question_text must be 2–3 sentences for distress situations. Never one sentence.
+
+EXAMPLES (next_question_text for distress situations):
+
+Caller: "I was in a terrible car accident and I'm scared."
+→ next_question_text: "Oh no — a car accident sounds terrifying, and I'm really glad you called. Has everyone been seen by a doctor, or is anyone still hurt? Once I know you're okay, I'd like to get your name so we can get the right attorney on this."
+
+Caller: "My mom passed away and I think the hospital made a mistake."
+→ next_question_text: "I'm so sorry — losing your mom is devastating, and doing this on top of that grief takes real courage. Is this something that just happened, or have you been dealing with this for a while? When you're ready, I'd like to get a few details so we can connect you with the right attorney."
+
+Caller: "I just got arrested and I don't know what to do."
+→ next_question_text: "Okay — you've called the right place and help is on the way. Are you somewhere safe you can talk right now? Once I know you're okay, let me get a couple of details so we can get someone on this fast."
+
+Caller: "I've been trying to get help for weeks and nobody is doing anything, I'm so frustrated."
+→ next_question_text: "I completely hear you — you've been patient and you deserve to be taken seriously. Can you tell me a little about what's been happening? I want to make sure I get this to the right person."
 
 RULES:
 - Never ask for info already in current_collected. Never repeat asked_question_ids.
@@ -563,42 +588,93 @@ Return only strict JSON per schema.`;
     payloadChars: JSON.stringify(prompt).length,
   }, 'openai-prompt');
 
-  const res = await fetch('https://api.openai.com/v1/responses', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: OPENAI_MODEL,
-      temperature: 0.7,
-      max_output_tokens: 300,
-      input: [
-        {
-          role: 'system',
-          content: [{
-            type: 'input_text',
-            text: systemPrompt,
-          }],
-        },
-        { role: 'user', content: [{ type: 'input_text', text: JSON.stringify(prompt) }] },
-      ],
-      text: { format: { type: 'json_schema', name: 'next_step_output', schema, strict: true } },
-    }),
-  });
+  let earlyResolve;
+  const earlyTextPromise = new Promise((res) => { earlyResolve = res; });
 
-  if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    throw new Error(`OpenAI error ${res.status}: ${errText}`);
-  }
+  const result = (async () => {
+    const res = await fetch('https://api.openai.com/v1/responses', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: OPENAI_MODEL,
+        stream: true,
+        temperature: 0.7,
+        max_output_tokens: 300,
+        input: [
+          {
+            role: 'system',
+            content: [{
+              type: 'input_text',
+              text: systemPrompt,
+            }],
+          },
+          { role: 'user', content: [{ type: 'input_text', text: JSON.stringify(prompt) }] },
+        ],
+        text: { format: { type: 'json_schema', name: 'next_step_output', schema, strict: true } },
+      }),
+    });
 
-  const payload = await res.json();
-  const raw = payload?.output_text || payload?.output?.[0]?.content?.[0]?.text || '';
-  if (!raw) return null;
-  const parsed = JSON.parse(raw);
-  app.log.info({
-    acknowledgment: parsed.acknowledgment,
-    next_question_id: parsed.next_question_id,
-    next_question_text: parsed.next_question_text,
-  }, 'openai-response');
-  return parsed;
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(`OpenAI error ${res.status}: ${errText}`);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let deltaAccum = '';
+    let fullOutputText = '';
+    let earlyResolved = false;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6).trim();
+        if (!data || data === '[DONE]') continue;
+        let event;
+        try { event = JSON.parse(data); } catch { continue; }
+        if (event.type === 'response.output_text.delta') {
+          deltaAccum += event.delta?.text || '';
+          if (!earlyResolved) {
+            const match = deltaAccum.match(/"next_question_text"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+            if (match) {
+              try {
+                const earlyText = JSON.parse(`"${match[1]}"`);
+                earlyResolve(earlyText);
+                earlyResolved = true;
+              } catch { /* malformed escape — wait for more */ }
+            }
+          }
+        } else if (event.type === 'response.output_text.done') {
+          fullOutputText = event.text || '';
+        }
+      }
+    }
+
+    if (!earlyResolved) earlyResolve(null);
+
+    if (!fullOutputText) {
+      const jsonMatch = deltaAccum.match(/\{[\s\S]*\}/);
+      if (jsonMatch) fullOutputText = jsonMatch[0];
+    }
+
+    if (!fullOutputText) return null;
+    const parsed = JSON.parse(fullOutputText);
+    app.log.info({
+      acknowledgment: parsed.acknowledgment,
+      next_question_id: parsed.next_question_id,
+      next_question_text: parsed.next_question_text,
+    }, 'openai-response');
+    return parsed;
+  })();
+
+  result.catch(() => earlyResolve(null));
+  return { earlyTextPromise, result };
 }
 
 // ── Field merging ─────────────────────────────────────────────────────────────
@@ -965,17 +1041,24 @@ async function sendEmailNotification(session, firmConfig) {
     firmName: firmConfig.name,
   });
 
-  const res = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ from: RESEND_FROM_EMAIL, to: [firmConfig.notification_email], subject: `New lead — ${name} (${area})`, html }),
-  });
-  if (!res.ok) { const e = await res.text().catch(() => ''); throw new Error(`Resend error ${res.status}: ${e}`); }
-  app.log.info({ leadId: session.leadId, to: firmConfig.notification_email }, 'lead email sent OK');
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: RESEND_FROM_EMAIL, to: [firmConfig.notification_email], subject: `New lead — ${name} (${area})`, html }),
+    });
+    if (!res.ok) { const e = await res.text().catch(() => ''); throw new Error(`Resend error ${res.status}: ${e}`); }
+    const data = await res.json().catch(() => ({}));
+    app.log.info({ id: data.id, leadId: session.leadId, to: firmConfig.notification_email }, 'email-sent');
+  } catch (err) {
+    app.log.error({ err: err.message, leadId: session.leadId, to: firmConfig.notification_email }, 'email-failed');
+    throw err;
+  }
 }
 
 async function sendPartialEmailNotification(session, firmConfig) {
-  if (!RESEND_API_KEY || !firmConfig.notification_email) return;
+  if (!RESEND_API_KEY) { app.log.warn({ leadId: session.leadId }, 'sendPartialEmailNotification: RESEND_API_KEY not set — skipping'); return; }
+  if (!firmConfig.notification_email) { app.log.warn({ leadId: session.leadId, firmId: firmConfig.id }, 'sendPartialEmailNotification: no notification_email on firm — skipping'); return; }
   const { full_name, callback_number, practice_area } = session.collected || {};
   const name = full_name || 'Unknown Caller';
   const phone = callback_number || session.fromPhone;
@@ -998,41 +1081,56 @@ async function sendPartialEmailNotification(session, firmConfig) {
 
   const html = emailShell({ headerColor: '#d97706', headerLabel: 'Partial Intake', headerTitle: `Partial Lead — ${name}`, body, firmName: firmConfig.name });
 
-  const res = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ from: RESEND_FROM_EMAIL, to: [firmConfig.notification_email], subject: `[Partial] Lead from ${name} (${area})`, html }),
-  });
-  if (!res.ok) { const e = await res.text().catch(() => ''); throw new Error(`Resend error ${res.status}: ${e}`); }
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: RESEND_FROM_EMAIL, to: [firmConfig.notification_email], subject: `[Partial] Lead from ${name} (${area})`, html }),
+    });
+    if (!res.ok) { const e = await res.text().catch(() => ''); throw new Error(`Resend error ${res.status}: ${e}`); }
+    const data = await res.json().catch(() => ({}));
+    app.log.info({ id: data.id, leadId: session.leadId, to: firmConfig.notification_email }, 'email-sent');
+  } catch (err) {
+    app.log.error({ err: err.message, leadId: session.leadId, to: firmConfig.notification_email }, 'email-failed');
+    throw err;
+  }
 }
 
 async function sendVoicemailEmailNotification({ fromPhone, transcript, firmConfig, leadId }) {
-  if (!RESEND_API_KEY || !firmConfig.notification_email) return;
+  if (!RESEND_API_KEY) { app.log.warn({ leadId }, 'sendVoicemailEmailNotification: RESEND_API_KEY not set — skipping'); return; }
+  if (!firmConfig.notification_email) { app.log.warn({ leadId, firmId: firmConfig.id }, 'sendVoicemailEmailNotification: no notification_email on firm — skipping'); return; }
   const dashUrl = `${WEB_BASE_URL}/leads/${leadId}`;
-  const res = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      from: RESEND_FROM_EMAIL,
-      to: [firmConfig.notification_email],
-      subject: `[Voicemail] from ${fromPhone}`,
-      html: `<!DOCTYPE html><html><body style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;color:#1e293b">
-        <div style="background:#7c3aed;color:white;border-radius:8px 8px 0 0;padding:20px 24px">
-          <p style="margin:0;font-size:12px;text-transform:uppercase;letter-spacing:1px;opacity:0.8">Voicemail</p>
-          <h2 style="margin:4px 0 0">New Voicemail</h2>
-        </div>
-        <div style="border:1px solid #e2e8f0;border-top:0;border-radius:0 0 8px 8px;padding:24px">
-          <p><strong>From:</strong> <a href="tel:${fromPhone}">${fromPhone}</a></p>
-          ${transcript ? `<h3 style="margin-top:16px">Transcription</h3><blockquote style="border-left:4px solid #7c3aed;margin:0;padding:12px 16px;background:#f8f5ff;color:#1e293b;font-style:italic;border-radius:0 6px 6px 0">${transcript}</blockquote>` : '<p style="color:#64748b">No transcription available.</p>'}
-          <p style="margin-top:24px"><a href="${dashUrl}" style="display:inline-block;background:#7c3aed;color:white;padding:10px 20px;border-radius:6px;text-decoration:none;font-weight:600">View in Dashboard →</a></p>
-          <p style="color:#94a3b8;font-size:12px;margin-top:24px">Powered by Ava</p>
-        </div>
-      </body></html>`,
-    }),
-  });
-  if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    throw new Error(`Resend error ${res.status}: ${errText}`);
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: RESEND_FROM_EMAIL,
+        to: [firmConfig.notification_email],
+        subject: `[Voicemail] from ${fromPhone}`,
+        html: `<!DOCTYPE html><html><body style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;color:#1e293b">
+          <div style="background:#7c3aed;color:white;border-radius:8px 8px 0 0;padding:20px 24px">
+            <p style="margin:0;font-size:12px;text-transform:uppercase;letter-spacing:1px;opacity:0.8">Voicemail</p>
+            <h2 style="margin:4px 0 0">New Voicemail</h2>
+          </div>
+          <div style="border:1px solid #e2e8f0;border-top:0;border-radius:0 0 8px 8px;padding:24px">
+            <p><strong>From:</strong> <a href="tel:${fromPhone}">${fromPhone}</a></p>
+            ${transcript ? `<h3 style="margin-top:16px">Transcription</h3><blockquote style="border-left:4px solid #7c3aed;margin:0;padding:12px 16px;background:#f8f5ff;color:#1e293b;font-style:italic;border-radius:0 6px 6px 0">${transcript}</blockquote>` : '<p style="color:#64748b">No transcription available.</p>'}
+            <p style="margin-top:24px"><a href="${dashUrl}" style="display:inline-block;background:#7c3aed;color:white;padding:10px 20px;border-radius:6px;text-decoration:none;font-weight:600">View in Dashboard →</a></p>
+            <p style="color:#94a3b8;font-size:12px;margin-top:24px">Powered by Ava</p>
+          </div>
+        </body></html>`,
+      }),
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(`Resend error ${res.status}: ${errText}`);
+    }
+    const data = await res.json().catch(() => ({}));
+    app.log.info({ id: data.id, leadId, to: firmConfig.notification_email }, 'email-sent');
+  } catch (err) {
+    app.log.error({ err: err.message, leadId, to: firmConfig.notification_email }, 'email-failed');
+    throw err;
   }
 }
 
@@ -1187,11 +1285,15 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   // Fire OpenAI immediately (parallel with TTS prefetch below)
   const tOpenAiStart = Date.now();
   let llmPromise = null;
+  let earlyTextPromise = Promise.resolve(null);
+  let earlyTtsPromise = null;
   if (callerText && OPENAI_API_KEY) {
-    llmPromise = callOpenAiForNextStep({ firmConfig: llmConfig, session, userText: callerText }).catch((err) => {
+    const llmStream = callOpenAiForNextStep({ firmConfig: llmConfig, session, userText: callerText });
+    llmPromise = llmStream.result.catch((err) => {
       app.log.warn({ err: String(err), callSid }, 'OpenAI failed; using deterministic fallback');
       return null;
     });
+    earlyTextPromise = llmStream.earlyTextPromise;
   }
 
   // Speculatively start TTS on the most likely next phrase while OpenAI is thinking.
@@ -1207,8 +1309,16 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
     ttsPrefetch = synthesizeToDisk(speculativeText).catch(() => null);
   }
 
+  // Kick off TTS as soon as early text arrives (before full OpenAI response is done)
+  earlyTextPromise.then((earlyText) => {
+    if (earlyText && earlyText !== speculativeText) {
+      earlyTtsPromise = synthesizeToDisk(earlyText).catch(() => null);
+    }
+  });
+
   const llm = llmPromise ? await llmPromise : null;
-  if (llmPromise) app.log.info({ callSid, elapsedMs: Date.now() - tOpenAiStart }, 'openai-returned');
+  const tAfterOpenAi = Date.now();
+  if (llmPromise) app.log.info({ callSid, elapsedMs: tAfterOpenAi - tOpenAiStart }, 'openai-returned');
   // Merge: LLM values win, but only if non-empty — never let an LLM empty string
   // wipe out a good deterministic extraction (e.g. case_summary from long text).
   // Also, don't let a short LLM case_summary overwrite a good long deterministic one.
@@ -1331,6 +1441,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
     }
     sessionAckIndex.delete(callSid);
   }
+  const tAfterCompose = Date.now();
 
   // Log any time the speculative TTS phrase differed from what was actually spoken,
   // so we can see question-skip or phrasing-change patterns in the logs.
@@ -1357,6 +1468,11 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
     ttsKey = await Promise.race([ttsPrefetch, ttsDeadline]);
     app.log.info({ callSid, hit: !!ttsKey, elapsedMs: Date.now() - tTtsStart, totalMs: Date.now() - tOpenAiStart }, 'tts-resolved (speculative)');
     if (!ttsKey) app.log.info({ callSid }, 'tts-speculative-hit but deadline exceeded, using <Say>');
+  } else if (earlyTtsPromise && speakText === (await earlyTextPromise)) {
+    // Early-stream hit — TTS has been running since next_question_text arrived in stream
+    ttsKey = await Promise.race([earlyTtsPromise, ttsDeadline]);
+    app.log.info({ callSid, hit: !!ttsKey, elapsedMs: Date.now() - tTtsStart, totalMs: Date.now() - tOpenAiStart }, 'tts-resolved (early-stream)');
+    if (!ttsKey) app.log.info({ callSid, speakText: speakText.slice(0, 60) }, 'tts-early-stream deadline exceeded, using <Say>');
   } else {
     // Mismatch — start fresh synth; cache the speculative result quietly
     if (ttsPrefetch) ttsPrefetch.catch(() => {});
@@ -1368,6 +1484,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
       freshSynth.catch(() => {}); // keep caching for future turns
     }
   }
+  const tAfterTts = Date.now();
 
   // Fire-and-forget — the TwiML response doesn't depend on write completion
   saveSessions(sessions).catch((err) => app.log.warn({ err: String(err), callSid }, 'saveSessions failed'));
@@ -1385,6 +1502,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
       done: session.done,
       updates: { ...fieldUpdates, turnCount: session.turnCount, repromptCount: session.repromptCount },
       nextField,
+      timings: { t1: tOpenAiStart, t2: tAfterOpenAi, t3: tAfterCompose, t4: tAfterTts },
     },
   };
 }
@@ -1415,6 +1533,48 @@ app.get('/health', async () => {
   };
 });
 app.get('/favicon.ico', async (_, reply) => reply.code(204).send());
+
+// POST /test-email — sends a dummy lead email to verify Resend is working
+app.post('/test-email', async (req, reply) => {
+  const to = String(req.body?.to || req.query?.to || '').trim();
+  if (!to) return reply.code(400).send({ error: 'Missing ?to= query param or body.to' });
+  if (!RESEND_API_KEY) return reply.code(503).send({ error: 'RESEND_API_KEY not set' });
+
+  const fromWarning = (RESEND_FROM_EMAIL && !RESEND_FROM_EMAIL.endsWith('@resend.dev'))
+    ? `WARNING: using custom domain ${RESEND_FROM_EMAIL} — ensure it is verified in Resend`
+    : null;
+
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: RESEND_FROM_EMAIL,
+        to: [to],
+        subject: '[Ava test] Email delivery check',
+        html: `<div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:24px;color:#1e293b">
+          <h2 style="margin:0 0 12px">Ava email test ✓</h2>
+          <p>If you're reading this, Resend is configured correctly.</p>
+          <ul>
+            <li><strong>From:</strong> ${RESEND_FROM_EMAIL}</li>
+            <li><strong>To:</strong> ${to}</li>
+            <li><strong>Time:</strong> ${new Date().toISOString()}</li>
+          </ul>
+        </div>`,
+      }),
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(`Resend error ${res.status}: ${errText}`);
+    }
+    const data = await res.json().catch(() => ({}));
+    app.log.info({ id: data.id, to, from: RESEND_FROM_EMAIL }, 'test-email sent OK');
+    return reply.send({ ok: true, id: data.id, from: RESEND_FROM_EMAIL, to, warning: fromWarning });
+  } catch (err) {
+    app.log.error({ err: err.message, to }, 'test-email failed');
+    return reply.code(500).send({ ok: false, error: err.message, from: RESEND_FROM_EMAIL, to });
+  }
+});
 
 // List all firms
 app.get('/api/firms', async () => {
@@ -1636,6 +1796,7 @@ app.post('/twiml', async (req, reply) => {
   const callSid = String(req.body?.CallSid || '').trim();
   const fromPhone = normalizePhone(req.body?.From);
   const userText = String(req.body?.SpeechResult || '').trim();
+  const t0 = Date.now();
   const firmId = String(req.body?.firmId || req.query?.firmId || 'firm_default').trim();
   const isEmptyRedirect = String(req.query?.empty || '') === '1';
 
@@ -1721,6 +1882,16 @@ app.post('/twiml', async (req, reply) => {
       speakText = step.payload.speakText;
       done = step.payload.done;
       ttsKey = step.payload.ttsKey;
+      const { t1, t2, t3, t4 } = step.payload.timings;
+      app.log.info({
+        type: 'latency-trace',
+        callSid,
+        stt_to_openai_ms: t1 - t0,
+        openai_ms: t2 - t1,
+        compose_ms: t3 - t2,
+        tts_ms: t4 - t3,
+        total_ms: t4 - t0,
+      }, 'latency-trace');
     }
 
     // Build a live-stream URL for cache misses — Twilio fetches it and gets audio immediately
@@ -2114,6 +2285,13 @@ app.log.info({
   TWILIO_ACCOUNT_SID_prefix: TWILIO_ACCOUNT_SID ? TWILIO_ACCOUNT_SID.slice(0, 4) : '(unset)',
   TWILIO_FROM_NUMBER,
 }, 'BOOT notification config');
+if (!RESEND_API_KEY) {
+  app.log.warn('BOOT: RESEND_API_KEY is not set — email notifications will be skipped');
+}
+if (RESEND_FROM_EMAIL && !RESEND_FROM_EMAIL.endsWith('@resend.dev')) {
+  const fromDomain = RESEND_FROM_EMAIL.split('@')[1] || '';
+  app.log.warn({ RESEND_FROM_EMAIL, fromDomain }, 'BOOT: RESEND_FROM_EMAIL uses a custom domain — ensure it is verified in the Resend dashboard or emails will be rejected (403)');
+}
 app.log.info({
   ELEVENLABS_MODEL_ID,
   ELEVENLABS_VOICE_ID: ELEVENLABS_VOICE_ID ? ELEVENLABS_VOICE_ID.slice(0, 8) + '...' : '(unset)',
