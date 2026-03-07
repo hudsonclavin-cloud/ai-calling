@@ -517,6 +517,7 @@ async function callOpenAiForNextStep({ firmConfig, session, userText }) {
     practice_areas: firmConfig.practice_areas,
     intake_rules: firmConfig.intake_rules,
     required_fields: requiredFields,
+    valid_question_ids: requiredFields.concat(['done']),
     asked_question_ids: session.askedQuestionIds,
     current_collected: session.collected,
     user_text: userText,
@@ -548,10 +549,14 @@ next_question_text is the FULL thing Ava says — the acknowledgment woven natur
 RULES:
 - Never ask for info already in current_collected. Never repeat asked_question_ids.
 - Never give legal advice.
-- If caller asks a question back, answer in one warm sentence then return to intake.
+- If the caller seems confused, lost, or unsure they have the right number — reassure them first ("You're in the right place, we can definitely help with that.") before asking anything.
+- If caller asks a question back (privacy, is this a robot, etc.), answer warmly and directly in one sentence, then return to intake.
 - If is_rambling=true, silently extract everything, move to first missing field.
 - caller_is_urgent=true means open with extra warmth and reassurance.
 - caller_type: 'new', 'returning', or null.
+
+next_question_id MUST be one of these exact strings: full_name | callback_number | practice_area | case_summary | done
+Never invent other IDs. Use "done" only if all required fields are collected.
 
 Return only strict JSON per schema.`;
 
