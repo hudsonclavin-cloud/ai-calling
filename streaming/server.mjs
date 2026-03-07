@@ -594,7 +594,13 @@ Return only strict JSON per schema.`;
   const payload = await res.json();
   const raw = payload?.output_text || payload?.output?.[0]?.content?.[0]?.text || '';
   if (!raw) return null;
-  return JSON.parse(raw);
+  const parsed = JSON.parse(raw);
+  app.log.info({
+    acknowledgment: parsed.acknowledgment,
+    next_question_id: parsed.next_question_id,
+    next_question_text: parsed.next_question_text,
+  }, 'openai-response');
+  return parsed;
 }
 
 // ── Field merging ─────────────────────────────────────────────────────────────
@@ -1304,6 +1310,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
     // (next_question_text already has the natural ack baked in by the LLM)
     const llmAck = String(llm?.acknowledgment || '').trim();
     speakText = composeSpeakText({ session, bodyText: questionBody, callSid, firmConfig: effectiveConfig, llmAck });
+    app.log.info({ llmAck, questionBody, speakText }, 'ava-speaks');
 
     // Urgency: replace normal ack with empathetic acknowledgment on first urgent turn
     if (session.isUrgent && !session.urgencySpoken) {
