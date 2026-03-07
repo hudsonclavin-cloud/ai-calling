@@ -1296,19 +1296,23 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
     session.askedQuestionIds.push(nextDecision.nextQuestionId);
     nextField = nextDecision.nextField;
 
-    // Apply optional clarifying note from LLM (capped at 20 words)
-    let questionBody = nextDecision.nextQuestionText;
-    const clarifyNote = String(llm?.clarifying_note || '').trim();
-    if (clarifyNote) {
-      const capped = clarifyNote.split(/\s+/).filter(Boolean).slice(0, 20).join(' ');
-      questionBody = `${capped} ${questionBody}`;
+    // LLM's next_question_text has the emotional ack baked in per system prompt — use it directly.
+    // Fall back to deterministic question only if LLM didn't return one.
+    const llmQuestionText = String(llm?.next_question_text || '').trim();
+    let questionBody = llmQuestionText || nextDecision.nextQuestionText;
+
+    // Apply clarifying note only on the deterministic fallback path
+    if (!llmQuestionText) {
+      const clarifyNote = String(llm?.clarifying_note || '').trim();
+      if (clarifyNote) {
+        const capped = clarifyNote.split(/\s+/).filter(Boolean).slice(0, 20).join(' ');
+        questionBody = `${capped} ${questionBody}`;
+      }
     }
 
-    // Pass LLM acknowledgment so composeSpeakText skips the deterministic ack
-    // (next_question_text already has the natural ack baked in by the LLM)
     const llmAck = String(llm?.acknowledgment || '').trim();
     speakText = composeSpeakText({ session, bodyText: questionBody, callSid, firmConfig: effectiveConfig, llmAck });
-    app.log.info({ llmAck, questionBody, speakText }, 'ava-speaks');
+    app.log.info({ llmAck, usedLlmText: !!llmQuestionText, questionBody, speakText }, 'ava-speaks');
 
     // Urgency: replace normal ack with empathetic acknowledgment on first urgent turn
     if (session.isUrgent && !session.urgencySpoken) {
@@ -1634,6 +1638,8 @@ app.post('/twiml', async (req, reply) => {
   const userText = String(req.body?.SpeechResult || '').trim();
   const firmId = String(req.body?.firmId || req.query?.firmId || 'firm_default').trim();
   const isEmptyRedirect = String(req.query?.empty || '') === '1';
+
+  app.log.info({ type: 'incoming-payload', callSid, userText: userText.slice(0, 200), firmId }, 'Incoming payload');
 
   if (!callSid) {
     reply.header('Content-Type', 'text/xml');
