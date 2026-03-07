@@ -506,36 +506,34 @@ async function callOpenAiForNextStep({ firmConfig, session, userText }) {
   };
 
   const wordCount = userText.split(/\s+/).filter(Boolean).length;
+
+  // Trim long fields to avoid bloating the payload
+  const collectedForPrompt = { ...session.collected };
+  if (collectedForPrompt.case_summary?.length > 200) {
+    collectedForPrompt.case_summary = collectedForPrompt.case_summary.slice(0, 200);
+  }
+
   const prompt = {
     previous_exchange: {
       ava_asked: session.lastQuestionText || null,
       caller_said: userText,
     },
-    firm_name: firmConfig.name,
-    ava_name: firmConfig.ava_name || 'Ava',
-    tone: firmConfig.tone || 'warm-professional',
     practice_areas: firmConfig.practice_areas,
-    intake_rules: firmConfig.intake_rules,
+    intake_rules: firmConfig.intake_rules ? String(firmConfig.intake_rules).slice(0, 500) : null,
     required_fields: requiredFields,
-    valid_question_ids: requiredFields.concat(['done']),
     asked_question_ids: session.askedQuestionIds,
-    current_collected: session.collected,
-    user_text: userText,
+    current_collected: collectedForPrompt,
     is_rambling: wordCount > 150,
-    word_count: wordCount,
     caller_is_urgent: session.isUrgent,
-    constraints: {
-      never_repeat_same_question: true,
-      never_legal_advice: true,
-      max_questions: firmConfig.max_questions || 8,
-      max_reprompts: firmConfig.max_reprompts || 2,
-      tone: firmConfig.tone === 'friendly'
-        ? 'Warm, casual, friendly. Short questions. Sound like a helpful person, not a form.'
-        : 'Warm but professional. Brief and clear. Under 20 words per question.',
-    },
   };
 
-  const systemPrompt = `You are ${firmConfig.ava_name || 'Ava'}, a warm AI receptionist having a real phone conversation with a caller. The caller just spoke to you. First acknowledge what they said like a human would, then ask the next question. Never sound like you're filling out a form.
+  app.log.info({ chars: JSON.stringify(prompt).length }, 'openai-payload-chars');
+
+  const toneInstruction = firmConfig.tone === 'friendly'
+    ? 'Warm, casual, friendly. Short questions. Sound like a helpful person, not a form.'
+    : 'Warm but professional. Brief and clear. Under 20 words per question.';
+
+  const systemPrompt = `You are ${firmConfig.ava_name || 'Ava'}, a warm AI receptionist for ${firmConfig.name} having a real phone conversation. Tone: ${toneInstruction}. The caller just spoke to you. First acknowledge what they said like a human would, then ask the next question. Never sound like you're filling out a form.
 
 ACKNOWLEDGMENT IS REQUIRED. Never leave it empty. Always write something that reflects what the caller just said before moving on. Examples:
 - Caller said "I was in a car accident" → acknowledgment: "I'm so sorry to hear that."
@@ -561,8 +559,8 @@ Never invent other IDs. Use "done" only if all required fields are collected.
 Return only strict JSON per schema.`;
 
   app.log.info({
-    systemPromptSnippet: systemPrompt.substring(0, 500),
-    userMessage: JSON.stringify(prompt).substring(0, 500),
+    systemPromptChars: systemPrompt.length,
+    payloadChars: JSON.stringify(prompt).length,
   }, 'openai-prompt');
 
   const res = await fetch('https://api.openai.com/v1/responses', {
