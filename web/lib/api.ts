@@ -160,7 +160,6 @@ export async function getHealth(): Promise<HealthData | null> {
     return null;
   }
 }
-type TranscriptEntry = { role: string; content: string; timestamp?: string };
 export async function getCallTranscript(callId: string, firmId?: string): Promise<TranscriptEntry[]> {
   try {
     const qs = firmId ? `?firmId=${encodeURIComponent(firmId)}` : '';
