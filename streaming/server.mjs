@@ -60,6 +60,15 @@ const AUDIO_DIR = path.join(DATA_DIR, 'tts_audio');
 const HOLD_PHRASE = 'One moment please.';
 let holdKey = null; // set at boot before prewarm
 
+// Thinking filler phrases — played immediately when caller finishes speaking, before OpenAI responds
+const FILLER_PHRASES = [
+  'One moment...',
+  'Sure, just a second...',
+  'Let me check on that...',
+  'Got it, one moment...',
+];
+let fillerKeys = []; // populated at boot via synthesizeToDisk
+
 // ── Default firm config (used as fallback if no file found) ──────────────────
 // To add a new firm: copy firm_default.json → firm_yourname.json and edit it.
 // That's it. No code changes needed.
@@ -139,6 +148,8 @@ setInterval(() => {
 
 // ── Per-session ack index (avoids repeated acknowledgments) ──────────────────
 const sessionAckIndex = new Map();
+// Stores in-flight runNextStepController promises keyed by callSid so /twiml-result can await them
+const pendingResponses = new Map(); // callSid → { promise, t0 }
 
 function getNextAck(callSid, firmConfig) {
   const acks = firmConfig.acknowledgments?.length ? firmConfig.acknowledgments : DEFAULT_FIRM_CONFIG.acknowledgments;
@@ -744,7 +755,7 @@ function gatherTwiml({ actionUrl, speakText, ttsKey, liveUrl = null, emptyCount 
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Gather input="speech" action="${xmlEscape(actionUrl)}" method="POST" speechTimeout="2" timeout="6" actionOnEmptyResult="true" bargeIn="true" enhanced="true" language="en-US" profanityFilter="false"${hintsAttr}>
+  <Gather input="speech" action="${xmlEscape(actionUrl)}" method="POST" speechTimeout="1" timeout="6" actionOnEmptyResult="true" bargeIn="true" enhanced="true" language="en-US" profanityFilter="false"${hintsAttr}>
     ${speakerNode}
   </Gather>
   <Redirect method="POST">${xmlEscape(redirectUrl)}</Redirect>
@@ -1615,26 +1626,23 @@ app.post('/api/firms/:id', async (req, reply) => {
 
 app.get('/api/calls', async (req) => {
   const firmId = String(req.query?.firmId || '').trim();
-  let calls = await loadCalls();
-  if (firmId) calls = calls.filter((c) => c.firmId === firmId);
+  const calls = await loadCalls(firmId || undefined);
   calls.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
   return { data: calls.slice(0, 100) };
 });
 
 app.get('/api/leads', async (req) => {
   const firmId = String(req.query?.firmId || '').trim();
-  let leads = await loadLeads();
-  if (firmId) leads = leads.filter((l) => l.firmId === firmId);
+  const leads = await loadLeads(firmId || undefined);
   leads.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
   return { data: leads };
 });
 
 app.get('/api/leads/:id', async (req, reply) => {
   const firmId = String(req.query?.firmId || '').trim();
-  const leads = await loadLeads();
+  const leads = await loadLeads(firmId || undefined);
   const lead = leads.find((x) => x.id === req.params.id);
   if (!lead) return reply.code(404).send({ error: 'Lead not found' });
-  if (firmId && lead.firmId !== firmId) return reply.code(404).send({ error: 'Lead not found' });
   return { data: lead };
 });
 
@@ -1877,21 +1885,25 @@ app.post('/twiml', async (req, reply) => {
         ttsKey = await ttsPromise;
       }
     } else {
-      // Normal turn — controller handles TTS prefetch internally
-      const step = await runNextStepController({ firmId, callSid, fromPhone, userText });
-      speakText = step.payload.speakText;
-      done = step.payload.done;
-      ttsKey = step.payload.ttsKey;
-      const { t1, t2, t3, t4 } = step.payload.timings;
-      app.log.info({
-        type: 'latency-trace',
-        callSid,
-        stt_to_openai_ms: t1 - t0,
-        openai_ms: t2 - t1,
-        compose_ms: t3 - t2,
-        tts_ms: t4 - t3,
-        total_ms: t4 - t0,
-      }, 'latency-trace');
+      // Normal turn — start processing in background, play filler immediately while OpenAI runs
+      const processingPromise = runNextStepController({ firmId, callSid, fromPhone, userText });
+      pendingResponses.set(callSid, { promise: processingPromise, t0 });
+
+      // Pick a random pre-cached filler phrase
+      const fillerIdx = Math.floor(Math.random() * FILLER_PHRASES.length);
+      const fillerKey = fillerKeys[fillerIdx];
+      const fillerAudioUrl = fillerKey
+        ? `${PUBLIC_BASE_URL}/api/tts?key=${encodeURIComponent(fillerKey)}`
+        : `${PUBLIC_BASE_URL}/tts-live?text=${encodeURIComponent(FILLER_PHRASES[fillerIdx])}&firmId=${encodeURIComponent(firmId)}`;
+      const resultUrl = `${PUBLIC_BASE_URL}/twiml-result?callSid=${encodeURIComponent(callSid)}&firmId=${encodeURIComponent(firmId)}`;
+
+      app.log.info({ callSid, fillerIdx, fillerCached: !!fillerKey }, 'filler-sent');
+      reply.header('Content-Type', 'text/xml');
+      return reply.send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Play>${xmlEscape(fillerAudioUrl)}</Play>
+  <Redirect method="POST">${xmlEscape(resultUrl)}</Redirect>
+</Response>`);
     }
 
     // Build a live-stream URL for cache misses — Twilio fetches it and gets audio immediately
@@ -1918,6 +1930,61 @@ app.post('/twiml', async (req, reply) => {
   } catch (err) {
     app.log.error({ err: String(err), stack: err?.stack, callSid }, '/twiml failed');
     reply.header('Content-Type', 'text/xml');
+    return reply.send(doneTwiml({ speakText: 'Sorry, there was a technical issue. Please call again.', ttsKey: null }));
+  }
+});
+
+// POST /twiml-result — Twilio follows this redirect after the filler phrase plays.
+// By this point, runNextStepController has had ~1-2s head start; we just await and return real TwiML.
+app.post('/twiml-result', async (req, reply) => {
+  const callSid = String(req.body?.CallSid || req.query?.callSid || '').trim();
+  const firmId = String(req.query?.firmId || 'firm_default').trim();
+
+  reply.header('Content-Type', 'text/xml');
+
+  const pending = pendingResponses.get(callSid);
+  pendingResponses.delete(callSid);
+
+  if (!pending) {
+    app.log.warn({ callSid }, '/twiml-result: no pending response — call may have already completed');
+    return reply.send(doneTwiml({ speakText: 'Sorry, something went wrong. Please call again.', ttsKey: null }));
+  }
+
+  try {
+    const step = await pending.promise;
+    const { speakText, ttsKey, done } = step.payload;
+    const { t1, t2, t3, t4 } = step.payload.timings;
+    app.log.info({
+      type: 'latency-trace',
+      callSid,
+      stt_to_openai_ms: t1 - pending.t0,
+      openai_ms: t2 - t1,
+      compose_ms: t3 - t2,
+      tts_ms: t4 - t3,
+      total_ms: t4 - pending.t0,
+    }, 'latency-trace');
+
+    const liveUrl = !ttsKey
+      ? `${PUBLIC_BASE_URL}/tts-live?text=${encodeURIComponent(speakText)}&firmId=${encodeURIComponent(firmId)}`
+      : null;
+
+    app.log.info({ callSid, ttsHit: !!ttsKey, liveStream: !!liveUrl }, 'twiml-result-sent');
+
+    if (done) return reply.send(doneTwiml({ speakText, ttsKey, liveUrl }));
+
+    const practiceHints = (step.firmConfig.practice_areas || []).join(', ');
+    return reply.send(
+      gatherTwiml({
+        actionUrl: `${PUBLIC_BASE_URL}/twiml?firmId=${encodeURIComponent(firmId)}`,
+        speakText,
+        ttsKey,
+        liveUrl,
+        emptyCount: step.session.repromptCount,
+        hints: practiceHints,
+      })
+    );
+  } catch (err) {
+    app.log.error({ err: String(err), stack: err?.stack, callSid }, '/twiml-result failed');
     return reply.send(doneTwiml({ speakText: 'Sorry, there was a technical issue. Please call again.', ttsKey: null }));
   }
 });
@@ -2138,9 +2205,9 @@ app.get('/api/analytics/:firmId', async (req, reply) => {
   const days = Math.min(Number(req.query?.days || 30), 365);
   const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
 
-  const [allCalls, allLeads] = await Promise.all([loadCalls(), loadLeads()]);
-  const calls = allCalls.filter((c) => c.firmId === firmId && c.startedAt >= cutoff);
-  const leads = allLeads.filter((l) => l.firmId === firmId && l.createdAt >= cutoff);
+  const [allCalls, allLeads] = await Promise.all([loadCalls(firmId), loadLeads(firmId)]);
+  const calls = allCalls.filter((c) => c.startedAt >= cutoff);
+  const leads = allLeads.filter((l) => l.createdAt >= cutoff);
 
   const totalCalls = calls.length;
   const completed = calls.filter((c) => c.outcome === 'intake_complete').length;
@@ -2315,6 +2382,11 @@ try {
   // Pre-synthesize hold phrase — must be ready before any call comes in
   holdKey = await synthesizeToDisk(HOLD_PHRASE);
   console.log('hold-phrase ready:', holdKey ? `OK (${holdKey.slice(0, 8)})` : 'FAILED — <Say> still used as last resort');
+
+  // Pre-synthesize filler phrases in parallel — ready before any call comes in
+  fillerKeys = await Promise.all(FILLER_PHRASES.map((p) => synthesizeToDisk(p).catch(() => null)));
+  const fillerReady = fillerKeys.filter(Boolean).length;
+  console.log(`filler-phrases ready: ${fillerReady}/${FILLER_PHRASES.length}`);
 
   prewarmTtsCache().catch((err) => app.log.warn({ err: String(err) }, 'TTS prewarm error'));
 } catch (err) {

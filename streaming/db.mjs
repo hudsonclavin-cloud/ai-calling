@@ -228,19 +228,19 @@ export async function initSchema() {
 
 // ── Public async API ──────────────────────────────────────────────────────────
 
-export async function loadCalls() {
-  const result = await getClient().execute(
-    'SELECT * FROM calls ORDER BY updatedAt DESC LIMIT 500'
-  );
+export async function loadCalls(firmId) {
+  const result = firmId
+    ? await getClient().execute({ sql: 'SELECT * FROM calls WHERE firmId = ? ORDER BY updatedAt DESC LIMIT 500', args: [firmId] })
+    : await getClient().execute('SELECT * FROM calls ORDER BY updatedAt DESC LIMIT 500');
   return result.rows.map(parseCall);
 }
 
 export async function saveCalls(calls) { await _saveCalls(calls); }
 
-export async function loadLeads() {
-  const result = await getClient().execute(
-    'SELECT * FROM leads ORDER BY updatedAt DESC LIMIT 500'
-  );
+export async function loadLeads(firmId) {
+  const result = firmId
+    ? await getClient().execute({ sql: 'SELECT * FROM leads WHERE firmId = ? ORDER BY updatedAt DESC LIMIT 500', args: [firmId] })
+    : await getClient().execute('SELECT * FROM leads ORDER BY updatedAt DESC LIMIT 500');
   return result.rows.map(parseLead);
 }
 
