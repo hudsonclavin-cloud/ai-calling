@@ -1,4 +1,4 @@
-import type { AnalyticsData, CallRecord, FirmSettings, LeadDetail, LeadSummary } from "@/lib/types";
+import type { AnalyticsData, CallRecord, FirmSettings, LeadDetail, LeadSummary, TranscriptEntry } from "@/lib/types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:5050";
 
@@ -160,7 +160,7 @@ export async function getHealth(): Promise<HealthData | null> {
     return null;
   }
 }
-
+type TranscriptEntry = { role: string; content: string; timestamp?: string };
 export async function getCallTranscript(callId: string, firmId?: string): Promise<TranscriptEntry[]> {
   try {
     const qs = firmId ? `?firmId=${encodeURIComponent(firmId)}` : '';
