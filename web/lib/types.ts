@@ -40,12 +40,17 @@ export interface LeadSummary {
   callback_number: string;
   practice_area: string;
   case_summary: string;
+  calling_for?: string;
   caller_type: string;
   status: string;
   lastCallSid: string;
   createdAt: string;
   updatedAt: string;
   contacted_at: string | null;
+  is_urgent?: boolean;
+  call_duration_seconds?: number;
+  recording_url?: string;
+  recording_duration?: number;
 }
 
 export interface QualityScore {
@@ -64,6 +69,7 @@ export interface LeadDetail {
   callback_number: string;
   practice_area: string;
   case_summary: string;
+  calling_for?: string;
   caller_type: string;
   status: string;
   lastCallSid: string;
@@ -73,6 +79,10 @@ export interface LeadDetail {
   quality_score: QualityScore | null;
   transcript: TranscriptEntry[];
   timeline: TimelineEvent[];
+  is_urgent?: boolean;
+  call_duration_seconds?: number;
+  recording_url?: string;
+  recording_duration?: number;
 }
 
 export interface AnalyticsData {
@@ -109,4 +119,7 @@ export interface FirmSettings {
   stripe_customer_id?: string;
   stripe_subscription_id?: string;
   billing_status?: string;
+  status?: "trial" | "active" | "suspended";
+  trial_ends_at?: string | null;
+  trial_warning_sent?: boolean;
 }

@@ -1,7 +1,6 @@
 "use client";
 
 import { usePathname } from "next/navigation";
-
 import { AppShell } from "@/components/app-shell";
 
 export function ShellLayout({
@@ -14,7 +13,6 @@ export function ShellLayout({
   isAdmin: boolean;
 }) {
   const pathname = usePathname();
-
   return (
     <AppShell pathname={pathname} firmName={firmName} isAdmin={isAdmin}>
       {children}

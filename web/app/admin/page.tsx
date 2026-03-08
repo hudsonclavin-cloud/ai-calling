@@ -11,6 +11,7 @@ interface FirmStat {
   id: string;
   name: string;
   billing_status: string;
+  status?: string;
   callsThisMonth: number;
   completionRate: number;
   lastCallAt: string | null;
@@ -41,11 +42,19 @@ function billingBadge(status: string) {
   return "bg-slate-100 text-slate-500";
 }
 
+function statusBadge(status?: string) {
+  if (status === "active") return "bg-emerald-100 text-emerald-700";
+  if (status === "trial") return "bg-sky-100 text-sky-700";
+  if (status === "suspended") return "bg-rose-100 text-rose-700";
+  return "bg-slate-100 text-slate-500";
+}
+
 export default function AdminPage() {
   const [data, setData] = useState<Overview | null>(null);
   const [loading, setLoading] = useState(true);
+  const [actionLoading, setActionLoading] = useState<string | null>(null);
 
-  useEffect(() => {
+  function loadData() {
     fetch(`${API_BASE}/api/admin/overview`, {
       headers: ADMIN_KEY ? { "x-admin-key": ADMIN_KEY } : {},
     })
@@ -53,7 +62,28 @@ export default function AdminPage() {
       .then(setData)
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, []);
+  }
+
+  useEffect(() => { loadData(); }, []);
+
+  async function handleAction(firmId: string, action: "suspend" | "reactivate") {
+    setActionLoading(firmId);
+    try {
+      await fetch(`${API_BASE}/api/admin/firms/${encodeURIComponent(firmId)}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          ...(ADMIN_KEY ? { "x-admin-key": ADMIN_KEY } : {}),
+        },
+        body: JSON.stringify({ action }),
+      });
+      loadData();
+    } catch {
+      // ignore
+    } finally {
+      setActionLoading(null);
+    }
+  }
 
   return (
     <div className="space-y-8">
@@ -115,6 +145,8 @@ export default function AdminPage() {
                     </th>
                     <th className="px-4 py-3 text-left font-medium">Last Call</th>
                     <th className="px-4 py-3 text-left font-medium">Billing</th>
+                    <th className="px-4 py-3 text-left font-medium">Status</th>
+                    <th className="px-4 py-3 text-left font-medium">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -135,6 +167,30 @@ export default function AdminPage() {
                         <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${billingBadge(firm.billing_status)}`}>
                           {firm.billing_status}
                         </span>
+                      </td>
+                      <td className="px-4 py-3.5">
+                        <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${statusBadge(firm.status)}`}>
+                          {firm.status || "unknown"}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3.5">
+                        {firm.status !== "suspended" ? (
+                          <button
+                            onClick={() => handleAction(firm.id, "suspend")}
+                            disabled={actionLoading === firm.id}
+                            className="rounded px-2.5 py-1 text-xs font-medium text-rose-600 ring-1 ring-rose-200 hover:bg-rose-50 disabled:opacity-50"
+                          >
+                            {actionLoading === firm.id ? "…" : "Suspend"}
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => handleAction(firm.id, "reactivate")}
+                            disabled={actionLoading === firm.id}
+                            className="rounded px-2.5 py-1 text-xs font-medium text-emerald-600 ring-1 ring-emerald-200 hover:bg-emerald-50 disabled:opacity-50"
+                          >
+                            {actionLoading === firm.id ? "…" : "Reactivate"}
+                          </button>
+                        )}
                       </td>
                     </tr>
                   ))}

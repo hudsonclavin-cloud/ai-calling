@@ -38,22 +38,27 @@ function parseCall(row) {
 
 function parseLead(row) {
   return {
-    id:              String(row.id),
-    firmId:          String(row.firmId),
-    fromPhone:       String(row.fromPhone),
-    full_name:       String(row.full_name),
-    callback_number: String(row.callback_number),
-    practice_area:   String(row.practice_area),
-    case_summary:    String(row.case_summary),
-    caller_type:     String(row.caller_type || ''),
-    status:          String(row.status),
-    lastCallSid:     String(row.lastCallSid),
-    createdAt:       String(row.createdAt),
-    updatedAt:       String(row.updatedAt),
-    contacted_at:    row.contacted_at ? String(row.contacted_at) : null,
-    quality_score:   row.quality_score ? JSON.parse(String(row.quality_score)) : null,
-    transcript:      JSON.parse(String(row.transcript || '[]')),
-    timeline:        JSON.parse(String(row.timeline   || '[]')),
+    id:                    String(row.id),
+    firmId:                String(row.firmId),
+    fromPhone:             String(row.fromPhone),
+    full_name:             String(row.full_name),
+    callback_number:       String(row.callback_number),
+    practice_area:         String(row.practice_area),
+    case_summary:          String(row.case_summary),
+    calling_for:           String(row.calling_for || ''),
+    caller_type:           String(row.caller_type || ''),
+    status:                String(row.status),
+    lastCallSid:           String(row.lastCallSid),
+    createdAt:             String(row.createdAt),
+    updatedAt:             String(row.updatedAt),
+    contacted_at:          row.contacted_at ? String(row.contacted_at) : null,
+    quality_score:         row.quality_score ? JSON.parse(String(row.quality_score)) : null,
+    transcript:            JSON.parse(String(row.transcript || '[]')),
+    timeline:              JSON.parse(String(row.timeline   || '[]')),
+    is_urgent:             Boolean(row.is_urgent),
+    call_duration_seconds: row.call_duration_seconds != null ? Number(row.call_duration_seconds) : 0,
+    recording_url:         row.recording_url ? String(row.recording_url) : null,
+    recording_duration:    row.recording_duration != null ? Number(row.recording_duration) : null,
   };
 }
 
@@ -89,13 +94,14 @@ async function _saveLeads(leads) {
   const client = getClient();
   const stmts = leads.slice(0, 500).map(l => ({
     sql: `
-      INSERT INTO leads (id, firmId, fromPhone, full_name, callback_number, practice_area, case_summary, caller_type, status, lastCallSid, createdAt, updatedAt, transcript, timeline)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO leads (id, firmId, fromPhone, full_name, callback_number, practice_area, case_summary, calling_for, caller_type, status, lastCallSid, createdAt, updatedAt, transcript, timeline)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         full_name       = excluded.full_name,
         callback_number = excluded.callback_number,
         practice_area   = excluded.practice_area,
         case_summary    = excluded.case_summary,
+        calling_for     = excluded.calling_for,
         caller_type     = excluded.caller_type,
         status          = excluded.status,
         lastCallSid     = excluded.lastCallSid,
@@ -109,6 +115,7 @@ async function _saveLeads(leads) {
       l.callback_number || '',
       l.practice_area   || '',
       l.case_summary    || '',
+      l.calling_for     || '',
       l.caller_type     || '',
       l.status,
       l.lastCallSid,
@@ -224,6 +231,21 @@ export async function initSchema() {
   if (!cols.includes('quality_score')) {
     await client.execute(`ALTER TABLE leads ADD COLUMN quality_score TEXT`);
   }
+  if (!cols.includes('calling_for')) {
+    await client.execute(`ALTER TABLE leads ADD COLUMN calling_for TEXT NOT NULL DEFAULT ''`);
+  }
+  if (!cols.includes('is_urgent')) {
+    await client.execute(`ALTER TABLE leads ADD COLUMN is_urgent INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!cols.includes('call_duration_seconds')) {
+    await client.execute(`ALTER TABLE leads ADD COLUMN call_duration_seconds INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!cols.includes('recording_url')) {
+    await client.execute(`ALTER TABLE leads ADD COLUMN recording_url TEXT`);
+  }
+  if (!cols.includes('recording_duration')) {
+    await client.execute(`ALTER TABLE leads ADD COLUMN recording_duration INTEGER`);
+  }
 }
 
 // ── Public async API ──────────────────────────────────────────────────────────
@@ -233,6 +255,22 @@ export async function loadCalls(firmId) {
     ? await getClient().execute({ sql: 'SELECT * FROM calls WHERE firmId = ? ORDER BY updatedAt DESC LIMIT 500', args: [firmId] })
     : await getClient().execute('SELECT * FROM calls ORDER BY updatedAt DESC LIMIT 500');
   return result.rows.map(parseCall);
+}
+
+export async function getCallById(id) {
+  const result = await getClient().execute({
+    sql: 'SELECT * FROM calls WHERE id = ? LIMIT 1',
+    args: [id],
+  });
+  return result.rows[0] ? parseCall(result.rows[0]) : null;
+}
+
+export async function getCallByCallSid(callSid) {
+  const result = await getClient().execute({
+    sql: 'SELECT * FROM calls WHERE callSid = ? LIMIT 1',
+    args: [callSid],
+  });
+  return result.rows[0] ? parseCall(result.rows[0]) : null;
 }
 
 export async function saveCalls(calls) { await _saveCalls(calls); }
@@ -246,9 +284,17 @@ export async function loadLeads(firmId) {
 
 export async function saveLeads(leads) { await _saveLeads(leads); }
 
+export async function getLeadsByPhone(phone, firmId) {
+  const result = await getClient().execute({
+    sql: 'SELECT * FROM leads WHERE fromPhone = ? AND firmId = ? ORDER BY updatedAt DESC LIMIT 5',
+    args: [phone, firmId],
+  });
+  return result.rows.map(parseLead);
+}
+
 // Patch arbitrary whitelisted fields on a lead row
 export async function patchLead(id, updates) {
-  const allowed = ['status', 'contacted_at', 'quality_score'];
+  const allowed = ['status', 'contacted_at', 'quality_score', 'is_urgent', 'call_duration_seconds', 'recording_url', 'recording_duration'];
   const entries = Object.entries(updates).filter(([k]) => allowed.includes(k));
   if (!entries.length) return;
   const now = nowIso();
@@ -267,6 +313,10 @@ export async function loadSessions() {
 }
 
 export async function saveSessions(sessions) { await _saveSessions(sessions); }
+
+export async function deleteSession(callSid) {
+  await getClient().execute({ sql: 'DELETE FROM sessions WHERE callSid = ?', args: [callSid] });
+}
 
 // ── Webhook logs ──────────────────────────────────────────────────────────────
 
@@ -355,8 +405,8 @@ export async function persistSessionArtifacts(session, { assistantText, callerTe
     if (!existingLead) {
       await tx.execute({
         sql: `
-          INSERT INTO leads (id, firmId, fromPhone, full_name, callback_number, practice_area, case_summary, caller_type, status, lastCallSid, createdAt, updatedAt, transcript, timeline)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          INSERT INTO leads (id, firmId, fromPhone, full_name, callback_number, practice_area, case_summary, calling_for, caller_type, is_urgent, status, lastCallSid, createdAt, updatedAt, transcript, timeline)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `,
         args: [
           session.leadId, session.firmId, session.fromPhone,
@@ -364,7 +414,9 @@ export async function persistSessionArtifacts(session, { assistantText, callerTe
           session.collected.callback_number || session.fromPhone,
           session.collected.practice_area   || '',
           session.collected.case_summary    || '',
+          session.collected.calling_for     || '',
           session.callerType                || '',
+          session.isUrgent ? 1 : 0,
           done ? 'ready_for_review' : 'in_progress',
           session.callSid,
           now, now,
@@ -379,8 +431,8 @@ export async function persistSessionArtifacts(session, { assistantText, callerTe
       await tx.execute({
         sql: `
           UPDATE leads
-          SET full_name = ?, callback_number = ?, practice_area = ?, case_summary = ?, caller_type = ?,
-              status = ?, lastCallSid = ?, updatedAt = ?, transcript = ?, timeline = ?
+          SET full_name = ?, callback_number = ?, practice_area = ?, case_summary = ?, calling_for = ?, caller_type = ?,
+              is_urgent = ?, status = ?, lastCallSid = ?, updatedAt = ?, transcript = ?, timeline = ?
           WHERE id = ?
         `,
         args: [
@@ -388,7 +440,9 @@ export async function persistSessionArtifacts(session, { assistantText, callerTe
           session.collected.callback_number || String(existingLead.callback_number),
           session.collected.practice_area   || String(existingLead.practice_area),
           session.collected.case_summary    || String(existingLead.case_summary),
+          session.collected.calling_for     || String(existingLead.calling_for || ''),
           session.callerType                || String(existingLead.caller_type || ''),
+          session.isUrgent ? 1 : 0,
           done ? 'ready_for_review' : 'in_progress',
           session.callSid, now,
           JSON.stringify(transcript),

@@ -161,4 +161,14 @@ export async function getHealth(): Promise<HealthData | null> {
   }
 }
 
+export async function getCallTranscript(callId: string, firmId?: string): Promise<TranscriptEntry[]> {
+  try {
+    const qs = firmId ? `?firmId=${encodeURIComponent(firmId)}` : '';
+    const res = await fetchJson<{ data: TranscriptEntry[] }>(`/api/calls/${callId}/transcript${qs}`);
+    return res.data;
+  } catch {
+    return [];
+  }
+}
+
 export { API_BASE };

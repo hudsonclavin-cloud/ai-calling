@@ -1,13 +1,13 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { Download } from "lucide-react";
 import { getLeads } from "@/lib/api";
 import { LeadsTable } from "@/components/leads-table";
 import type { LeadSummary } from "@/lib/types";
 
 function toCSV(leads: LeadSummary[]): string {
-  const headers = ["Date", "Name", "Phone", "Callback Number", "Practice Area", "Case Summary", "Status", "Contacted", "Caller Type"];
+  const headers = ["Date", "Name", "Phone", "Callback Number", "Practice Area", "Case Summary", "Calling For", "Status", "Partial", "Contacted", "Caller Type"];
   const rows = leads.map((l) => [
     new Date(l.createdAt).toLocaleDateString(),
     l.full_name || "",
@@ -15,7 +15,9 @@ function toCSV(leads: LeadSummary[]): string {
     l.callback_number || "",
     l.practice_area || "",
     (l.case_summary || "").replace(/"/g, '""'),
+    l.calling_for || "",
     l.status || "",
+    l.status === "partial" ? "Yes" : "No",
     l.contacted_at ? new Date(l.contacted_at).toLocaleDateString() : "",
     l.caller_type || "",
   ]);
@@ -92,7 +94,9 @@ export default function LeadsPage() {
           )}
         </div>
       </div>
-      <LeadsTable leads={leads} />
+      <Suspense>
+        <LeadsTable leads={leads} />
+      </Suspense>
     </div>
   );
 }

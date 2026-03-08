@@ -1,14 +1,14 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
-import { Users } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { CheckCheck, Phone, ScrollText, Users } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
-import { CheckCheck } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { SelectNative } from "@/components/ui/select-native";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { TranscriptPanel } from "@/components/TranscriptPanel";
 import type { LeadSummary } from "@/lib/types";
 
 function timeAgo(dateStr: string): string {
@@ -42,8 +42,13 @@ function formatStatus(status: string): string {
 
 export function LeadsTable({ leads }: { leads: LeadSummary[] }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const firmId = searchParams.get("firmId");
+  const q = firmId ? `?firmId=${firmId}` : "";
   const [statusFilter, setStatusFilter] = useState("all");
   const [practiceAreaFilter, setPracticeAreaFilter] = useState("all");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [transcriptLeadId, setTranscriptLeadId] = useState<string | null>(null);
 
   const practiceAreas = useMemo(() => {
     const set = new Set(leads.map((l) => l.practice_area).filter(Boolean));
@@ -55,28 +60,46 @@ export function LeadsTable({ leads }: { leads: LeadSummary[] }) {
       leads.filter((lead) => {
         const matchesStatus = statusFilter === "all" || lead.status === statusFilter;
         const matchesPractice = practiceAreaFilter === "all" || lead.practice_area === practiceAreaFilter;
-        return matchesStatus && matchesPractice;
+        const matchesSearch = !searchQuery ||
+          lead.full_name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          lead.fromPhone?.includes(searchQuery) ||
+          lead.practice_area?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          lead.case_summary?.toLowerCase().includes(searchQuery.toLowerCase());
+        return matchesStatus && matchesPractice && matchesSearch;
       }),
-    [leads, statusFilter, practiceAreaFilter]
+    [leads, statusFilter, practiceAreaFilter, searchQuery]
   );
 
   return (
+    <>
     <Card>
-      <CardHeader className="gap-4 md:flex-row md:items-center md:justify-between">
-        <CardTitle>All Leads</CardTitle>
-        <div className="grid w-full gap-3 md:w-auto md:grid-cols-2">
-          <SelectNative value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
-            <option value="all">All statuses</option>
-            <option value="ready_for_review">Ready for Review</option>
-            <option value="in_progress">In Progress</option>
-          </SelectNative>
-          <SelectNative value={practiceAreaFilter} onChange={(e) => setPracticeAreaFilter(e.target.value)}>
-            {practiceAreas.map((area) => (
-              <option key={area} value={area}>
-                {area === "all" ? "All practice areas" : area}
-              </option>
-            ))}
-          </SelectNative>
+      <CardHeader className="gap-4">
+        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+          <CardTitle>All Leads</CardTitle>
+          <div className="flex flex-col gap-3 md:flex-row md:items-center">
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search by name, phone, or case type..."
+              className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-700 placeholder-slate-400 shadow-sm focus:border-slate-400 focus:outline-none focus:ring-1 focus:ring-slate-400 md:w-64"
+            />
+            <div className="grid grid-cols-2 gap-3">
+              <SelectNative value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+                <option value="all">All statuses</option>
+                <option value="ready_for_review">Ready for Review</option>
+                <option value="in_progress">In Progress</option>
+                <option value="partial">Partial</option>
+              </SelectNative>
+              <SelectNative value={practiceAreaFilter} onChange={(e) => setPracticeAreaFilter(e.target.value)}>
+                {practiceAreas.map((area) => (
+                  <option key={area} value={area}>
+                    {area === "all" ? "All practice areas" : area}
+                  </option>
+                ))}
+              </SelectNative>
+            </div>
+          </div>
         </div>
       </CardHeader>
       <CardContent>
@@ -84,25 +107,33 @@ export function LeadsTable({ leads }: { leads: LeadSummary[] }) {
           <TableHeader>
             <TableRow>
               <TableHead>Name</TableHead>
-              <TableHead>Practice Area</TableHead>
+              <TableHead className="hidden md:table-cell">Practice Area</TableHead>
               <TableHead>Status</TableHead>
-              <TableHead>Caller</TableHead>
-              <TableHead>Contacted</TableHead>
+              <TableHead className="hidden md:table-cell">Caller</TableHead>
+              <TableHead className="hidden md:table-cell">Contacted</TableHead>
               <TableHead>Created</TableHead>
+              <TableHead>Transcript</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {filtered.length === 0 ? (
+            {filtered.length === 0 && leads.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={6}>
+                <TableCell colSpan={7}>
+                  <div className="flex flex-col items-center justify-center gap-3 py-20">
+                    <Phone className="h-10 w-10 text-slate-300" />
+                    <p className="font-medium text-slate-600">No leads yet</p>
+                    <p className="text-sm text-slate-400">When Ava takes her first call, it will appear here.</p>
+                    <p className="text-xs text-slate-400">Make a test call to get started.</p>
+                  </div>
+                </TableCell>
+              </TableRow>
+            ) : filtered.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={7}>
                   <div className="flex flex-col items-center justify-center gap-2 py-16 text-slate-400">
                     <Users className="h-8 w-8 opacity-40" />
                     <p className="text-sm font-medium text-slate-500">No leads found</p>
-                    <p className="text-xs">
-                      {statusFilter !== "all" || practiceAreaFilter !== "all"
-                        ? "Try adjusting your filters"
-                        : "Leads will appear here after intake calls"}
-                    </p>
+                    <p className="text-xs">Try adjusting your filters or search query</p>
                   </div>
                 </TableCell>
               </TableRow>
@@ -111,25 +142,37 @@ export function LeadsTable({ leads }: { leads: LeadSummary[] }) {
                 <TableRow
                   key={lead.id}
                   className="cursor-pointer hover:bg-slate-50"
-                  onClick={() => router.push(`/leads/${lead.id}`)}
+                  onClick={() => router.push(`/leads/${lead.id}${q}`)}
                 >
                   <TableCell>
                     <div className="flex items-center gap-3">
                       <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-xs font-semibold text-slate-600">
                         {(lead.full_name || lead.fromPhone || "?").charAt(0).toUpperCase()}
                       </div>
-                      <span className="font-medium text-slate-900">
-                        {lead.full_name || lead.fromPhone || "—"}
-                      </span>
+                      <div className="flex flex-col">
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-medium text-slate-900">
+                            {lead.full_name || lead.fromPhone || "—"}
+                          </span>
+                          {lead.is_urgent && (
+                            <span className="inline-flex h-2 w-2 rounded-full bg-rose-500" title="Urgent" />
+                          )}
+                        </div>
+                        {(lead.call_duration_seconds ?? 0) > 0 && (
+                          <span className="text-xs text-slate-400">
+                            {Math.floor((lead.call_duration_seconds ?? 0) / 60)}m {(lead.call_duration_seconds ?? 0) % 60}s
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </TableCell>
-                  <TableCell>{lead.practice_area || "—"}</TableCell>
+                  <TableCell className="hidden md:table-cell">{lead.practice_area || "—"}</TableCell>
                   <TableCell>
                     <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium ${statusClass(lead.status)}`}>
                       {formatStatus(lead.status)}
                     </span>
                   </TableCell>
-                  <TableCell>
+                  <TableCell className="hidden md:table-cell">
                     {lead.caller_type ? (
                       <Badge variant={lead.caller_type === "returning" ? "outline" : "default"}>
                         {lead.caller_type === "returning" ? "Returning" : "New"}
@@ -138,7 +181,7 @@ export function LeadsTable({ leads }: { leads: LeadSummary[] }) {
                       <span className="text-slate-400">—</span>
                     )}
                   </TableCell>
-                  <TableCell>
+                  <TableCell className="hidden md:table-cell">
                     {lead.contacted_at ? (
                       <span className="inline-flex items-center gap-1 text-xs text-emerald-600">
                         <CheckCheck className="h-3.5 w-3.5" />
@@ -149,6 +192,15 @@ export function LeadsTable({ leads }: { leads: LeadSummary[] }) {
                     )}
                   </TableCell>
                   <TableCell className="text-slate-500">{timeAgo(lead.createdAt)}</TableCell>
+                  <TableCell>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setTranscriptLeadId(lead.id); }}
+                      className="rounded-md p-1.5 text-slate-400 hover:bg-slate-100 hover:text-violet-600"
+                      title="View transcript"
+                    >
+                      <ScrollText className="h-4 w-4" />
+                    </button>
+                  </TableCell>
                 </TableRow>
               ))
             )}
@@ -156,5 +208,7 @@ export function LeadsTable({ leads }: { leads: LeadSummary[] }) {
         </Table>
       </CardContent>
     </Card>
+    <TranscriptPanel leadId={transcriptLeadId} onClose={() => setTranscriptLeadId(null)} />
+    </>
   );
 }

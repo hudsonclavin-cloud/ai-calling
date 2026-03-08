@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { ArrowDown, ArrowUp, ArrowUpRight, CalendarCheck2, PhoneCall, PhoneMissed, Plus, TrendingUp, Users, AlertCircle, Voicemail } from "lucide-react";
 
@@ -109,6 +110,9 @@ function LiveDot() {
 }
 
 export default function DashboardPage() {
+  const searchParams = useSearchParams();
+  const firmId = searchParams.get("firmId");
+  const q = firmId ? `?firmId=${firmId}` : "";
   const [calls, setCalls] = useState<CallRecord[]>([]);
   const [leads, setLeads] = useState<LeadSummary[]>([]);
   const [health, setHealth] = useState<HealthData | null>(null);
@@ -266,7 +270,7 @@ export default function DashboardPage() {
             <h2 className="text-sm font-semibold text-slate-900">Recent Activity</h2>
             <p className="text-xs text-slate-500">Last {recentActivity.length} calls</p>
           </div>
-          <Link href="/calls" className="flex items-center gap-1 text-xs font-medium text-violet-600 hover:text-violet-700">
+          <Link href={`/calls${q}`} className="flex items-center gap-1 text-xs font-medium text-violet-600 hover:text-violet-700">
             View all <ArrowUpRight className="h-3.5 w-3.5" />
           </Link>
         </div>
@@ -281,7 +285,7 @@ export default function DashboardPage() {
           <ul className="divide-y divide-slate-100">
             {recentActivity.map((call) => (
               <li key={call.id}>
-                <Link href={`/leads/${call.leadId}`} className="flex items-center gap-4 px-6 py-3.5 transition-colors hover:bg-slate-50">
+                <Link href={`/leads/${call.leadId}${q}`} className="flex items-center gap-4 px-6 py-3.5 transition-colors hover:bg-slate-50">
                   <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-xs font-semibold text-slate-600">
                     {(call.collected?.full_name || call.fromPhone || "?").charAt(0).toUpperCase()}
                   </div>

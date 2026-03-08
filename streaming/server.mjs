@@ -12,8 +12,12 @@ import {
   migrateFromJson,
   loadCalls,
   loadLeads,
+  getCallById,
+  getCallByCallSid,
+  getLeadsByPhone,
   loadSessions,
   saveSessions,
+  deleteSession,
   persistSessionArtifacts,
   patchLead,
   createWebhookLog,
@@ -47,6 +51,45 @@ const ADMIN_API_KEY         = process.env.ADMIN_API_KEY         || '';
 
 const REQUIRED_FIELDS_DEFAULT = ['full_name', 'callback_number', 'practice_area', 'case_summary'];
 
+const TONE_PRESETS = {
+  formal: "Communication style: Professional and precise. Use formal language. Avoid contractions. Say 'Certainly' not 'Sure', 'I would be happy to' not 'I can'. Address callers by their last name if given. Keep responses measured and authoritative.",
+  warm:   "Communication style: Warm and empathetic. Use natural contractions. Use the caller's first name once you have it. Show genuine care. Responses feel human and unhurried, never robotic.",
+  casual: "Communication style: Friendly and approachable. Short sentences. Conversational tone. Avoid stiff or formal language. Sound like a helpful person, not a corporate recording.",
+};
+
+const INDUSTRY_MODULES = {
+  law_pi: `INDUSTRY CONTEXT — PERSONAL INJURY LAW:
+Callers are typically injured individuals or their families seeking legal help after accidents, slip-and-falls, medical malpractice, defective products, or workplace injuries. Most work on a contingency fee basis (no fee unless the firm wins). Key intake info: accident date, injury type, who was at fault, medical treatment status, insurance involvement. Urgency signals: still receiving treatment, recent accident, upcoming statute of limitations. Common terminology: liability, negligence, damages, settlement, insurance adjuster.`,
+
+  law_family: `INDUSTRY CONTEXT — FAMILY LAW:
+Callers are often emotionally distressed, dealing with divorce, custody disputes, child support, domestic violence, or adoption. Be especially calm and empathetic. Many callers are in the middle of an emotional crisis. Key intake info: type of matter, whether it's contested, if there are children involved, current legal status. Urgency signals: safety concerns, immediate court dates, protective order needs. Common terminology: dissolution, custody, visitation, spousal support, guardian ad litem.`,
+
+  law_criminal: `INDUSTRY CONTEXT — CRIMINAL DEFENSE:
+Callers may be recently arrested, under investigation, or calling for a family member. Tone should be non-judgmental, reassuring, and focused on next steps. Key intake info: charge or alleged offense, jurisdiction, court date if any, custody status. Urgency signals: currently in custody, court tomorrow, recent arrest. Do NOT ask for extensive case details — just name, phone, and basic situation. Common terminology: arraignment, bail, plea, public defender, charges, indictment.`,
+
+  medical: `INDUSTRY CONTEXT — MEDICAL / HEALTHCARE:
+Callers may be patients, caregivers, or family members seeking medical consultations, billing help, or scheduling. Be compassionate — health matters are personal. Key intake info: reason for call, insurance status, urgency of medical need. Urgency signals: active symptoms, prescription issues, test results. Maintain HIPAA-conscious language — do not solicit overly specific health details upfront. Common terminology: referral, provider, co-pay, prior authorization, specialist.`,
+
+  real_estate: `INDUSTRY CONTEXT — REAL ESTATE:
+Callers may be buyers, sellers, investors, landlords, or tenants. Topics include buying/selling property, lease disputes, title issues, closings, or investment inquiries. Key intake info: property type, transaction type, location, timeline. Urgency signals: closing date approaching, lease expiring, eviction notice received. Common terminology: escrow, title, closing costs, earnest money, deed, comps, contingency.`,
+
+  home_services: `INDUSTRY CONTEXT — HOME SERVICES:
+Callers need help with home repair, HVAC, plumbing, electrical, roofing, or similar services. Often calling due to a specific problem (leak, broken unit, damage). Key intake info: type of service needed, urgency, property type, location. Urgency signals: active leak, no heat in winter, safety hazard. Be practical and action-oriented. Common terminology: estimate, service call, warranty, inspection, permit, installation.`,
+
+  general: `INDUSTRY CONTEXT — GENERAL SMALL BUSINESS:
+Callers may have a wide variety of needs. Be flexible and listen carefully to understand what they need before asking intake questions. Key intake info: name, callback number, reason for call. Focus on capturing contact info and a clear reason for the inquiry so the business can follow up appropriately.`,
+};
+
+const INDUSTRY_REQUIRED_FIELDS = {
+  law_pi:       ['full_name', 'callback_number', 'practice_area', 'case_summary'],
+  law_family:   ['full_name', 'callback_number', 'practice_area', 'case_summary'],
+  law_criminal: ['full_name', 'callback_number', 'practice_area', 'case_summary'],
+  medical:      ['full_name', 'callback_number', 'practice_area', 'case_summary'],
+  real_estate:  ['full_name', 'callback_number', 'practice_area', 'case_summary'],
+  home_services:['full_name', 'callback_number', 'practice_area', 'case_summary'],
+  general:      ['full_name', 'callback_number', 'practice_area'],
+};
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DATA_DIR = path.join(__dirname, 'data');
@@ -62,12 +105,16 @@ let holdKey = null; // set at boot before prewarm
 
 // Thinking filler phrases — played immediately when caller finishes speaking, before OpenAI responds
 const FILLER_PHRASES = [
-  'One moment...',
-  'Sure, just a second...',
-  'Let me check on that...',
-  'Got it, one moment...',
+  'One moment.',
+  'Sure, let me note that.',
+  'Got it.',
+  'Of course.',
+  'Let me check on that.',
 ];
 let fillerKeys = []; // populated at boot via synthesizeToDisk
+
+// Per-session last filler index (avoids consecutive repeated filler within a call)
+const fillerLastIdxMap = new Map();
 
 // ── Default firm config (used as fallback if no file found) ──────────────────
 // To add a new firm: copy firm_default.json → firm_yourname.json and edit it.
@@ -76,7 +123,8 @@ const DEFAULT_FIRM_CONFIG = {
   id: 'firm_default',
   name: 'Redwood Legal Group',
   ava_name: 'Ava',
-  tone: 'warm-professional',
+  tone: 'warm',
+  industry: 'law_pi',
   opening: "Hi, this is Ava with Redwood Legal Group. I'm going to ask you a few quick questions so the attorney can review your case before calling you back.",
   closing: "Perfect. I've got everything I need. An attorney will review this and reach out to you soon.",
   practice_areas: ['Personal Injury', 'Family Law', 'Employment'],
@@ -92,6 +140,8 @@ const DEFAULT_FIRM_CONFIG = {
   max_questions: 8,
   max_reprompts: 2,
   office_hours: 'Mon-Fri 8:00 AM - 6:00 PM',
+  business_hours: null,
+  timezone: 'America/New_York',
   disclaimer: 'This call is informational only and does not create an attorney-client relationship.',
   intake_rules: 'Collect caller contact details and a short case summary. Escalate emergency threats to 911 guidance.',
   notification_email: '',
@@ -111,6 +161,7 @@ app.log.info({
   STRIPE_SECRET_KEY:  !!STRIPE_SECRET_KEY,
   WEB_BASE_URL,
   ADMIN_API_KEY:      !!ADMIN_API_KEY,
+  DEMO_PHONE_NUMBER: process.env.DEMO_PHONE_NUMBER || '(not set)',
 }, 'BOOT env check');
 await app.register(formbody);
 
@@ -203,12 +254,13 @@ async function loadFirmConfig(firmId) {
     return { ...DEFAULT_FIRM_CONFIG };
   }
   // Merge with defaults so missing keys always have a safe value
+  const industry = raw.industry || DEFAULT_FIRM_CONFIG.industry;
   return {
     ...DEFAULT_FIRM_CONFIG,
     ...raw,
     question_overrides: { ...DEFAULT_FIRM_CONFIG.question_overrides, ...(raw.question_overrides || {}) },
     acknowledgments: raw.acknowledgments?.length ? raw.acknowledgments : DEFAULT_FIRM_CONFIG.acknowledgments,
-    required_fields: raw.required_fields?.length ? raw.required_fields : REQUIRED_FIELDS_DEFAULT,
+    required_fields: raw.required_fields?.length ? raw.required_fields : (INDUSTRY_REQUIRED_FIELDS[industry] || REQUIRED_FIELDS_DEFAULT),
   };
 }
 
@@ -272,6 +324,43 @@ function normalizePhone(raw) {
   return txt || 'unknown';
 }
 
+// ── Business hours ────────────────────────────────────────────────────────────
+
+const DAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+
+function nextOpenDay(schedule, currentDay) {
+  const startIdx = DAY_NAMES.indexOf(currentDay);
+  for (let i = 1; i <= 7; i++) {
+    const name = DAY_NAMES[(startIdx + i) % 7];
+    if (schedule[name]) {
+      return i === 1 ? 'tomorrow morning' : `${name.charAt(0).toUpperCase() + name.slice(1)} morning`;
+    }
+  }
+  return null;
+}
+
+function isWithinBusinessHours(firmConfig) {
+  const tz = firmConfig.timezone || 'America/New_York';
+  const schedule = firmConfig.business_hours || {
+    monday: { open: '09:00', close: '17:00' }, tuesday: { open: '09:00', close: '17:00' },
+    wednesday: { open: '09:00', close: '17:00' }, thursday: { open: '09:00', close: '17:00' },
+    friday: { open: '09:00', close: '17:00' }, saturday: null, sunday: null,
+  };
+  const now = new Date();
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'long', hour: '2-digit', minute: '2-digit', hour12: false })
+      .formatToParts(now).map(p => [p.type, p.value])
+  );
+  const dayName = parts.weekday.toLowerCase();
+  const cur = parseInt(parts.hour) * 60 + parseInt(parts.minute);
+  const day = schedule[dayName];
+  if (!day) return { isOpen: false, nextOpen: nextOpenDay(schedule, dayName) };
+  const [oh, om] = day.open.split(':').map(Number);
+  const [ch, cm] = day.close.split(':').map(Number);
+  const isOpen = cur >= oh * 60 + om && cur < ch * 60 + cm;
+  return { isOpen, nextOpen: isOpen ? null : nextOpenDay(schedule, dayName) };
+}
+
 // ── Session ───────────────────────────────────────────────────────────────────
 
 function createSession({ callSid, firmId, fromPhone, firmConfig }) {
@@ -286,6 +375,8 @@ function createSession({ callSid, firmId, fromPhone, firmConfig }) {
       collected[field] = field === 'callback_number' ? (fromPhone || '') : '';
     }
   }
+  collected.calling_for = '';
+
   return {
     callSid,
     firmId,
@@ -296,6 +387,7 @@ function createSession({ callSid, firmId, fromPhone, firmConfig }) {
     repromptCount: 0,
     callerType: null,          // null | 'new' | 'returning'
     callerTypeReprompts: 0,    // failed detection attempts before defaulting
+    knownName: '',             // set when returning caller is detected with a known name
     isUrgent: false,           // true when urgency keywords detected
     urgencySpoken: false,      // true after urgency acknowledgment has been spoken
     phoneRetryPending: false,  // true when caller gave digits but extraction failed
@@ -506,8 +598,9 @@ function callOpenAiForNextStep({ firmConfig, session, userText }) {
           practice_area: { type: 'string' },
           case_summary: { type: 'string' },
           caller_type: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+          calling_for: { type: 'string' },
         },
-        required: ['full_name', 'callback_number', 'practice_area', 'case_summary', 'caller_type'],
+        required: ['full_name', 'callback_number', 'practice_area', 'case_summary', 'caller_type', 'calling_for'],
       },
       next_question_id: { type: 'string' },
       next_question_text: { type: 'string' },
@@ -542,11 +635,16 @@ function callOpenAiForNextStep({ firmConfig, session, userText }) {
 
   app.log.info({ chars: JSON.stringify(prompt).length }, 'openai-payload-chars');
 
-  const toneInstruction = firmConfig.tone === 'friendly'
-    ? 'Warm, casual, friendly. Short questions. Sound like a helpful person, not a form.'
-    : 'Warm but professional. Brief and clear. Under 20 words per question.';
+  const toneInstruction = TONE_PRESETS[firmConfig.tone] || TONE_PRESETS['warm'];
 
-  const systemPrompt = `You are ${firmConfig.ava_name || 'Ava'}, a warm AI receptionist for ${firmConfig.name} having a real phone conversation. Tone: ${toneInstruction}. The caller just spoke to you. First acknowledge what they said like a human would, then ask the next question. Never sound like you're filling out a form.
+  const { isOpen, nextOpen } = isWithinBusinessHours(firmConfig);
+  const hoursContext = isOpen
+    ? 'The office is currently open. You may tell the caller someone will be in touch shortly.'
+    : `The office is currently closed. Let the caller know their info is captured and someone will follow up when the office reopens${nextOpen ? ` (${nextOpen})` : ''}.`;
+
+  const industryContext = INDUSTRY_MODULES[firmConfig.industry] || INDUSTRY_MODULES['law_pi'];
+
+  const systemPrompt = `You are ${firmConfig.ava_name || 'Ava'}, a warm AI receptionist for ${firmConfig.name} having a real phone conversation. ${toneInstruction} The caller just spoke to you. First acknowledge what they said like a human would, then ask the next question. Never sound like you're filling out a form.
 
 ACKNOWLEDGMENT IS REQUIRED. Never leave it empty. No exceptions.
 
@@ -580,6 +678,21 @@ Caller: "I just got arrested and I don't know what to do."
 Caller: "I've been trying to get help for weeks and nobody is doing anything, I'm so frustrated."
 → next_question_text: "I completely hear you — you've been patient and you deserve to be taken seriously. Can you tell me a little about what's been happening? I want to make sure I get this to the right person."
 
+Caller: "I don't really understand how this works, I've never called a lawyer before."
+→ next_question_text: "You're in exactly the right place — that's what we're here for, and there are no silly questions. Lots of people haven't gone through this before. To get you to the right attorney, can I start by getting your name?"
+
+Caller: "I'm calling for my husband — he was in a bad accident."
+→ next_question_text: "Oh no, I'm sorry to hear about your husband — it's good that you called. Is he able to speak with us, or are you handling this on his behalf right now? Either way, let me get your name and contact info so we can get someone on this."
+
+Caller: "My last attorney did nothing for two years and I'm furious."
+→ next_question_text: "That's completely understandable — two years is a long time to feel like nothing's moving, and your frustration is valid. I want to make sure you're heard this time. Can you tell me a little about what you're dealing with so I can get you to the right person?"
+
+Caller: "I need to talk to someone about a case but I can't afford a lawyer."
+→ next_question_text: "I hear you — cost is a real concern, and it's worth knowing that many attorneys here work on contingency, which means you don't pay unless they win your case. Let me get a few quick details so we can match you with the right fit. What's your name?"
+
+Caller: "I'm at the hospital right now, my son was just in an accident."
+→ next_question_text: "Oh my — please focus on your son right now. I just need your name and the best number to reach you, and we'll have someone call you back as soon as possible. What's your name?"
+
 RULES:
 - Never ask for info already in current_collected. Never repeat asked_question_ids.
 - Never give legal advice.
@@ -588,9 +701,15 @@ RULES:
 - If is_rambling=true, silently extract everything, move to first missing field.
 - caller_is_urgent=true means open with extra warmth and reassurance.
 - caller_type: 'new', 'returning', or null.
+- When a caller mentions they are calling for someone else (a family member, spouse, etc.), always collect BOTH the caller's contact information AND the name of the person they are calling about. Store the affected person's name in the calling_for extracted field.
+- Active crisis / at hospital callers: collect name + phone ONLY — skip all other required fields and move to done.
 
 next_question_id MUST be one of these exact strings: full_name | callback_number | practice_area | case_summary | done
 Never invent other IDs. Use "done" only if all required fields are collected.
+
+OFFICE HOURS: ${hoursContext}
+
+${industryContext}
 
 Return only strict JSON per schema.`;
 
@@ -704,11 +823,26 @@ function mergeExtracted(session, extracted, userText, firmConfig) {
       updates[key] = value;
     }
   }
+  // calling_for — name of person being called about (third-party callers)
+  const callingFor = String(extracted?.calling_for ?? '').trim();
+  if (callingFor && callingFor !== session.collected.calling_for) {
+    session.collected.calling_for = callingFor;
+    updates.calling_for = callingFor;
+  }
   if (!session.collected.callback_number && session.fromPhone) {
     session.collected.callback_number = session.fromPhone;
     updates.callback_number = session.fromPhone;
   }
   return updates;
+}
+
+// ── SSML natural pauses ───────────────────────────────────────────────────────
+
+function addNaturalPauses(text) {
+  return text.replace(
+    /^(Got it|Of course|Sure|Absolutely|Certainly|I understand|Thank you|Understood|Perfect|Okay|Of course)\.\s+/i,
+    "$1.<break time='350ms'/> "
+  );
 }
 
 // ── Speech composition (firm-aware) ──────────────────────────────────────────
@@ -719,6 +853,9 @@ function composeSpeakText({ session, bodyText, callSid, firmConfig, llmAck = '' 
 
   if (!session.disclaimerShown) {
     session.disclaimerShown = true;
+    if (session.callerType === 'returning' && session.knownName) {
+      return `Welcome back, ${session.knownName}. How can I help you today?`;
+    }
     const opening = firmConfig.opening || `Hi, this is ${firmConfig.ava_name || 'Ava'}, the attorney's assistant.`;
     // On first turn, append the caller type question so the caller knows what to say
     return session.callerType === null && trimmed ? `${opening} ${trimmed}` : opening;
@@ -726,10 +863,10 @@ function composeSpeakText({ session, bodyText, callSid, firmConfig, llmAck = '' 
 
   // LLM provided its own acknowledgment — next_question_text already has it baked in,
   // so return it directly instead of prepending a redundant deterministic ack.
-  if (llmAck) return trimmed;
+  if (llmAck) return addNaturalPauses(trimmed);
 
   const ack = getNextAck(callSid || session.callSid, firmConfig);
-  return `${ack} ${trimmed}`;
+  return addNaturalPauses(`${ack} ${trimmed}`);
 }
 
 // ── XML + TwiML ───────────────────────────────────────────────────────────────
@@ -815,6 +952,7 @@ async function synthesizeToDisk(text) {
         body: JSON.stringify({
           text: safeText,
           model_id: ELEVENLABS_MODEL_ID,
+          enable_ssml_parsing: true,
           voice_settings: {
             stability:        Number(process.env.ELEVEN_STABILITY      ?? 0.20),
             similarity_boost: Number(process.env.ELEVEN_SIMILARITY     ?? 0.75),
@@ -1070,7 +1208,7 @@ async function sendEmailNotification(session, firmConfig) {
 async function sendPartialEmailNotification(session, firmConfig) {
   if (!RESEND_API_KEY) { app.log.warn({ leadId: session.leadId }, 'sendPartialEmailNotification: RESEND_API_KEY not set — skipping'); return; }
   if (!firmConfig.notification_email) { app.log.warn({ leadId: session.leadId, firmId: firmConfig.id }, 'sendPartialEmailNotification: no notification_email on firm — skipping'); return; }
-  const { full_name, callback_number, practice_area } = session.collected || {};
+  const { full_name, callback_number, practice_area, calling_for } = session.collected || {};
   const name = full_name || 'Unknown Caller';
   const phone = callback_number || session.fromPhone;
   const area = practice_area || 'General';
@@ -1086,6 +1224,7 @@ async function sendPartialEmailNotification(session, firmConfig) {
     <table cellpadding="0" cellspacing="0" style="width:100%;border-top:1px solid #e2e8f0">
       ${infoRow('Practice Area', area)}
       ${infoRow('Phone', `<a href="tel:${phone}" style="color:#b45309">${phone}</a>`)}
+      ${calling_for ? infoRow('Calling For', calling_for) : ''}
       ${infoRow('Fields Captured', capturedFields)}
     </table>
     ${ctaButton('View in Dashboard', dashUrl, '#d97706')}`;
@@ -1269,6 +1408,24 @@ function fireWebhooks(lead, firmId, firmConfig) {
     .catch((err) => app.log.warn({ err: String(err), firmId }, 'webhook delivery error'));
 }
 
+// ── Returning caller lookup ───────────────────────────────────────────────────
+
+async function lookupCallerHistory(phone, firmId) {
+  try {
+    const priorLeads = await getLeadsByPhone(phone, firmId);
+    if (!priorLeads.length) return { isReturning: false, priorLeads: [] };
+    const lastLead = priorLeads[0];
+    const capturedFields = {
+      full_name:       lastLead.full_name       || '',
+      callback_number: lastLead.callback_number || '',
+      practice_area:   lastLead.practice_area   || '',
+    };
+    return { isReturning: true, priorLeads, lastCallDate: lastLead.updatedAt, capturedFields };
+  } catch {
+    return { isReturning: false, priorLeads: [] };
+  }
+}
+
 // ── Core controller ───────────────────────────────────────────────────────────
 
 async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
@@ -1286,6 +1443,22 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
 
   const callerText = String(userText || '').trim();
   if (callerText) appendTranscript(session, 'caller', callerText);
+
+  // Returning caller check — on first turn only (before caller type question is asked)
+  if (!callerText && session.callerType === null) {
+    const history = await lookupCallerHistory(normalizedPhone, firmConfig.id);
+    if (history.isReturning) {
+      session.callerType = 'returning';
+      // Pre-populate captured fields so Ava doesn't re-ask
+      for (const [k, v] of Object.entries(history.capturedFields)) {
+        if (v && !session.collected[k]) session.collected[k] = v;
+      }
+      if (history.capturedFields.full_name) {
+        session.knownName = history.capturedFields.full_name;
+      }
+      app.log.info({ callSid, knownName: session.knownName, lastCallDate: history.lastCallDate }, 'returning-caller-detected');
+    }
+  }
 
   const deterministicExtracted = extractAllFieldsFromLongResponse(callerText);
 
@@ -1451,6 +1624,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
       speakText = `That sounds really stressful — I want to make sure we get someone to help you quickly. ${speakText}`;
     }
     sessionAckIndex.delete(callSid);
+    fillerLastIdxMap.delete(callSid);
   }
   const tAfterCompose = Date.now();
 
@@ -1624,11 +1798,24 @@ app.post('/api/firms/:id', async (req, reply) => {
   return { data: updated };
 });
 
+app.get('/api/demo-number', async () => {
+  return { number: process.env.DEMO_PHONE_NUMBER || null };
+});
+
 app.get('/api/calls', async (req) => {
   const firmId = String(req.query?.firmId || '').trim();
   const calls = await loadCalls(firmId || undefined);
   calls.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
   return { data: calls.slice(0, 100) };
+});
+
+app.get('/api/calls/:id/transcript', async (req, reply) => {
+  const firmId = String(req.query?.firmId || '').trim();
+  const callId = req.params.id;
+  const call = await getCallById(callId);
+  if (!call) return reply.code(404).send({ error: 'Call not found' });
+  if (firmId && call.firmId !== firmId) return reply.code(404).send({ error: 'Call not found' });
+  return { data: call.transcript };
 });
 
 app.get('/api/leads', async (req) => {
@@ -1745,6 +1932,7 @@ app.get('/tts-live', async (req, reply) => {
         body: JSON.stringify({
           text: safeText,
           model_id: ELEVENLABS_MODEL_ID,
+          enable_ssml_parsing: true,
           voice_settings: {
             stability:        Number(process.env.ELEVEN_STABILITY      ?? 0.20),
             similarity_boost: Number(process.env.ELEVEN_SIMILARITY     ?? 0.75),
@@ -1838,13 +2026,47 @@ app.post('/twiml', async (req, reply) => {
 
   try {
     const firmConfig = await loadFirmConfig(firmId);
+
+    // ── Trial / suspension enforcement ───────────────────────────────────────
+    if (firmConfig.status === 'suspended') {
+      reply.header('Content-Type', 'text/xml');
+      return reply.send(`<Response><Say>This number is not currently active. Please contact the business directly. Goodbye.</Say><Hangup/></Response>`);
+    }
+    if (firmConfig.status === 'trial' && firmConfig.trial_ends_at && new Date() > new Date(firmConfig.trial_ends_at)) {
+      // Auto-suspend expired trial
+      await saveFirmConfig(firmId, { ...firmConfig, status: 'suspended' });
+      reply.header('Content-Type', 'text/xml');
+      return reply.send(`<Response><Say>This number's trial period has ended. Please contact the business directly. Goodbye.</Say><Hangup/></Response>`);
+    }
+    // Trial warning: check on each call if within 24h of expiry and warning not yet sent
+    if (firmConfig.status === 'trial' && firmConfig.trial_ends_at && !firmConfig.trial_warning_sent) {
+      const msUntilExpiry = new Date(firmConfig.trial_ends_at).getTime() - Date.now();
+      if (msUntilExpiry > 0 && msUntilExpiry < 24 * 60 * 60 * 1000) {
+        saveFirmConfig(firmId, { ...firmConfig, trial_warning_sent: true })
+          .catch((err) => app.log.warn({ err: String(err), firmId }, 'trial warning save failed'));
+        if (firmConfig.notification_email && RESEND_API_KEY) {
+          const trialEnd = new Date(firmConfig.trial_ends_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric' });
+          fetch('https://api.resend.com/emails', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              from: RESEND_FROM_EMAIL,
+              to: firmConfig.notification_email,
+              subject: 'Your Ava trial ends tomorrow',
+              html: `<p>Hi,</p><p>Your Ava free trial ends on <strong>${trialEnd}</strong>. To keep your calls answered without interruption, <a href="${WEB_BASE_URL}/settings">upgrade your plan</a>.</p>`,
+            }),
+          }).catch((err) => app.log.warn({ err: String(err), firmId }, 'trial warning email failed'));
+        }
+      }
+    }
+
     const sessions = await loadSessions();
     let session = sessions[callSid];
     if (!session) {
       session = createSession({ callSid, firmId, fromPhone, firmConfig });
       sessions[callSid] = session;
       await saveSessions(sessions);
-      // Register statusCallback on the live call so we capture partial leads on hangup
+      // Register statusCallback and enable recording on the live call
       if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
         const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64');
         fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Calls/${callSid}.json`, {
@@ -1853,8 +2075,11 @@ app.post('/twiml', async (req, reply) => {
           body: new URLSearchParams({
             StatusCallback: `${PUBLIC_BASE_URL}/call-status`,
             StatusCallbackMethod: 'POST',
+            Record: 'record-from-answer-dual',
+            RecordingStatusCallback: `${PUBLIC_BASE_URL}/recording-status`,
+            RecordingStatusCallbackMethod: 'POST',
           }).toString(),
-        }).catch((err) => app.log.warn({ err: String(err), callSid }, 'statusCallback registration failed'));
+        }).catch((err) => app.log.warn({ err: String(err), callSid }, 'statusCallback/recording registration failed'));
       }
     }
 
@@ -1889,8 +2114,12 @@ app.post('/twiml', async (req, reply) => {
       const processingPromise = runNextStepController({ firmId, callSid, fromPhone, userText });
       pendingResponses.set(callSid, { promise: processingPromise, t0 });
 
-      // Pick a random pre-cached filler phrase
-      const fillerIdx = Math.floor(Math.random() * FILLER_PHRASES.length);
+      // Pick a random pre-cached filler phrase (anti-repeat: avoid last used index)
+      const lastFillerIdx = fillerLastIdxMap.get(callSid) ?? -1;
+      let fillerIdx;
+      do { fillerIdx = Math.floor(Math.random() * FILLER_PHRASES.length); }
+      while (FILLER_PHRASES.length > 1 && fillerIdx === lastFillerIdx);
+      fillerLastIdxMap.set(callSid, fillerIdx);
       const fillerKey = fillerKeys[fillerIdx];
       const fillerAudioUrl = fillerKey
         ? `${PUBLIC_BASE_URL}/api/tts?key=${encodeURIComponent(fillerKey)}`
@@ -1993,17 +2222,29 @@ app.post('/twiml-result', async (req, reply) => {
 app.post('/call-status', async (req, reply) => {
   const callSid = String(req.body?.CallSid || '').trim();
   const callStatus = String(req.body?.CallStatus || '').trim();
+  const callDuration = parseInt(req.body?.CallDuration || '0', 10);
 
   if (callStatus !== 'completed' || !callSid) return reply.code(204).send();
 
   const sessions = await loadSessions();
   const session = sessions[callSid];
 
-  // Session already marked done — full lead already saved, nothing to do
-  if (!session || session.done) return reply.code(204).send();
+  if (!session) return reply.code(204).send();
+
+  // Always save call duration if available
+  if (callDuration > 0 && session.leadId) {
+    patchLead(session.leadId, { call_duration_seconds: callDuration })
+      .catch((err) => app.log.warn({ err: String(err), callSid }, 'call-status: duration patch failed'));
+  }
+
+  // Session already marked done — full lead already saved, just clean up
+  if (session.done) {
+    deleteSession(callSid).catch((err) => app.log.warn({ err: String(err), callSid }, 'call-status: session delete failed'));
+    return reply.code(204).send();
+  }
 
   // Caller hung up before intake completed — persist as partial lead
-  app.log.info({ callSid, leadId: session.leadId }, 'call-status: saving partial lead');
+  app.log.info({ callSid, leadId: session.leadId, callDuration }, 'call-status: saving partial lead');
 
   try {
     await persistSessionArtifacts(session, { assistantText: '', callerText: '', done: false });
@@ -2018,7 +2259,63 @@ app.post('/call-status', async (req, reply) => {
     app.log.warn({ err: String(err), callSid }, 'call-status: partial lead save failed');
   }
 
+  deleteSession(callSid).catch((err) => app.log.warn({ err: String(err), callSid }, 'call-status: session delete failed'));
+
   return reply.code(204).send();
+});
+
+// POST /recording-status — Twilio recording status callback; saves recording URL to lead
+app.post('/recording-status', async (req, reply) => {
+  const callSid = String(req.body?.CallSid || '').trim();
+  const recordingUrl = String(req.body?.RecordingUrl || '').trim();
+  const duration = parseInt(req.body?.RecordingDuration || '0', 10);
+
+  if (!callSid || !recordingUrl) return reply.code(204).send();
+
+  try {
+    const sessions = await loadSessions();
+    const session = sessions[callSid];
+    if (session?.leadId) {
+      await patchLead(session.leadId, {
+        recording_url: recordingUrl,
+        recording_duration: duration,
+      });
+      app.log.info({ callSid, leadId: session.leadId, duration }, 'recording-saved');
+    }
+  } catch (err) {
+    app.log.warn({ err: String(err), callSid }, 'recording-status handler failed');
+  }
+
+  return reply.code(204).send();
+});
+
+// GET /api/calls/:id/recording — proxy Twilio recording audio to client
+// :id may be the internal call id OR the Twilio callSid (lead.lastCallSid)
+app.get('/api/calls/:id/recording', async (req, reply) => {
+  const firmId = String(req.query?.firmId || '').trim();
+  const callId = req.params.id;
+  // Try internal ID first, then fall back to callSid lookup
+  let call = await getCallById(callId);
+  if (!call) call = await getCallByCallSid(callId);
+  if (!call) return reply.code(404).send({ error: 'Not found' });
+  if (firmId && call.firmId !== firmId) return reply.code(404).send({ error: 'Not found' });
+
+  const leads = await loadLeads(call.firmId);
+  const lead = leads.find((l) => l.id === call.leadId);
+  if (!lead?.recording_url) return reply.code(404).send({ error: 'No recording' });
+
+  if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) return reply.code(503).send({ error: 'Twilio credentials not configured' });
+
+  const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64');
+  const audioRes = await fetch(`${lead.recording_url}.mp3`, {
+    headers: { Authorization: `Basic ${auth}` },
+  }).catch(() => null);
+
+  if (!audioRes?.ok) return reply.code(502).send({ error: 'Recording unavailable' });
+
+  reply.header('Content-Type', 'audio/mpeg');
+  reply.header('Cache-Control', 'private, max-age=3600');
+  return reply.send(Buffer.from(await audioRes.arrayBuffer()));
 });
 
 // POST /voicemail-recording — Twilio Record action callback; transcribes + saves voicemail lead
@@ -2124,6 +2421,9 @@ app.post('/api/billing/checkout', async (req, reply) => {
     success_url: successUrl,
     cancel_url: `${WEB_BASE_URL}/billing/cancel?firmId=${encodeURIComponent(firmId)}`,
     metadata: { firmId },
+    subscription_data: {
+      trial_period_days: 7,
+    },
   });
 
   return { url: session.url };
@@ -2187,6 +2487,7 @@ app.get('/api/admin/overview', async (req, reply) => {
       id: firm.id,
       name: firm.name,
       billing_status: firm.billing_status || 'unknown',
+      status: firm.status || 'active',
       callsThisMonth: monthCalls.length,
       completionRate,
       lastCallAt: lastCall,
@@ -2296,6 +2597,20 @@ app.post('/api/resend-instructions', async (req, reply) => {
   return { ok: true };
 });
 
+// PATCH /api/admin/firms/:id — suspend or reactivate a firm
+app.patch('/api/admin/firms/:id', async (req, reply) => {
+  if (requireAdminKey(req, reply) === false) return;
+  const firmId = req.params.id;
+  const action = req.body?.action; // 'suspend' | 'reactivate'
+  if (!firmId) return reply.code(400).send({ error: 'firmId required' });
+  if (action !== 'suspend' && action !== 'reactivate') return reply.code(400).send({ error: 'action must be suspend or reactivate' });
+
+  const firm = await loadFirmConfig(firmId);
+  const newStatus = action === 'suspend' ? 'suspended' : 'active';
+  await saveFirmConfig(firmId, { ...firm, status: newStatus });
+  return { ok: true, firmId, status: newStatus };
+});
+
 // POST /api/billing/webhook — Stripe webhook handler
 app.post('/api/billing/webhook', async (req, reply) => {
   if (!stripe) return reply.code(503).send({ error: 'Billing not configured' });
@@ -2315,21 +2630,52 @@ app.post('/api/billing/webhook', async (req, reply) => {
     const firmId = obj.metadata?.firmId;
     if (firmId) {
       const firm = await loadFirmConfig(firmId);
+      const trialEndsAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
       await saveFirmConfig(firmId, {
         ...firm,
         stripe_customer_id: obj.customer,
         stripe_subscription_id: obj.subscription,
-        billing_status: 'active',
+        billing_status: 'trialing',
+        status: 'trial',
+        trial_ends_at: trialEndsAt,
+        trial_warning_sent: false,
       });
+      // Send welcome email to the customer
+      const customerEmail = obj.customer_email || firm.notification_email;
+      if (customerEmail && RESEND_API_KEY) {
+        const trialEnd = new Date(trialEndsAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+        const dashboardUrl = `${WEB_BASE_URL}/dashboard?firmId=${encodeURIComponent(firmId)}`;
+        const twilioPhone = firm.twilio_phone || '(your Twilio number)';
+        fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            from: RESEND_FROM_EMAIL,
+            to: customerEmail,
+            subject: 'Welcome to Ava — your 7-day trial has started',
+            html: `
+              <p>Hi there,</p>
+              <p>Your Ava intake assistant is ready. Your 7-day free trial runs until <strong>${trialEnd}</strong>.</p>
+              <p><strong>Your Ava phone number:</strong> ${twilioPhone}</p>
+              <p>Point that number at Ava by setting your Twilio webhook to:<br>
+              <code>${PUBLIC_BASE_URL}/twiml?firmId=${encodeURIComponent(firmId)}</code></p>
+              <p><a href="${dashboardUrl}">View your dashboard →</a></p>
+              <p>Questions? Just reply to this email.</p>
+            `,
+          }),
+        }).catch((err) => app.log.warn({ err: String(err), firmId }, 'welcome email failed'));
+      }
     }
   } else if (event.type === 'customer.subscription.updated') {
     const firmId = obj.metadata?.firmId;
     if (firmId) {
       const firm = await loadFirmConfig(firmId);
+      const isActive = obj.status === 'active';
       await saveFirmConfig(firmId, {
         ...firm,
         stripe_subscription_id: obj.id,
-        billing_status: obj.status === 'active' ? 'active' : obj.status,
+        billing_status: isActive ? 'active' : obj.status,
+        status: isActive ? 'active' : (firm.status || 'trial'),
       });
     }
   } else if (event.type === 'customer.subscription.deleted') {

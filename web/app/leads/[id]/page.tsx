@@ -1,15 +1,23 @@
 import { notFound } from "next/navigation";
-import { Clock3, ScrollText, Star } from "lucide-react";
+import Link from "next/link";
+import { ArrowLeft, Clock3, Mic2, ScrollText, Star } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { CopySummaryButton } from "@/components/copy-button";
 import { MarkContactedButton } from "@/components/mark-contacted-button";
-import { getLeadById } from "@/lib/api";
+import { getLeadById, API_BASE } from "@/lib/api";
 
-export default async function LeadDetailPage({ params }: { params: Promise<{ id: string }> }) {
-  const { id } = await params;
+export default async function LeadDetailPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>;
+  searchParams: Promise<{ firmId?: string }>;
+}) {
+  const [{ id }, { firmId }] = await Promise.all([params, searchParams]);
+  const q = firmId ? `?firmId=${firmId}` : "";
   const lead = await getLeadById(id);
 
   if (!lead) {
@@ -20,6 +28,11 @@ export default async function LeadDetailPage({ params }: { params: Promise<{ id:
 
   return (
     <div className="space-y-6">
+      <Link href={`/leads${q}`} className="inline-flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700">
+        <ArrowLeft className="h-4 w-4" />
+        Back to Leads
+      </Link>
+
       {/* ── Header ── */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
@@ -30,6 +43,7 @@ export default async function LeadDetailPage({ params }: { params: Promise<{ id:
         </div>
         <div className="flex items-center gap-2">
           <Badge variant="outline">{lead.status}</Badge>
+          {lead.is_urgent && <Badge variant="destructive">Urgent</Badge>}
           {lead.caller_type && (
             <Badge variant={lead.caller_type === "returning" ? "outline" : "default"}>
               {lead.caller_type === "returning" ? "Returning Client" : "New Client"}
@@ -112,6 +126,31 @@ export default async function LeadDetailPage({ params }: { params: Promise<{ id:
                 ))}
               </div>
             )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ── Call Recording ── */}
+      {lead.recording_url && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Mic2 className="h-4 w-4 text-slate-600" />
+              Call Recording
+              {lead.recording_duration != null && (
+                <span className="ml-2 text-sm font-normal text-slate-400">
+                  {Math.floor(lead.recording_duration / 60)}m {lead.recording_duration % 60}s
+                </span>
+              )}
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+            <audio
+              controls
+              src={`${API_BASE}/api/calls/${lead.lastCallSid}/recording?firmId=${lead.firmId}`}
+              className="w-full"
+            />
           </CardContent>
         </Card>
       )}

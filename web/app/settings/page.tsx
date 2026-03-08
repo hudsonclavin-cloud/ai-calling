@@ -1,4 +1,5 @@
 import { SettingsForm } from "@/components/settings-form";
+import { BillingCard } from "@/components/billing-card";
 import { getSettings } from "@/lib/api";
 
 export default async function SettingsPage() {
@@ -15,6 +16,7 @@ export default async function SettingsPage() {
       ) : (
         <p className="text-sm text-slate-500">Settings unavailable — backend may be offline.</p>
       )}
+      <BillingCard firmId={settings?.id} />
     </div>
   );
 }
