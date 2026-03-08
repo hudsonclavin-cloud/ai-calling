@@ -43,7 +43,7 @@ export default async function LeadDetailPage({
         </div>
         <div className="flex items-center gap-2">
           <Badge variant="outline">{lead.status}</Badge>
-          {lead.is_urgent && <Badge variant="destructive">Urgent</Badge>}
+         {lead.is_urgent && <Badge variant="danger">Urgent</Badge>}
           {lead.caller_type && (
             <Badge variant={lead.caller_type === "returning" ? "outline" : "default"}>
               {lead.caller_type === "returning" ? "Returning Client" : "New Client"}
