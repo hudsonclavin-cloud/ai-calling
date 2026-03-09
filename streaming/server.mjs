@@ -704,10 +704,10 @@ RULES:
 - If the caller seems confused, lost, or unsure they have the right number — reassure them first ("You're in the right place, we can definitely help with that.") before asking anything.
 - If caller asks a question back (privacy, is this a robot, etc.), answer warmly and directly in one sentence, then return to intake.
 - If is_rambling=true, silently extract everything, move to first missing field.
-- caller_is_urgent=true means open with extra warmth and reassurance.
+- caller_is_urgent=true means open with extra warmth and reassurance. Never set next_question_id to "done" on the same turn the caller first expresses urgency — always ask at least one follow-up question.
 - caller_type: 'new', 'returning', or null.
 - When a caller mentions they are calling for someone else (a family member, spouse, etc.), always collect BOTH the caller's contact information AND the name of the person they are calling about. Store the affected person's name in the calling_for extracted field.
-- Active crisis / at hospital callers: collect name + phone ONLY — skip all other required fields and move to done.
+- Active crisis callers: lead with warmth, then ask for whatever required fields are still missing. If name and phone are already in current_collected, ask for a brief case summary next. Never skip intake entirely for urgent callers — they still need to be matched with the right attorney.
 - If the caller says "nevermind", "forget it", "I'll call back", "goodbye", or otherwise signals they want to end the call — respond warmly and let them go. Example: "Of course — no problem at all. If you ever need anything, we're here. Take care!" Set next_question_id to "done".
 - If the caller asks to speak to a real person, an attorney, or a lawyer right now — acknowledge warmly, explain that you're the intake receptionist and will make sure their information gets to the right person quickly, then continue intake. Do not promise an immediate callback time. Example: "Absolutely — I'll make sure this gets to an attorney right away. To connect you with the right one, I just need a couple of quick details."
 - If the caller expresses uncertainty about whether they've reached the right place ("I'm not sure if I'm calling the right number"), reassure them immediately before anything else. Don't ask for caller type or any intake field first. Example: "You're in the right place — we can definitely help with that. Let me get a couple of quick details to connect you with the right attorney."
@@ -1537,6 +1537,13 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   // ── Urgency detection ──────────────────────────────────────────────────────
   if (!session.isUrgent && callerText && detectUrgency(callerText)) {
     session.isUrgent = true;
+    // The urgency statement ("I was in a car accident and I'm scared") may have been
+    // auto-extracted as case_summary by extractStructuredDeterministic (≥40 chars, ≥4 words).
+    // That's NOT a real case summary — it's just the distress signal.
+    // Clear it so Ava explicitly asks for a case summary on a later turn instead of jumping to done.
+    if (!session.askedQuestionIds.includes('case_summary')) {
+      delete session.collected.case_summary;
+    }
   }
 
   // ── Caller type detection phase ────────────────────────────────────────────
@@ -1602,6 +1609,8 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
 
   let speakText = effectiveConfig.closing || DEFAULT_FIRM_CONFIG.closing;
   let nextField = null;
+  // Declare llmAck here so it's accessible in both the if(!done) and else branches.
+  const llmAck = String(llm?.acknowledgment || '').trim();
 
   if (!done) {
     session.turnCount += 1;
@@ -1624,7 +1633,6 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
       }
     }
 
-    const llmAck = String(llm?.acknowledgment || '').trim();
     // If the LLM didn't return a separate acknowledgment but baked one into next_question_text
     // (as the system prompt allows), treat it as having an ack to prevent composeSpeakText
     // from prepending a redundant deterministic ack.
@@ -1632,12 +1640,18 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
     speakText = composeSpeakText({ session, bodyText: questionBody, callSid, firmConfig: effectiveConfig, llmAck: effectiveLlmAck });
     app.log.info({ llmAck, effectiveLlmAck, usedLlmText: !!llmQuestionText, questionBody, speakText }, 'ava-speaks');
 
-    // Urgency: only apply hardcoded empathetic fallback if LLM didn't already provide an acknowledgment.
-    // If llmAck is present, the LLM already handled the emotional response in next_question_text.
+    // Urgency: only apply empathetic fallback if LLM didn't already provide an acknowledgment.
+    // Uses varied openers so it never sounds scripted.
     if (session.isUrgent && !session.urgencySpoken) {
       session.urgencySpoken = true;
       if (!llmAck) {
-        speakText = `That sounds really stressful — I want to make sure we get someone to help you quickly. ${nextDecision.nextQuestionText}`;
+        const urgencyOpeners = [
+          "Oh gosh — I'm so sorry to hear that. You're in the right place and I want to make sure we get the right person on this.",
+          "I'm really glad you called — that sounds serious and we're going to make sure you're taken care of.",
+          "Oh no — I hear you. Let me make sure we get the right attorney on this right away.",
+        ];
+        const opener = urgencyOpeners[Math.floor(Math.random() * urgencyOpeners.length)];
+        speakText = `${opener} ${nextDecision.nextQuestionText}`;
       }
     }
   } else {
@@ -1649,7 +1663,13 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
     if (session.isUrgent && !session.urgencySpoken) {
       session.urgencySpoken = true;
       if (!llmAck) {
-        speakText = `That sounds really stressful — I want to make sure we get someone to help you quickly. ${speakText}`;
+        const urgencyOpeners = [
+          "Oh gosh — I'm so sorry to hear that. You're in the right place and I want to make sure we get the right person on this.",
+          "I'm really glad you called — that sounds serious and we're going to make sure you're taken care of.",
+          "Oh no — I hear you. Let me make sure we get the right attorney on this right away.",
+        ];
+        const opener = urgencyOpeners[Math.floor(Math.random() * urgencyOpeners.length)];
+        speakText = `${opener} ${speakText}`;
       }
     }
     sessionAckIndex.delete(callSid);
