@@ -441,13 +441,18 @@ function extractStructuredDeterministic(userText) {
 function detectCallerType(text) {
   const lower = String(text || '').toLowerCase();
   if (/\b(new|first[\s-]?time|never called|first call|new client)\b/.test(lower)) return 'new';
-  if (/\b(existing|returning|current client|already (working|have a case)|i have a case)\b/.test(lower)) return 'returning';
+  if (/\b(existing|returning|current client|already (working|have a case)|i have a case|called (yesterday|before|last week|earlier|already)|i'?ve called (before|already)|previous(ly)?|already a client|you have my (info|information|number))\b/.test(lower)) return 'returning';
   return null;
 }
 
 function detectUrgency(text) {
   const lower = String(text || '').toLowerCase();
-  return /\b(arrested|in jail|emergency|evicted today|court tomorrow|restraining order|accident just happened|in the hospital|at the hospital|injured right now|going to jail|being evicted)\b/.test(lower);
+  return /\b(arrested|in jail|emergency|evicted today|court tomorrow|restraining order|accident just happened|just had an accident|was in an accident|in (a bad|a terrible|a serious) accident|in the hospital|at the hospital|injured right now|going to jail|being evicted|just got hurt|seriously hurt|car accident|hit by a car|i'?m scared|really scared)\b/.test(lower);
+}
+
+function detectEarlyExit(text) {
+  const lower = String(text || '').toLowerCase();
+  return /\b(never\s*mind|nevermind|forget it|don'?t worry|i('m| am) (good|fine|all set|okay)|i('ll| will) call back|i'?ll try again|goodbye|good\s*bye|i'?m done|no thanks|not interested|cancel|i changed my mind|scratch that|disregard)\b/.test(lower);
 }
 
 function isLikelyName(value, sourceText) {
@@ -703,6 +708,9 @@ RULES:
 - caller_type: 'new', 'returning', or null.
 - When a caller mentions they are calling for someone else (a family member, spouse, etc.), always collect BOTH the caller's contact information AND the name of the person they are calling about. Store the affected person's name in the calling_for extracted field.
 - Active crisis / at hospital callers: collect name + phone ONLY — skip all other required fields and move to done.
+- If the caller says "nevermind", "forget it", "I'll call back", "goodbye", or otherwise signals they want to end the call — respond warmly and let them go. Example: "Of course — no problem at all. If you ever need anything, we're here. Take care!" Set next_question_id to "done".
+- If the caller asks to speak to a real person, an attorney, or a lawyer right now — acknowledge warmly, explain that you're the intake receptionist and will make sure their information gets to the right person quickly, then continue intake. Do not promise an immediate callback time. Example: "Absolutely — I'll make sure this gets to an attorney right away. To connect you with the right one, I just need a couple of quick details."
+- If the caller expresses uncertainty about whether they've reached the right place ("I'm not sure if I'm calling the right number"), reassure them immediately before anything else. Don't ask for caller type or any intake field first. Example: "You're in the right place — we can definitely help with that. Let me get a couple of quick details to connect you with the right attorney."
 
 next_question_id MUST be one of these exact strings: full_name | callback_number | practice_area | case_summary | done
 Never invent other IDs. Use "done" only if all required fields are collected.
@@ -1444,6 +1452,18 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   const callerText = String(userText || '').trim();
   if (callerText) appendTranscript(session, 'caller', callerText);
 
+  // Early exit detection — caller wants to end the call before intake is complete
+  if (callerText && detectEarlyExit(callerText)) {
+    session.done = true;
+    const exitText = "Of course — no problem at all. If you ever need anything, don't hesitate to call back. Take care!";
+    appendTranscript(session, 'assistant', exitText);
+    sessions[callSid] = session;
+    const ttsKey = await synthesizeToDisk(exitText).catch(() => null);
+    saveSessions(sessions).catch(() => {});
+    persistSessionArtifacts(session, { assistantText: exitText, callerText, done: true }).catch(() => {});
+    return { firmConfig, session, payload: { speakText: exitText, ttsKey, done: true, nextField: null, timings: {} } };
+  }
+
   // Returning caller check — on first turn only (before caller type question is asked)
   if (!callerText && session.callerType === null) {
     const history = await lookupCallerHistory(normalizedPhone, firmConfig.id);
@@ -1605,23 +1625,32 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
     }
 
     const llmAck = String(llm?.acknowledgment || '').trim();
-    speakText = composeSpeakText({ session, bodyText: questionBody, callSid, firmConfig: effectiveConfig, llmAck });
-    app.log.info({ llmAck, usedLlmText: !!llmQuestionText, questionBody, speakText }, 'ava-speaks');
+    // If the LLM didn't return a separate acknowledgment but baked one into next_question_text
+    // (as the system prompt allows), treat it as having an ack to prevent composeSpeakText
+    // from prepending a redundant deterministic ack.
+    const effectiveLlmAck = llmAck || (llmQuestionText && /^(oh no|i'?m sorry|that('s| is)|got it|of course|sure|absolutely|i (hear|understand)|you'?re in)/i.test(llmQuestionText) ? '_baked_in_' : '');
+    speakText = composeSpeakText({ session, bodyText: questionBody, callSid, firmConfig: effectiveConfig, llmAck: effectiveLlmAck });
+    app.log.info({ llmAck, effectiveLlmAck, usedLlmText: !!llmQuestionText, questionBody, speakText }, 'ava-speaks');
 
-    // Urgency: replace normal ack with empathetic acknowledgment on first urgent turn
+    // Urgency: only apply hardcoded empathetic fallback if LLM didn't already provide an acknowledgment.
+    // If llmAck is present, the LLM already handled the emotional response in next_question_text.
     if (session.isUrgent && !session.urgencySpoken) {
       session.urgencySpoken = true;
-      speakText = `That sounds really stressful — I want to make sure we get someone to help you quickly. ${nextDecision.nextQuestionText}`;
+      if (!llmAck) {
+        speakText = `That sounds really stressful — I want to make sure we get someone to help you quickly. ${nextDecision.nextQuestionText}`;
+      }
     }
   } else {
     session.done = true;
     session.lastQuestionId = '';
     session.lastQuestionText = '';
     speakText = effectiveConfig.closing || DEFAULT_FIRM_CONFIG.closing;
-    // Urgency on the final turn: prefix the closing so the caller still hears acknowledgment
+    // Urgency on the final turn: only override if LLM didn't already handle emotional acknowledgment
     if (session.isUrgent && !session.urgencySpoken) {
       session.urgencySpoken = true;
-      speakText = `That sounds really stressful — I want to make sure we get someone to help you quickly. ${speakText}`;
+      if (!llmAck) {
+        speakText = `That sounds really stressful — I want to make sure we get someone to help you quickly. ${speakText}`;
+      }
     }
     sessionAckIndex.delete(callSid);
     fillerLastIdxMap.delete(callSid);
@@ -1696,12 +1725,13 @@ function applyRepromptText(session, firmConfig) {
   const maxReprompts = firmConfig?.max_reprompts || 2;
   if (session.repromptCount >= maxReprompts) {
     session.done = true;
-    return firmConfig?.closing || DEFAULT_FIRM_CONFIG.closing;
+    const closing = firmConfig?.closing || DEFAULT_FIRM_CONFIG.closing;
+    return `No worries — thanks for your patience. ${closing}`;
   }
   const base = session.lastQuestionText || getQuestionText('full_name', firmConfig || DEFAULT_FIRM_CONFIG);
-  return session.repromptCount % 2 === 0
-    ? `Sorry, I didn't catch that. ${base}`
-    : `Could you say that again? ${base}`;
+  return session.repromptCount === 1
+    ? `I'm still here — I just didn't quite catch that. ${base}`
+    : `Sorry about that — could you try one more time? ${base}`;
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────────
