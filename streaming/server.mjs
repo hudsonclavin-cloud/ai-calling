@@ -52,9 +52,9 @@ const ADMIN_API_KEY         = process.env.ADMIN_API_KEY         || '';
 const REQUIRED_FIELDS_DEFAULT = ['full_name', 'callback_number', 'practice_area', 'case_summary'];
 
 const TONE_PRESETS = {
-  formal: "Communication style: Professional and precise. Use formal language. Avoid contractions. Say 'Certainly' not 'Sure', 'I would be happy to' not 'I can'. Address callers by their last name if given. Keep responses measured and authoritative.",
-  warm:   "Communication style: Warm and empathetic. Use natural contractions. Use the caller's first name once you have it. Show genuine care. Responses feel human and unhurried, never robotic.",
-  casual: "Communication style: Friendly and approachable. Short sentences. Conversational tone. Avoid stiff or formal language. Sound like a helpful person, not a corporate recording.",
+  warm:         "Your tone is warm, empathetic, and unhurried. Use contractions naturally. Show genuine care. Never robotic.",
+  professional: "Your tone is polished and precise. Minimal small talk. Use 'Certainly' not 'Sure'. Address callers by last name if given. Efficient and respectful.",
+  friendly:     "Your tone is upbeat and conversational. Short, punchy sentences. Sound like a helpful person — not a corporate recording.",
 };
 
 const INDUSTRY_MODULES = {
@@ -106,10 +106,10 @@ let holdKey = null; // set at boot before prewarm
 // Thinking filler phrases — played immediately when caller finishes speaking, before OpenAI responds
 const FILLER_PHRASES = [
   'One moment.',
-  'Sure, let me note that.',
-  'Got it.',
-  'Of course.',
-  'Let me check on that.',
+  'Just a moment.',
+  'One second.',
+  'Right with you.',
+  'Let me pull that up.',
 ];
 let fillerKeys = []; // populated at boot via synthesizeToDisk
 
@@ -136,7 +136,7 @@ const DEFAULT_FIRM_CONFIG = {
     case_summary: "Briefly — what happened and what kind of help are you looking for?",
     final_clarify: "One last thing — anything else the attorney should know?",
   },
-  acknowledgments: ['Got it.', 'Sure.', 'Of course.', 'Okay.', 'Perfect.', 'Thanks for that.', 'Understood.'],
+  acknowledgments: ['Of course.', 'Sure thing.', 'Absolutely.', 'Thanks.', 'Got it.'],
   max_questions: 8,
   max_reprompts: 2,
   office_hours: 'Mon-Fri 8:00 AM - 6:00 PM',
@@ -146,6 +146,11 @@ const DEFAULT_FIRM_CONFIG = {
   intake_rules: 'Collect caller contact details and a short case summary. Escalate emergency threats to 911 guidance.',
   notification_email: '',
   notification_phone: '',
+  greeting_style: 'casual',
+  custom_intro: null,
+  reprompt_phrases: null,
+  early_exit_phrases: null,
+  urgency_phrases: null,
 };
 
 const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
@@ -215,6 +220,117 @@ function peekNextAck(callSid, firmConfig) {
   const acks = firmConfig.acknowledgments?.length ? firmConfig.acknowledgments : DEFAULT_FIRM_CONFIG.acknowledgments;
   const last = sessionAckIndex.get(callSid) ?? -1;
   return acks[(last + 1) % acks.length];
+}
+
+// ── Customizable phrase helpers ───────────────────────────────────────────────
+
+function getEarlyExitPhrase(firmConfig) {
+  const phrases = [
+    firmConfig.early_exit_phrases?.[0] || "Of course — no problem at all. Whenever you're ready, we're here. Take care!",
+    firmConfig.early_exit_phrases?.[1] || "Absolutely — no worries at all. Feel free to call back anytime. Take care!",
+    firmConfig.early_exit_phrases?.[2] || "Of course — I completely understand. We're here whenever you need us. Have a great day!",
+    firmConfig.early_exit_phrases?.[3] || "Sure thing — no problem at all. Just give us a call whenever you're ready. Take care!",
+  ];
+  return phrases[Math.floor(Math.random() * phrases.length)];
+}
+
+function getRepromptPhrases(firmConfig) {
+  if (firmConfig.reprompt_phrases) return firmConfig.reprompt_phrases;
+  return [
+    null,
+    "I'm still here — I just didn't quite catch that. {QUESTION}",
+    "Sorry about that — could you try one more time? {QUESTION}",
+  ];
+}
+
+function getRepromptClosePhrase(firmConfig, closing) {
+  const phrases = [
+    firmConfig.reprompt_phrases?.[3] || `No worries at all — I've noted your call. ${closing}`,
+    firmConfig.reprompt_phrases?.[4] || `That's completely okay — I'll make sure someone reaches out. ${closing}`,
+  ];
+  return phrases[Math.floor(Math.random() * phrases.length)];
+}
+
+function getUrgencyOpener(firmConfig, session) {
+  const openers = firmConfig.urgency_phrases || [
+    "Oh no — I'm really glad you called. You're in the right place and I want to make sure we get the right person on this.",
+    "I hear you — that sounds serious, and we're going to make sure you're taken care of.",
+    "I'm so glad you reached out. Let me make sure we get the right attorney on this right away.",
+    "Oh gosh — thank you for calling. You're in exactly the right place and help is coming.",
+    "That sounds really difficult, and I'm glad you called. Let me make sure we get you to the right person.",
+  ];
+  const lastIdx = session.lastUrgencyOpenerIdx ?? -1;
+  let idx;
+  do {
+    idx = Math.floor(Math.random() * openers.length);
+  } while (openers.length > 1 && idx === lastIdx);
+  session.lastUrgencyOpenerIdx = idx;
+  return openers[idx];
+}
+
+function getReturningGreeting(firstName, firmConfig) {
+  const style = firmConfig.greeting_style || 'casual';
+  if (style === 'formal') {
+    const phrases = [
+      `Hello ${firstName}, welcome back. How may I assist you today?`,
+      `Good to have you back, ${firstName}. How can I help you?`,
+    ];
+    return phrases[Math.floor(Math.random() * phrases.length)];
+  }
+  const phrases = [
+    `Welcome back, ${firstName}! What can I help you with today?`,
+    `Hey ${firstName} — good to hear from you again. What brings you in today?`,
+    `${firstName}, welcome back! How can I help?`,
+  ];
+  return phrases[Math.floor(Math.random() * phrases.length)];
+}
+
+const PHONE_RETRY_PHRASES = [
+  "I want to make sure I have your number right — could you say it one more time, a little slowly?",
+  "Just want to double-check your number — could you repeat it for me?",
+  "I didn't quite catch all the digits — could you say your number once more?",
+];
+
+const RATE_LIMIT_MESSAGES = [
+  "I'm so sorry — we're getting a lot of calls right now. Please try again in just a moment, and we'll be right with you.",
+  "I apologize — our lines are unusually busy right now. Please try again shortly and someone will be with you soon.",
+];
+
+const SUSPENDED_MESSAGE = "I'm sorry — this number isn't currently active. Please contact the business directly for assistance.";
+
+const TRIAL_EXPIRED_MESSAGE = "I'm sorry — this service isn't currently available. Please contact the business directly for assistance.";
+
+const ERROR_MESSAGES = [
+  "I'm so sorry — something went wrong on my end. Please give us a call back in just a moment.",
+  "I apologize — I ran into a technical issue. Please try calling again and I'll be right with you.",
+];
+
+function getErrorMessage() {
+  return ERROR_MESSAGES[Math.floor(Math.random() * ERROR_MESSAGES.length)];
+}
+
+// ── LLM Response Validators ───────────────────────────────────────────────────
+
+function similarity(a, b) {
+  const wordsA = new Set(a.toLowerCase().split(/\s+/));
+  const wordsB = new Set(b.toLowerCase().split(/\s+/));
+  const intersection = [...wordsA].filter(w => wordsB.has(w)).length;
+  return intersection / Math.max(wordsA.size, wordsB.size, 1);
+}
+
+function validateLlmResponse(llm, session, app) {
+  if (!llm) return null;
+  const text = String(llm.next_question_text || '').trim();
+  const ROBOTIC_PHRASES = /^(noted\.|i understand\.|i see\.|certainly\.|of course\.|sure\.|okay\.|got it\.|understood\.|thank you\.)$/i;
+  const isEmpty = text.length < 15;
+  const isRobotic = ROBOTIC_PHRASES.test(text);
+  const lastSpoken = (session.transcript || []).filter(t => t.role === 'assistant').slice(-1)[0]?.text || '';
+  const isRepeat = lastSpoken && similarity(text, lastSpoken) > 0.75;
+  if (isEmpty || isRobotic || isRepeat) {
+    app.log.warn({ callSid: session.callSid, text, isEmpty, isRobotic, isRepeat }, '[LLM-VALIDATE] response failed quality check — falling to deterministic');
+    return { ...llm, next_question_text: '' };
+  }
+  return llm;
 }
 
 // ── Utilities ────────────────────────────────────────────────────────────────
@@ -441,13 +557,13 @@ function extractStructuredDeterministic(userText) {
 function detectCallerType(text) {
   const lower = String(text || '').toLowerCase();
   if (/\b(new|first[\s-]?time|never called|first call|new client)\b/.test(lower)) return 'new';
-  if (/\b(existing|returning|current client|already (working|have a case)|i have a case|called (yesterday|before|last week|earlier|already)|i'?ve called (before|already)|previous(ly)?|already a client|you have my (info|information|number))\b/.test(lower)) return 'returning';
+  if (/\b(existing|returning|current client|already (a client|working with you|have a case here)|i('ve| have) called (you|here|before|already)|previous(ly)?|already a client|you (already )?have my (info|information|number|file))\b/.test(lower)) return 'returning';
   return null;
 }
 
 function detectUrgency(text) {
   const lower = String(text || '').toLowerCase();
-  return /\b(arrested|in jail|emergency|evicted today|court tomorrow|restraining order|accident just happened|just had an accident|was in an accident|in (a bad|a terrible|a serious) accident|in the hospital|at the hospital|injured right now|going to jail|being evicted|just got hurt|seriously hurt|car accident|hit by a car|i'?m scared|really scared)\b/.test(lower);
+  return /\b(arrested|in jail|emergency|evicted today|court tomorrow|restraining order|accident just happened|just had an accident|just was in an accident|in (a bad|a terrible|a serious) accident|injured right now|going to jail|being evicted|just got hurt|seriously hurt|car accident|hit by a car|i'?m scared|really scared|at the hospital right now|in the hospital right now)\b/.test(lower);
 }
 
 function detectEarlyExit(text) {
@@ -546,7 +662,7 @@ function buildDeterministicQuestion(session, firmConfig) {
       done: false,
       nextField: 'callback_number',
       nextQuestionId: '__phone_retry__',
-      nextQuestionText: "I want to make sure I have your number right — could you repeat it slowly?",
+      nextQuestionText: PHONE_RETRY_PHRASES[Math.floor(Math.random() * PHONE_RETRY_PHRASES.length)],
     };
   }
 
@@ -609,11 +725,10 @@ function callOpenAiForNextStep({ firmConfig, session, userText }) {
       },
       next_question_id: { type: 'string' },
       next_question_text: { type: 'string' },
-      acknowledgment: { type: 'string' },
       done_reason: { anyOf: [{ type: 'string' }, { type: 'null' }] },
       clarifying_note: { anyOf: [{ type: 'string' }, { type: 'null' }] },
     },
-    required: ['extracted', 'next_question_id', 'next_question_text', 'acknowledgment', 'done_reason', 'clarifying_note'],
+    required: ['extracted', 'next_question_id', 'next_question_text', 'done_reason', 'clarifying_note'],
   };
 
   const wordCount = userText.split(/\s+/).filter(Boolean).length;
@@ -624,7 +739,14 @@ function callOpenAiForNextStep({ firmConfig, session, userText }) {
     collectedForPrompt.case_summary = collectedForPrompt.case_summary.slice(0, 200);
   }
 
+  // Last 4 turns of conversation so LLM maintains emotional continuity across turns
+  const recentTranscript = session.transcript
+    .slice(-8)
+    .map((t) => `${t.role === 'caller' ? 'Caller' : 'Ava'}: ${t.text}`)
+    .join('\n');
+
   const prompt = {
+    conversation_so_far: recentTranscript || null,
     previous_exchange: {
       ava_asked: session.lastQuestionText || null,
       caller_said: userText,
@@ -643,77 +765,110 @@ function callOpenAiForNextStep({ firmConfig, session, userText }) {
   const toneInstruction = TONE_PRESETS[firmConfig.tone] || TONE_PRESETS['warm'];
 
   const { isOpen, nextOpen } = isWithinBusinessHours(firmConfig);
+  const hoursStr = firmConfig.office_hours ? ` (${firmConfig.office_hours})` : '';
   const hoursContext = isOpen
-    ? 'The office is currently open. You may tell the caller someone will be in touch shortly.'
-    : `The office is currently closed. Let the caller know their info is captured and someone will follow up when the office reopens${nextOpen ? ` (${nextOpen})` : ''}.`;
+    ? `The office is currently open${hoursStr}. You may tell the caller someone will be in touch shortly.`
+    : `The office is currently closed${hoursStr}. Let the caller know their info is captured and someone will follow up when the office reopens${nextOpen ? ` (${nextOpen})` : ''}.`;
 
   const industryContext = INDUSTRY_MODULES[firmConfig.industry] || INDUSTRY_MODULES['law_pi'];
 
-  const systemPrompt = `You are ${firmConfig.ava_name || 'Ava'}, a warm AI receptionist for ${firmConfig.name} having a real phone conversation. ${toneInstruction} The caller just spoke to you. First acknowledge what they said like a human would, then ask the next question. Never sound like you're filling out a form.
+  const ava_name = firmConfig.ava_name || 'Ava';
+  const firm_name = firmConfig.name;
+  const requiredFieldsList = requiredFields.join(' | ');
 
-ACKNOWLEDGMENT IS REQUIRED. Never leave it empty. No exceptions.
+  const systemPrompt = `You are ${ava_name}, a receptionist for ${firm_name} having a real phone conversation.
+${toneInstruction}
 
-For routine responses (name given, question answered simply): one short sentence is fine.
-- "John Smith" → acknowledgment: "Got it, John."
-- "my landlord won't fix anything" → acknowledgment: "That sounds really frustrating."
-- Something unclear → acknowledgment: "Thanks for sharing that."
+You are warm, calm, and unhurried — like the best receptionist anyone has ever spoken to.
+You never sound like you're filling out a form. You mirror the caller's emotional register:
+if they're scared, be gentle and slow down; if they're businesslike, be efficient.
+You use the caller's first name naturally once you have it — not on every turn.
+You never repeat yourself across turns.
 
-EMOTIONAL DISTRESS HANDLING — when a caller volunteers serious distress (accident, injury, death, arrest, crisis, fear, anger):
-1. Acknowledge the SPECIFIC thing they said using their own words — never a generic "I'm so sorry to hear that." Use: "You mentioned you were in an accident..." or "Losing your mom like that..."
-2. Ask ONE grounding question showing you actually heard them (NOT an intake field question):
-   - Accident/injury → "Has everyone been seen by a doctor, or is anyone still hurt?"
-   - Death/loss → "Is this something that just happened?"
-   - Arrest → "Are you somewhere safe you can talk?"
-   - Anger/frustration → "What's been happening?"
-3. THEN in a new sentence, transition to intake: "When you're ready, I'd like to get a few details so we can connect you with the right attorney."
-4. Never combine an emotional acknowledgment with an intake question in the same breath. Let the acknowledgment land first. The intake question comes after, as its own sentence.
-5. next_question_text must be 2–3 sentences for distress situations. Never one sentence.
+════════════════════════════════════════
+HOW TO RESPOND
+════════════════════════════════════════
 
-EXAMPLES (next_question_text for distress situations):
+Put your ENTIRE spoken response in next_question_text. This is the only field that
+gets spoken aloud. It should read exactly like something a warm human receptionist
+would say on the phone — complete, natural, no sentence fragments.
+
+Standard turn (routine answer): One warm sentence acknowledging what they said, then
+ask the next question. Total: 1–2 sentences.
+
+Distress turn (accident, injury, death, arrest, fear, anger, crisis): ALWAYS 2–3
+sentences. First: acknowledge the SPECIFIC thing they said in their own words, not a
+generic "I'm so sorry." Second: one grounding question showing you truly heard them
+(not an intake field). Third: brief transition to the next intake question.
+
+NEVER combine emotional acknowledgment and an intake question in the same sentence.
+Let the acknowledgment land on its own first.
+
+════════════════════════════════════════
+DISTRESS EXAMPLES (follow this pattern exactly)
+════════════════════════════════════════
 
 Caller: "I was in a terrible car accident and I'm scared."
-→ next_question_text: "Oh no — a car accident sounds terrifying, and I'm really glad you called. Has everyone been seen by a doctor, or is anyone still hurt? Once I know you're okay, I'd like to get your name so we can get the right attorney on this."
+→ "Oh no — a car accident sounds terrifying, and I'm really glad you called. Has everyone been seen by a doctor, or is anyone still hurt? Once I know you're okay, let me get your name so we can get the right attorney on this."
 
 Caller: "My mom passed away and I think the hospital made a mistake."
-→ next_question_text: "I'm so sorry — losing your mom is devastating, and doing this on top of that grief takes real courage. Is this something that just happened, or have you been dealing with this for a while? When you're ready, I'd like to get a few details so we can connect you with the right attorney."
+→ "I'm so sorry — losing your mom is devastating, and doing this on top of that grief takes real courage. Is this something that just happened, or has it been a while? Whenever you're ready, I'd love to get a few details to connect you with the right person."
 
 Caller: "I just got arrested and I don't know what to do."
-→ next_question_text: "Okay — you've called the right place and help is on the way. Are you somewhere safe you can talk right now? Once I know you're okay, let me get a couple of details so we can get someone on this fast."
+→ "You called exactly the right place, and we're going to help. Are you somewhere safe you can talk right now? Once I know you're okay, let me get a couple of quick details so we can get someone on this fast."
 
-Caller: "I've been trying to get help for weeks and nobody is doing anything, I'm so frustrated."
-→ next_question_text: "I completely hear you — you've been patient and you deserve to be taken seriously. Can you tell me a little about what's been happening? I want to make sure I get this to the right person."
-
-Caller: "I don't really understand how this works, I've never called a lawyer before."
-→ next_question_text: "You're in exactly the right place — that's what we're here for, and there are no silly questions. Lots of people haven't gone through this before. To get you to the right attorney, can I start by getting your name?"
-
-Caller: "I'm calling for my husband — he was in a bad accident."
-→ next_question_text: "Oh no, I'm sorry to hear about your husband — it's good that you called. Is he able to speak with us, or are you handling this on his behalf right now? Either way, let me get your name and contact info so we can get someone on this."
-
-Caller: "My last attorney did nothing for two years and I'm furious."
-→ next_question_text: "That's completely understandable — two years is a long time to feel like nothing's moving, and your frustration is valid. I want to make sure you're heard this time. Can you tell me a little about what you're dealing with so I can get you to the right person?"
-
-Caller: "I need to talk to someone about a case but I can't afford a lawyer."
-→ next_question_text: "I hear you — cost is a real concern, and it's worth knowing that many attorneys here work on contingency, which means you don't pay unless they win your case. Let me get a few quick details so we can match you with the right fit. What's your name?"
+Caller: "I've been trying to get help for weeks and nobody's doing anything — I'm so frustrated."
+→ "I completely hear you — you've been patient and you deserve to be taken seriously. Can you tell me a bit about what's been going on? I want to make sure I get this to the right person."
 
 Caller: "I'm at the hospital right now, my son was just in an accident."
-→ next_question_text: "Oh my — please focus on your son right now. I just need your name and the best number to reach you, and we'll have someone call you back as soon as possible. What's your name?"
+→ "Oh my — please focus on your son. I just need your name and the best number to reach you, and we'll have an attorney call you back as soon as possible. What's your name?"
 
-RULES:
-- Never ask for info already in current_collected. Never repeat asked_question_ids.
+════════════════════════════════════════
+RULES
+════════════════════════════════════════
+
+FIELDS
+- Never ask for information already in current_collected.
+- Never repeat a question already in asked_question_ids.
+- caller_is_urgent=true: always open with warmth first; never set next_question_id to
+  "done" on the same turn urgency is first expressed — always ask at least one question.
+- If the caller gives multiple pieces of information at once, extract all of them. Only
+  ask for what is still missing.
+- Use conversation_so_far to stay coherent across turns. Do not ask for something the
+  caller already mentioned, even turns ago.
+
+SPECIAL SITUATIONS
+- Lawyer/attorney request: "Absolutely — I'll make sure this gets to an attorney right
+  away. I just need a couple of quick details to connect you with the right one." Then
+  continue intake normally.
+- Confusion / wrong number doubt: "You're in exactly the right place — we can definitely
+  help with that." THEN continue intake. Never ask intake questions before reassuring.
+- Early exit ("nevermind", "I'll call back", "forget it", "goodbye"): Warm one-sentence
+  goodbye. Set next_question_id to "done". No pushback, no questions.
+- Silence / reprompt: Gently acknowledge you're still there. Repeat the last question
+  naturally, not verbatim.
+- Off-topic question (weather, personal, unrelated): One warm redirect sentence. Then ask
+  the next intake question. Example: "Ha, I wish I knew! I'm just here to get you
+  connected with the right attorney."
+- Out-of-scope firm question (hours, address, fees): Answer briefly if you have the info,
+  redirect to intake in the same breath.
+- Returning caller: Greet by first name only. Skip any field already collected. Pick up
+  exactly where they left off.
+- Third-party caller (calling for someone else): Collect the caller's own contact info AND
+  the affected person's name. Store affected person in calling_for.
+
+NEVER
 - Never give legal advice.
-- If the caller seems confused, lost, or unsure they have the right number — reassure them first ("You're in the right place, we can definitely help with that.") before asking anything.
-- If caller asks a question back (privacy, is this a robot, etc.), answer warmly and directly in one sentence, then return to intake.
-- If is_rambling=true, silently extract everything, move to first missing field.
-- caller_is_urgent=true means open with extra warmth and reassurance. Never set next_question_id to "done" on the same turn the caller first expresses urgency — always ask at least one follow-up question.
-- caller_type: 'new', 'returning', or null.
-- When a caller mentions they are calling for someone else (a family member, spouse, etc.), always collect BOTH the caller's contact information AND the name of the person they are calling about. Store the affected person's name in the calling_for extracted field.
-- Active crisis callers: lead with warmth, then ask for whatever required fields are still missing. If name and phone are already in current_collected, ask for a brief case summary next. Never skip intake entirely for urgent callers — they still need to be matched with the right attorney.
-- If the caller says "nevermind", "forget it", "I'll call back", "goodbye", or otherwise signals they want to end the call — respond warmly and let them go. Example: "Of course — no problem at all. If you ever need anything, we're here. Take care!" Set next_question_id to "done".
-- If the caller asks to speak to a real person, an attorney, or a lawyer right now — acknowledge warmly, explain that you're the intake receptionist and will make sure their information gets to the right person quickly, then continue intake. Do not promise an immediate callback time. Example: "Absolutely — I'll make sure this gets to an attorney right away. To connect you with the right one, I just need a couple of quick details."
-- If the caller expresses uncertainty about whether they've reached the right place ("I'm not sure if I'm calling the right number"), reassure them immediately before anything else. Don't ask for caller type or any intake field first. Example: "You're in the right place — we can definitely help with that. Let me get a couple of quick details to connect you with the right attorney."
+- Never use standalone filler responses ("Noted.", "I understand.", "I see.", "Certainly.",
+  "Got it." as the full response — these are only okay as the OPENING of a longer sentence).
+- Never sound like you're reading from a script or filling out a form.
+- Never ask the same question twice in one call.
+- Never combine warmth and intake in a way that feels rushed or robotic.
 
 next_question_id MUST be one of these exact strings: full_name | callback_number | practice_area | case_summary | done
 Never invent other IDs. Use "done" only if all required fields are collected.
+
+REQUIRED FIELDS: ${requiredFieldsList}
 
 OFFICE HOURS: ${hoursContext}
 
@@ -722,9 +877,16 @@ ${industryContext}
 Return only strict JSON per schema.`;
 
   app.log.info({
+    tag: '[LLM-IN]',
+    callSid: session.callSid,
+    model: OPENAI_MODEL,
     systemPromptChars: systemPrompt.length,
-    payloadChars: JSON.stringify(prompt).length,
-  }, 'openai-prompt');
+    requiredFields,
+    askedIds: session.askedQuestionIds,
+    collectedKeys: Object.keys(session.collected).filter(k => session.collected[k]),
+    isUrgent: session.isUrgent,
+    callerType: session.callerType,
+  }, '[LLM-IN]');
 
   let earlyResolve;
   const earlyTextPromise = new Promise((res) => { earlyResolve = res; });
@@ -804,10 +966,13 @@ Return only strict JSON per schema.`;
     if (!fullOutputText) return null;
     const parsed = JSON.parse(fullOutputText);
     app.log.info({
-      acknowledgment: parsed.acknowledgment,
+      tag: '[LLM-OUT]',
+      callSid: session.callSid,
       next_question_id: parsed.next_question_id,
-      next_question_text: parsed.next_question_text,
-    }, 'openai-response');
+      next_question_text: parsed.next_question_text?.slice(0, 120),
+      extracted_keys: Object.keys(parsed.extracted || {}).filter(k => parsed.extracted[k]),
+      done_reason: parsed.done_reason,
+    }, '[LLM-OUT]');
     return parsed;
   })();
 
@@ -862,7 +1027,8 @@ function composeSpeakText({ session, bodyText, callSid, firmConfig, llmAck = '' 
   if (!session.disclaimerShown) {
     session.disclaimerShown = true;
     if (session.callerType === 'returning' && session.knownName) {
-      return `Welcome back, ${session.knownName}. How can I help you today?`;
+      const firstName = session.knownName.split(/\s+/)[0];
+      return getReturningGreeting(firstName, firmConfig);
     }
     const opening = firmConfig.opening || `Hi, this is ${firmConfig.ava_name || 'Ava'}, the attorney's assistant.`;
     // On first turn, append the caller type question so the caller knows what to say
@@ -1455,12 +1621,12 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   // Early exit detection — caller wants to end the call before intake is complete
   if (callerText && detectEarlyExit(callerText)) {
     session.done = true;
-    const exitText = "Of course — no problem at all. If you ever need anything, don't hesitate to call back. Take care!";
+    const exitText = getEarlyExitPhrase(firmConfig);
     appendTranscript(session, 'assistant', exitText);
     sessions[callSid] = session;
     const ttsKey = await synthesizeToDisk(exitText).catch(() => null);
-    saveSessions(sessions).catch(() => {});
-    persistSessionArtifacts(session, { assistantText: exitText, callerText, done: true }).catch(() => {});
+    saveSessions(sessions).catch((err) => app.log.warn({ err: String(err), callSid }, 'early-exit saveSessions failed'));
+    persistSessionArtifacts(session, { assistantText: exitText, callerText, done: true }).catch((err) => app.log.warn({ err: String(err), callSid }, 'early-exit persistArtifacts failed'));
     return { firmConfig, session, payload: { speakText: exitText, ttsKey, done: true, nextField: null, timings: {} } };
   }
 
@@ -1477,6 +1643,10 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
         session.knownName = history.capturedFields.full_name;
       }
       app.log.info({ callSid, knownName: session.knownName, lastCallDate: history.lastCallDate }, 'returning-caller-detected');
+    } else {
+      // Unknown phone — default to 'new' to skip the "Are you a new or existing client?" gate.
+      // detectCallerType() can still override to 'returning' mid-call if the caller self-identifies.
+      session.callerType = 'new';
     }
   }
 
@@ -1508,7 +1678,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   let ttsPrefetch = null;
   if (!speculativeDecision.done && speculativeDecision.nextQuestionText) {
     speculativeText = session.disclaimerShown
-      ? `${peekNextAck(callSid, firmConfig)} ${speculativeDecision.nextQuestionText}`
+      ? speculativeDecision.nextQuestionText
       : (firmConfig.opening || `Hi, this is ${firmConfig.ava_name || 'Ava'}, the attorney's assistant.`);
     ttsPrefetch = synthesizeToDisk(speculativeText).catch(() => null);
   }
@@ -1520,7 +1690,8 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
     }
   });
 
-  const llm = llmPromise ? await llmPromise : null;
+  const llmRaw = llmPromise ? await llmPromise : null;
+  const llm = validateLlmResponse(llmRaw, session, app);
   const tAfterOpenAi = Date.now();
   if (llmPromise) app.log.info({ callSid, elapsedMs: tAfterOpenAi - tOpenAiStart }, 'openai-returned');
   // Merge: LLM values win, but only if non-empty — never let an LLM empty string
@@ -1601,7 +1772,12 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
     const nextText = String(llm.next_question_text || '').trim();
     const missing = requiredFields.filter((field) => !String(session.collected[field] || '').trim());
     if (nextId && nextText && !session.askedQuestionIds.includes(nextId) && missing.includes(nextId) && missing.length) {
-      nextDecision = { done: false, nextField: missing[0], nextQuestionId: nextId, nextQuestionText: nextText };
+      // 5.2 — field-repeat guard: skip if already collected
+      if (session.collected[nextId] && String(session.collected[nextId]).trim()) {
+        // already collected — let deterministic fallback pick the next missing field
+      } else {
+        nextDecision = { done: false, nextField: missing[0], nextQuestionId: nextId, nextQuestionText: nextText };
+      }
     }
   }
 
@@ -1609,8 +1785,8 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
 
   let speakText = effectiveConfig.closing || DEFAULT_FIRM_CONFIG.closing;
   let nextField = null;
-  // Declare llmAck here so it's accessible in both the if(!done) and else branches.
-  const llmAck = String(llm?.acknowledgment || '').trim();
+  // llmAck is no longer a separate field — acknowledgment is baked into next_question_text
+  const llmAck = '';
 
   if (!done) {
     session.turnCount += 1;
@@ -1636,21 +1812,20 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
     // If the LLM didn't return a separate acknowledgment but baked one into next_question_text
     // (as the system prompt allows), treat it as having an ack to prevent composeSpeakText
     // from prepending a redundant deterministic ack.
-    const effectiveLlmAck = llmAck || (llmQuestionText && /^(oh no|i'?m sorry|that('s| is)|got it|of course|sure|absolutely|i (hear|understand)|you'?re in)/i.test(llmQuestionText) ? '_baked_in_' : '');
+    const effectiveLlmAck = llmAck
+      || (llmQuestionText && (
+        /^(oh no|oh my|i'?m sorry|that('s| is)|got it|of course|sure|absolutely|i (hear|understand|completely)|you'?re in|what a|wow|aw|i see|that must|i can only|i'?m so|it sounds|how (difficult|hard|scary|awful|tough)|yikes)/i.test(llmQuestionText)
+        || llmQuestionText.length > 80
+      ) ? '_baked_in_' : '');
     speakText = composeSpeakText({ session, bodyText: questionBody, callSid, firmConfig: effectiveConfig, llmAck: effectiveLlmAck });
     app.log.info({ llmAck, effectiveLlmAck, usedLlmText: !!llmQuestionText, questionBody, speakText }, 'ava-speaks');
 
     // Urgency: only apply empathetic fallback if LLM didn't already provide an acknowledgment.
-    // Uses varied openers so it never sounds scripted.
+    // Uses effectiveLlmAck (not llmAck) so baked-in acks in next_question_text are respected.
     if (session.isUrgent && !session.urgencySpoken) {
       session.urgencySpoken = true;
-      if (!llmAck) {
-        const urgencyOpeners = [
-          "Oh gosh — I'm so sorry to hear that. You're in the right place and I want to make sure we get the right person on this.",
-          "I'm really glad you called — that sounds serious and we're going to make sure you're taken care of.",
-          "Oh no — I hear you. Let me make sure we get the right attorney on this right away.",
-        ];
-        const opener = urgencyOpeners[Math.floor(Math.random() * urgencyOpeners.length)];
+      if (!effectiveLlmAck) {
+        const opener = getUrgencyOpener(firmConfig, session);
         speakText = `${opener} ${nextDecision.nextQuestionText}`;
       }
     }
@@ -1663,12 +1838,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
     if (session.isUrgent && !session.urgencySpoken) {
       session.urgencySpoken = true;
       if (!llmAck) {
-        const urgencyOpeners = [
-          "Oh gosh — I'm so sorry to hear that. You're in the right place and I want to make sure we get the right person on this.",
-          "I'm really glad you called — that sounds serious and we're going to make sure you're taken care of.",
-          "Oh no — I hear you. Let me make sure we get the right attorney on this right away.",
-        ];
-        const opener = urgencyOpeners[Math.floor(Math.random() * urgencyOpeners.length)];
+        const opener = getUrgencyOpener(firmConfig, session);
         speakText = `${opener} ${speakText}`;
       }
     }
@@ -1684,6 +1854,12 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
       { callSid, speculativeText, speakText },
       'tts-prefetch miss — speculative phrase differed from final (prefetch cached for future use)',
     );
+  }
+
+  // C2 — guard against empty speakText
+  if (!speakText || !speakText.trim()) {
+    app.log.error({ callSid, done, nextDecision }, 'speakText was empty — using closing as fallback');
+    speakText = effectiveConfig.closing || DEFAULT_FIRM_CONFIG.closing;
   }
 
   appendTranscript(session, 'assistant', speakText);
@@ -1746,12 +1922,12 @@ function applyRepromptText(session, firmConfig) {
   if (session.repromptCount >= maxReprompts) {
     session.done = true;
     const closing = firmConfig?.closing || DEFAULT_FIRM_CONFIG.closing;
-    return `No worries — thanks for your patience. ${closing}`;
+    return getRepromptClosePhrase(firmConfig || DEFAULT_FIRM_CONFIG, closing);
   }
   const base = session.lastQuestionText || getQuestionText('full_name', firmConfig || DEFAULT_FIRM_CONFIG);
-  return session.repromptCount === 1
-    ? `I'm still here — I just didn't quite catch that. ${base}`
-    : `Sorry about that — could you try one more time? ${base}`;
+  const phrases = getRepromptPhrases(firmConfig || DEFAULT_FIRM_CONFIG);
+  const template = phrases[session.repromptCount] || phrases[phrases.length - 1] || `I'm still here. ${base}`;
+  return template.replace('{QUESTION}', base);
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────────
@@ -2058,12 +2234,12 @@ app.post('/twiml', async (req, reply) => {
   if (!checkRateLimit(`ip:${clientIp}`, 10, 60_000)) {
     reply.header('Content-Type', 'text/xml');
     app.log.warn({ clientIp, firmId }, 'rate limit hit (IP)');
-    return reply.send(doneTwiml({ speakText: "We're experiencing high call volume. Please try again in a moment.", ttsKey: null }));
+    return reply.send(doneTwiml({ speakText: RATE_LIMIT_MESSAGES[Math.floor(Math.random() * RATE_LIMIT_MESSAGES.length)], ttsKey: null }));
   }
   if (!checkRateLimit(`firm:${firmId}`, 100, 86_400_000)) {
     reply.header('Content-Type', 'text/xml');
     app.log.warn({ firmId }, 'rate limit hit (firm)');
-    return reply.send(doneTwiml({ speakText: "We're currently at capacity. Please try again later.", ttsKey: null }));
+    return reply.send(doneTwiml({ speakText: RATE_LIMIT_MESSAGES[Math.floor(Math.random() * RATE_LIMIT_MESSAGES.length)], ttsKey: null }));
   }
 
   // Answering machine / voicemail detection
@@ -2080,13 +2256,13 @@ app.post('/twiml', async (req, reply) => {
     // ── Trial / suspension enforcement ───────────────────────────────────────
     if (firmConfig.status === 'suspended') {
       reply.header('Content-Type', 'text/xml');
-      return reply.send(`<Response><Say>This number is not currently active. Please contact the business directly. Goodbye.</Say><Hangup/></Response>`);
+      return reply.send(`<Response><Say>${xmlEscape(SUSPENDED_MESSAGE)}</Say><Hangup/></Response>`);
     }
     if (firmConfig.status === 'trial' && firmConfig.trial_ends_at && new Date() > new Date(firmConfig.trial_ends_at)) {
       // Auto-suspend expired trial
       await saveFirmConfig(firmId, { ...firmConfig, status: 'suspended' });
       reply.header('Content-Type', 'text/xml');
-      return reply.send(`<Response><Say>This number's trial period has ended. Please contact the business directly. Goodbye.</Say><Hangup/></Response>`);
+      return reply.send(`<Response><Say>${xmlEscape(TRIAL_EXPIRED_MESSAGE)}</Say><Hangup/></Response>`);
     }
     // Trial warning: check on each call if within 24h of expiry and warning not yet sent
     if (firmConfig.status === 'trial' && firmConfig.trial_ends_at && !firmConfig.trial_warning_sent) {
@@ -2160,6 +2336,26 @@ app.post('/twiml', async (req, reply) => {
         ttsKey = await ttsPromise;
       }
     } else {
+      // C3 — duplicate controller guard: if a controller is already pending, replay filler + redirect
+      if (pendingResponses.has(callSid)) {
+        app.log.warn({ callSid }, '/twiml: duplicate request while controller pending — replaying filler');
+        const lastFillerIdxDup = fillerLastIdxMap.get(callSid) ?? -1;
+        let fillerIdxDup;
+        do { fillerIdxDup = Math.floor(Math.random() * FILLER_PHRASES.length); }
+        while (FILLER_PHRASES.length > 1 && fillerIdxDup === lastFillerIdxDup);
+        const fillerKeyDup = fillerKeys[fillerIdxDup];
+        const fillerAudioUrlDup = fillerKeyDup
+          ? `${PUBLIC_BASE_URL}/api/tts?key=${encodeURIComponent(fillerKeyDup)}`
+          : `${PUBLIC_BASE_URL}/tts-live?text=${encodeURIComponent(FILLER_PHRASES[fillerIdxDup])}&firmId=${encodeURIComponent(firmId)}`;
+        const resultUrlDup = `${PUBLIC_BASE_URL}/twiml-result?callSid=${encodeURIComponent(callSid)}&firmId=${encodeURIComponent(firmId)}`;
+        reply.header('Content-Type', 'text/xml');
+        return reply.send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Play>${xmlEscape(fillerAudioUrlDup)}</Play>
+  <Redirect method="POST">${xmlEscape(resultUrlDup)}</Redirect>
+</Response>`);
+      }
+
       // Normal turn — start processing in background, play filler immediately while OpenAI runs
       const processingPromise = runNextStepController({ firmId, callSid, fromPhone, userText });
       pendingResponses.set(callSid, { promise: processingPromise, t0 });
@@ -2209,7 +2405,7 @@ app.post('/twiml', async (req, reply) => {
   } catch (err) {
     app.log.error({ err: String(err), stack: err?.stack, callSid }, '/twiml failed');
     reply.header('Content-Type', 'text/xml');
-    return reply.send(doneTwiml({ speakText: 'Sorry, there was a technical issue. Please call again.', ttsKey: null }));
+    return reply.send(doneTwiml({ speakText: getErrorMessage(), ttsKey: null }));
   }
 });
 
@@ -2222,15 +2418,20 @@ app.post('/twiml-result', async (req, reply) => {
   reply.header('Content-Type', 'text/xml');
 
   const pending = pendingResponses.get(callSid);
-  pendingResponses.delete(callSid);
 
   if (!pending) {
     app.log.warn({ callSid }, '/twiml-result: no pending response — call may have already completed');
-    return reply.send(doneTwiml({ speakText: 'Sorry, something went wrong. Please call again.', ttsKey: null }));
+    return reply.send(doneTwiml({ speakText: getErrorMessage(), ttsKey: null }));
+  }
+
+  let step;
+  try {
+    step = await pending.promise;
+  } finally {
+    pendingResponses.delete(callSid);
   }
 
   try {
-    const step = await pending.promise;
     const { speakText, ttsKey, done } = step.payload;
     const { t1, t2, t3, t4 } = step.payload.timings;
     app.log.info({
@@ -2264,7 +2465,7 @@ app.post('/twiml-result', async (req, reply) => {
     );
   } catch (err) {
     app.log.error({ err: String(err), stack: err?.stack, callSid }, '/twiml-result failed');
-    return reply.send(doneTwiml({ speakText: 'Sorry, there was a technical issue. Please call again.', ttsKey: null }));
+    return reply.send(doneTwiml({ speakText: getErrorMessage(), ttsKey: null }));
   }
 });
 
