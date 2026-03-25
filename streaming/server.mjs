@@ -943,9 +943,11 @@ function mergeExtracted(session, extracted, userText, firmConfig) {
     session.collected.calling_for = callingFor;
     updates.calling_for = callingFor;
   }
+  // Store caller ID as a fallback for notifications/partial leads, but don't mark it
+  // as "collected" — Ava must explicitly confirm the number with the caller before
+  // it counts toward the done check.
   if (!session.collected.callback_number && session.fromPhone) {
-    session.collected.callback_number = session.fromPhone;
-    updates.callback_number = session.fromPhone;
+    session.phoneFromCallerId = session.fromPhone;
   }
   return updates;
 }
@@ -1291,7 +1293,7 @@ async function sendEmailNotification(session, firmConfig) {
   const { full_name, callback_number, practice_area, case_summary } = session.collected;
   const name = full_name || 'Unknown Caller';
   const area = practice_area || 'General';
-  const phone = callback_number || session.fromPhone;
+  const phone = callback_number || session.phoneFromCallerId || session.fromPhone;
   const dashUrl = `${WEB_BASE_URL}/leads/${session.leadId}`;
 
   const urgencyBanner = session.isUrgent
@@ -1338,7 +1340,7 @@ async function sendPartialEmailNotification(session, firmConfig) {
   if (!firmConfig.notification_email) { app.log.warn({ leadId: session.leadId, firmId: firmConfig.id }, 'sendPartialEmailNotification: no notification_email on firm — skipping'); return; }
   const { full_name, callback_number, practice_area, calling_for } = session.collected || {};
   const name = full_name || 'Unknown Caller';
-  const phone = callback_number || session.fromPhone;
+  const phone = callback_number || session.phoneFromCallerId || session.fromPhone;
   const area = practice_area || 'General';
   const dashUrl = `${WEB_BASE_URL}/leads/${session.leadId}`;
   const capturedFields = Object.entries(session.collected || {}).filter(([, v]) => v).map(([k]) => k).join(', ') || 'none';
@@ -1740,10 +1742,15 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   // even if fields appear collected — GPT may know the caller isn't actually done.
   // The question cap remains a hard ceiling regardless.
   const llmWantsContinue = llm && String(llm.next_question_id || '').trim() !== 'done';
-  const allCorePresent = ['full_name', 'callback_number', 'case_summary'].every(
-    (f) => String(session.collected[f] || '').trim().length >= 2,
-  );
-  const done = reachedQuestionCap
+  // callback_number must be explicitly collected (not just inferred from caller ID)
+  // to count as present for the done check.
+  const allCorePresent = ['full_name', 'case_summary'].every(
+      (f) => String(session.collected[f] || '').trim().length >= 2,
+    ) && String(session.collected.callback_number || '').trim().length >= 2;
+  // Hard cap: allow up to 4 extra turns if core fields aren't collected yet.
+  // This prevents hanging up on a caller who never gave their name or number.
+  const hardCap = reachedQuestionCap && (allCorePresent || session.turnCount >= (maxQ + 4));
+  const done = hardCap
     || (allCorePresent && !llmWantsContinue && (allCollected || nextDecision.done));
 
   let speakText = effectiveConfig.closing || DEFAULT_FIRM_CONFIG.closing;
