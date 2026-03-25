@@ -1,8 +1,25 @@
+"use client";
+
+import { useEffect, useState } from "react";
 import { CallsTable } from "@/components/calls-table";
 import { getCalls } from "@/lib/api";
+import type { CallRecord } from "@/lib/types";
 
-export default async function CallsPage() {
-  const calls = await getCalls();
+export default function CallsPage() {
+  const [calls, setCalls] = useState<CallRecord[]>([]);
+
+  useEffect(() => {
+    const id = new URLSearchParams(window.location.search).get('firmId') ?? '';
+
+    const doRefresh = async () => {
+      const data = await getCalls(id);
+      setCalls(data);
+    };
+
+    doRefresh();
+    const poll = setInterval(doRefresh, 10_000);
+    return () => clearInterval(poll);
+  }, []);
 
   return (
     <div className="space-y-6">

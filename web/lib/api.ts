@@ -27,18 +27,20 @@ function unwrap<T>(payload: unknown, fallback: T): T {
   return (payload as T) ?? fallback;
 }
 
-export async function getCalls(): Promise<CallRecord[]> {
+export async function getCalls(firmId?: string): Promise<CallRecord[]> {
   try {
-    const payload = await fetchJson<CallRecord[] | { data: CallRecord[] }>("/api/calls");
+    const qs = firmId ? `?firmId=${encodeURIComponent(firmId)}` : "";
+    const payload = await fetchJson<CallRecord[] | { data: CallRecord[] }>(`/api/calls${qs}`);
     return unwrap(payload, []);
   } catch {
     return [];
   }
 }
 
-export async function getLeads(): Promise<LeadSummary[]> {
+export async function getLeads(firmId?: string): Promise<LeadSummary[]> {
   try {
-    const payload = await fetchJson<LeadSummary[] | { data: LeadSummary[] }>("/api/leads");
+    const qs = firmId ? `?firmId=${encodeURIComponent(firmId)}` : "";
+    const payload = await fetchJson<LeadSummary[] | { data: LeadSummary[] }>(`/api/leads${qs}`);
     return unwrap(payload, []);
   } catch {
     return [];
@@ -54,9 +56,9 @@ export async function getLeadById(id: string): Promise<LeadDetail | null> {
   }
 }
 
-export async function getSettings(): Promise<FirmSettings | null> {
+export async function getSettings(firmId?: string): Promise<FirmSettings | null> {
   try {
-    const payload = await fetchJson<FirmSettings | { data: FirmSettings }>("/api/firms/firm_default");
+    const payload = await fetchJson<FirmSettings | { data: FirmSettings }>(`/api/firms/${firmId ?? "firm_default"}`);
     return unwrap(payload, null);
   } catch {
     return null;

@@ -1,7 +1,7 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { CheckCheck, Phone, ScrollText, Users } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -42,9 +42,12 @@ function formatStatus(status: string): string {
 
 export function LeadsTable({ leads }: { leads: LeadSummary[] }) {
   const router = useRouter();
-  const searchParams = useSearchParams();
-  const firmId = searchParams.get("firmId");
-  const q = firmId ? `?firmId=${firmId}` : "";
+  const qRef = useRef('');
+
+  useEffect(() => {
+    const firmId = new URLSearchParams(window.location.search).get('firmId');
+    qRef.current = firmId ? `?firmId=${firmId}` : '';
+  }, []);
   const [statusFilter, setStatusFilter] = useState("all");
   const [practiceAreaFilter, setPracticeAreaFilter] = useState("all");
   const [searchQuery, setSearchQuery] = useState("");
@@ -142,7 +145,7 @@ export function LeadsTable({ leads }: { leads: LeadSummary[] }) {
                 <TableRow
                   key={lead.id}
                   className="cursor-pointer hover:bg-slate-50"
-                  onClick={() => router.push(`/leads/${lead.id}${q}`)}
+                  onClick={() => router.push(`/leads/${lead.id}${qRef.current}`)}
                 >
                   <TableCell>
                     <div className="flex items-center gap-3">

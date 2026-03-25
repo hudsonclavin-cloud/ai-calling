@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { ArrowDown, ArrowUp, ArrowUpRight, CalendarCheck2, PhoneCall, PhoneMissed, Plus, TrendingUp, Users, AlertCircle, Voicemail } from "lucide-react";
 
@@ -110,9 +109,7 @@ function LiveDot() {
 }
 
 export default function DashboardPage() {
-  const searchParams = useSearchParams();
-  const firmId = searchParams.get("firmId");
-  const q = firmId ? `?firmId=${firmId}` : "";
+  const [firmId, setFirmId] = useState('');
   const [calls, setCalls] = useState<CallRecord[]>([]);
   const [leads, setLeads] = useState<LeadSummary[]>([]);
   const [health, setHealth] = useState<HealthData | null>(null);
@@ -120,21 +117,25 @@ export default function DashboardPage() {
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [secondsAgo, setSecondsAgo] = useState(0);
 
-  async function refresh() {
-    const [c, l, h, a] = await Promise.all([getCalls(), getLeads(), getHealth(), getAnalytics("firm_default", 30)]);
-    setCalls(c);
-    setLeads(l);
-    setHealth(h);
-    setAnalytics(a);
-    setLastUpdated(new Date());
-    setSecondsAgo(0);
-  }
+  const q = firmId ? `?firmId=${firmId}` : "";
 
   useEffect(() => {
-    refresh();
-    const poll = setInterval(refresh, 30_000);
+    const id = new URLSearchParams(window.location.search).get('firmId') ?? '';
+    setFirmId(id);
+
+    const doRefresh = async () => {
+      const [c, l, h, a] = await Promise.all([getCalls(id), getLeads(id), getHealth(), getAnalytics(id || 'firm_default', 30)]);
+      setCalls(c);
+      setLeads(l);
+      setHealth(h);
+      setAnalytics(a);
+      setLastUpdated(new Date());
+      setSecondsAgo(0);
+    };
+
+    doRefresh();
+    const poll = setInterval(doRefresh, 10_000);
     return () => clearInterval(poll);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {

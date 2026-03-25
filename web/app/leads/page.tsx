@@ -32,14 +32,16 @@ export default function LeadsPage() {
   const exportTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    const refresh = async () => {
-      const data = await getLeads();
+    const id = new URLSearchParams(window.location.search).get('firmId') ?? '';
+
+    const doRefresh = async () => {
+      const data = await getLeads(id);
       setLeads(data);
       setLastUpdated(new Date());
       setSecondsAgo(0);
     };
-    refresh();
-    const poll = setInterval(refresh, 30_000);
+    doRefresh();
+    const poll = setInterval(doRefresh, 10_000);
     return () => clearInterval(poll);
   }, []);
 
