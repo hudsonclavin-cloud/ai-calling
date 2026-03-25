@@ -797,11 +797,17 @@ HOW TO COLLECT INFO (naturally, not like a form):
 WHAT YOU'RE GATHERING (don't treat this as a checklist):
 Name, phone number, what happened, and when. That's it. Get these naturally over the course of the conversation.
 
-END OF CALL:
-When you have enough to help them, warmly tell them an attorney will reach out shortly and that they're in good hands. Mean it.
+HOW TO END THE CALL — these conditions must ALL be true before you set next_question_id to "done":
+1. You have the caller's name.
+2. You have their phone number.
+3. You have a clear sense of what happened (not just a single word — a real description).
+4. You have a sense of when it happened.
+5. The caller's tone or words signal they are ready to wrap up — they are slowing down, said "okay" or "alright," or are trailing off naturally.
+
+If ANY of the above is missing, keep the conversation going. Ask naturally. Never rush to close. Never set next_question_id to "done" just because you have data in the fields — only set it when the caller sounds genuinely done.
 
 next_question_id MUST be one of these exact strings: full_name | callback_number | practice_area | case_summary | done
-Never invent other IDs. Use "done" only if all required fields are collected.
+Never invent other IDs. Use "done" only if all required fields are collected AND the caller sounds ready to wrap up.
 
 REQUIRED FIELDS: ${requiredFieldsList}
 
@@ -1021,13 +1027,26 @@ function voicemailTwiml({ firmId, callSid, fromPhone, firmConfig }) {
 </Response>`;
 }
 
-function doneTwiml({ speakText, ttsKey, liveUrl = null }) {
+function doneTwiml({ speakText, ttsKey, liveUrl = null, firmId = '', callSid = '' }) {
   const effectiveKey = ttsKey || holdKey;
   const speakerNode = effectiveKey
     ? `<Play>${xmlEscape(`${PUBLIC_BASE_URL}/api/tts?key=${encodeURIComponent(effectiveKey)}`)}</Play>`
     : liveUrl
       ? `<Play>${xmlEscape(liveUrl)}</Play>`
       : `<Say>${xmlEscape(speakText)}</Say>`;
+
+  // Grace period: keep the line open for 4 seconds after Ava's goodbye so the caller
+  // can add anything before we hang up. Only applies to real call endings (not errors/rate-limits).
+  if (firmId && callSid) {
+    const graceUrl = `${PUBLIC_BASE_URL}/twiml-grace?callSid=${encodeURIComponent(callSid)}&firmId=${encodeURIComponent(firmId)}`;
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Gather input="speech" action="${xmlEscape(graceUrl)}" method="POST" speechTimeout="1" timeout="4" actionOnEmptyResult="true" bargeIn="false" enhanced="true" language="en-US" profanityFilter="false">
+    ${speakerNode}
+  </Gather>
+  <Hangup/>
+</Response>`;
+  }
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -1716,7 +1735,16 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
     }
   }
 
-  const done = allCollected || reachedQuestionCap || nextDecision.done;
+  // Require both GPT agreement and core fields before allowing hangup.
+  // If LLM is available and returned a non-"done" next_question_id, keep going
+  // even if fields appear collected — GPT may know the caller isn't actually done.
+  // The question cap remains a hard ceiling regardless.
+  const llmWantsContinue = llm && String(llm.next_question_id || '').trim() !== 'done';
+  const allCorePresent = ['full_name', 'callback_number', 'case_summary'].every(
+    (f) => String(session.collected[f] || '').trim().length >= 2,
+  );
+  const done = reachedQuestionCap
+    || (allCorePresent && !llmWantsContinue && (allCollected || nextDecision.done));
 
   let speakText = effectiveConfig.closing || DEFAULT_FIRM_CONFIG.closing;
   let nextField = null;
@@ -2324,7 +2352,7 @@ app.post('/twiml', async (req, reply) => {
     reply.header('Content-Type', 'text/xml');
     app.log.info({ callSid, ttsHit: !!ttsKey, liveStream: !!liveUrl, totalMs: Date.now() - tTwimlStart }, 'twiml-sent');
 
-    if (done) return reply.send(doneTwiml({ speakText, ttsKey, liveUrl }));
+    if (done) return reply.send(doneTwiml({ speakText, ttsKey, liveUrl, firmId, callSid }));
 
     const practiceHints = (firmConfig.practice_areas || []).join(', ');
     return reply.send(
@@ -2385,7 +2413,7 @@ app.post('/twiml-result', async (req, reply) => {
 
     app.log.info({ callSid, ttsHit: !!ttsKey, liveStream: !!liveUrl }, 'twiml-result-sent');
 
-    if (done) return reply.send(doneTwiml({ speakText, ttsKey, liveUrl }));
+    if (done) return reply.send(doneTwiml({ speakText, ttsKey, liveUrl, firmId, callSid }));
 
     const practiceHints = (step.firmConfig.practice_areas || []).join(', ');
     return reply.send(
@@ -2401,6 +2429,52 @@ app.post('/twiml-result', async (req, reply) => {
   } catch (err) {
     app.log.error({ err: String(err), stack: err?.stack, callSid }, '/twiml-result failed');
     return reply.send(doneTwiml({ speakText: getErrorMessage(), ttsKey: null }));
+  }
+});
+
+// POST /twiml-grace — grace period after Ava's closing line.
+// Twilio holds the line for 4 seconds and POSTs here whether or not the caller speaks.
+// Speech → un-done the session and continue. Silence → hang up.
+app.post('/twiml-grace', async (req, reply) => {
+  const callSid = String(req.body?.CallSid || req.query?.callSid || '').trim();
+  const firmId = String(req.query?.firmId || 'firm_default').trim();
+  const speech = String(req.body?.SpeechResult || '').trim();
+
+  reply.header('Content-Type', 'text/xml');
+
+  if (!speech) {
+    app.log.info({ callSid }, 'twiml-grace: silence — hanging up');
+    return reply.send(`<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`);
+  }
+
+  app.log.info({ callSid, speech: speech.slice(0, 100) }, 'twiml-grace: caller spoke — continuing');
+
+  const sessions = await loadSessions();
+  const session = sessions[callSid];
+  if (session) {
+    session.done = false;
+    sessions[callSid] = session;
+    await saveSessions(sessions);
+  }
+
+  try {
+    const fromPhone = session?.fromPhone || '';
+    const result = await runNextStepController({ firmId, callSid, fromPhone, userText: speech });
+    const { speakText, ttsKey, done: newDone } = result.payload;
+    const liveUrl = !ttsKey
+      ? `${PUBLIC_BASE_URL}/tts-live?text=${encodeURIComponent(speakText)}&firmId=${encodeURIComponent(firmId)}`
+      : null;
+    if (newDone) return reply.send(doneTwiml({ speakText, ttsKey, liveUrl, firmId, callSid }));
+    const practiceHints = (result.firmConfig?.practice_areas || []).join(', ');
+    return reply.send(gatherTwiml({
+      actionUrl: `${PUBLIC_BASE_URL}/twiml?firmId=${encodeURIComponent(firmId)}`,
+      speakText, ttsKey, liveUrl,
+      emptyCount: result.session.repromptCount,
+      hints: practiceHints,
+    }));
+  } catch (err) {
+    app.log.error({ err: String(err), callSid }, '/twiml-grace failed');
+    return reply.send(`<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`);
   }
 });
 
