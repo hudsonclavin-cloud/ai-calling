@@ -107,3 +107,6 @@ These rules apply to every system prompt, every acknowledgment phrase, every pie
 6. Phone number self-serve provisioning
 7. Stripe activation (blocked on bank account)
 8. Custom domain (tryava.ai or meetava.ai)
+
+## Living Documents
+- **UPDATES.md** (repo root: `/ai-calling/UPDATES.md`) — Claude Code must update this file at the end of every session. Add a new session entry with date, what changed, what was fixed, and what still needs follow-up. Also update the Open Problems list to reflect current state. This is non-negotiable.
