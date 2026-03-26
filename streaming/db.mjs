@@ -4,7 +4,8 @@ import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const DB_PATH = path.join(__dirname, 'data', 'ava.db');
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const DB_PATH = path.join(DATA_DIR, 'ava.db');
 
 let _client = null;
 
@@ -274,6 +275,11 @@ export async function getCallByCallSid(callSid) {
 }
 
 export async function saveCalls(calls) { await _saveCalls(calls); }
+
+export async function getLeadById(id) {
+  const result = await getClient().execute({ sql: 'SELECT * FROM leads WHERE id = ? LIMIT 1', args: [id] });
+  return result.rows[0] ? parseLead(result.rows[0]) : null;
+}
 
 export async function loadLeads(firmId) {
   const result = firmId

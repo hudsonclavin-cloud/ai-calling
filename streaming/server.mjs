@@ -20,6 +20,7 @@ import {
   deleteSession,
   persistSessionArtifacts,
   patchLead,
+  getLeadById,
   createWebhookLog,
   getWebhookLogs,
 } from './db.mjs';
@@ -92,7 +93,7 @@ const INDUSTRY_REQUIRED_FIELDS = {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const DATA_DIR = path.join(__dirname, 'data');
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const FIRMS_DIR = path.join(DATA_DIR, 'firms');       // per-firm config JSON files
 const CALLS_FILE = path.join(DATA_DIR, 'calls.json');
 const LEADS_FILE = path.join(DATA_DIR, 'leads.json');
@@ -1994,12 +1995,96 @@ app.post('/api/firms/:id', async (req, reply) => {
   return { data: updated };
 });
 
+app.get('/api/firms/:id/phone/search', async (req, reply) => {
+  const id = String(req.params.id || '').trim();
+  const firm = await loadFirmConfig(id);
+  if (firm.id !== id) return reply.code(404).send({ error: 'Firm not found' });
+
+  if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN)
+    return reply.code(400).send({ error: 'Twilio credentials not configured' });
+
+  const areaCode = String(req.query?.areaCode || '').replace(/\D/g, '').slice(0, 3);
+  if (areaCode.length !== 3)
+    return reply.code(400).send({ error: 'areaCode must be a 3-digit NXX code' });
+
+  const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64');
+  const qs = new URLSearchParams({ AreaCode: areaCode, VoiceEnabled: 'true', Limit: '10' });
+  const resp = await fetch(
+    `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/AvailablePhoneNumbers/US/Local.json?${qs}`,
+    { headers: { Authorization: `Basic ${auth}` } }
+  );
+  if (!resp.ok) {
+    const body = await resp.text();
+    app.log.warn({ firmId: id, areaCode, status: resp.status, body }, 'Twilio number search failed');
+    return reply.code(502).send({ error: 'Twilio number search failed' });
+  }
+  const data = await resp.json();
+  return {
+    data: (data.available_phone_numbers || []).map((n) => ({
+      phoneNumber: n.phone_number,
+      friendlyName: n.friendly_name,
+    })),
+  };
+});
+
+app.post('/api/firms/:id/phone/purchase', async (req, reply) => {
+  const id = String(req.params.id || '').trim();
+  const firm = await loadFirmConfig(id);
+  if (firm.id !== id) return reply.code(404).send({ error: 'Firm not found' });
+
+  if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN)
+    return reply.code(400).send({ error: 'Twilio credentials not configured' });
+
+  const phoneNumber = String(req.body?.phoneNumber || '').trim();
+  if (!phoneNumber || !phoneNumber.startsWith('+'))
+    return reply.code(400).send({ error: 'phoneNumber must be E.164 (e.g. +14155551234)' });
+
+  const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64');
+  const twilioBase = `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}`;
+
+  // Step 1 — Purchase
+  const purchaseResp = await fetch(`${twilioBase}/IncomingPhoneNumbers.json`, {
+    method: 'POST',
+    headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      PhoneNumber: phoneNumber,
+      FriendlyName: `Ava — ${firm.name || id}`,
+    }).toString(),
+  });
+  if (!purchaseResp.ok) {
+    const body = await purchaseResp.text();
+    app.log.warn({ firmId: id, phoneNumber, status: purchaseResp.status, body }, 'Twilio purchase failed');
+    return reply.code(502).send({ error: 'Failed to purchase number' });
+  }
+  const purchased = await purchaseResp.json();
+
+  // Step 2 — Configure VoiceUrl webhook
+  const voiceUrl = `${PUBLIC_BASE_URL}/twiml?firmId=${encodeURIComponent(id)}`;
+  const configResp = await fetch(`${twilioBase}/IncomingPhoneNumbers/${purchased.sid}.json`, {
+    method: 'POST',
+    headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ VoiceUrl: voiceUrl, VoiceMethod: 'POST' }).toString(),
+  });
+  if (!configResp.ok) {
+    // Number purchased but webhook config failed — save number anyway, log for manual fix
+    app.log.warn({ firmId: id, sid: purchased.sid }, 'Twilio webhook config failed after purchase');
+  }
+
+  // Step 3 — Persist to firm config
+  await saveFirmConfig(id, { ...firm, twilio_phone: phoneNumber });
+  app.log.info({ firmId: id, phoneNumber, sid: purchased.sid, voiceUrl }, 'Phone number provisioned');
+
+  return { data: { phoneNumber, sid: purchased.sid, voiceUrl } };
+});
+
 app.get('/api/demo-number', async () => {
   return { number: process.env.DEMO_PHONE_NUMBER || null };
 });
 
-app.get('/api/calls', async (req) => {
+app.get('/api/calls', async (req, reply) => {
   const firmId = String(req.query?.firmId || '').trim();
+  const isAdmin = ADMIN_API_KEY && req.headers?.['x-admin-key'] === ADMIN_API_KEY;
+  if (!firmId && !isAdmin) return reply.code(400).send({ error: 'firmId required' });
   const calls = await loadCalls(firmId || undefined);
   calls.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
   return { data: calls.slice(0, 100) };
@@ -2007,15 +2092,18 @@ app.get('/api/calls', async (req) => {
 
 app.get('/api/calls/:id/transcript', async (req, reply) => {
   const firmId = String(req.query?.firmId || '').trim();
+  if (!firmId) return reply.code(400).send({ error: 'firmId required' });
   const callId = req.params.id;
   const call = await getCallById(callId);
   if (!call) return reply.code(404).send({ error: 'Call not found' });
-  if (firmId && call.firmId !== firmId) return reply.code(404).send({ error: 'Call not found' });
+  if (call.firmId !== firmId) return reply.code(404).send({ error: 'Call not found' });
   return { data: call.transcript };
 });
 
-app.get('/api/leads', async (req) => {
+app.get('/api/leads', async (req, reply) => {
   const firmId = String(req.query?.firmId || '').trim();
+  const isAdmin = ADMIN_API_KEY && req.headers?.['x-admin-key'] === ADMIN_API_KEY;
+  if (!firmId && !isAdmin) return reply.code(400).send({ error: 'firmId required' });
   const leads = await loadLeads(firmId || undefined);
   leads.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
   return { data: leads };
@@ -2031,6 +2119,12 @@ app.get('/api/leads/:id', async (req, reply) => {
 
 app.patch('/api/leads/:id', async (req, reply) => {
   const { id } = req.params;
+  const firmId = String(req.body?.firmId || '').trim();
+  if (firmId) {
+    const lead = await getLeadById(id);
+    if (!lead) return reply.code(404).send({ error: 'Lead not found' });
+    if (lead.firmId !== firmId) return reply.code(403).send({ error: 'Forbidden' });
+  }
   const allowed = ['status', 'contacted_at'];
   const updates = Object.fromEntries(
     Object.entries(req.body || {}).filter(([k]) => allowed.includes(k))
@@ -2560,12 +2654,13 @@ app.post('/recording-status', async (req, reply) => {
 // :id may be the internal call id OR the Twilio callSid (lead.lastCallSid)
 app.get('/api/calls/:id/recording', async (req, reply) => {
   const firmId = String(req.query?.firmId || '').trim();
+  if (!firmId) return reply.code(400).send({ error: 'firmId required' });
   const callId = req.params.id;
   // Try internal ID first, then fall back to callSid lookup
   let call = await getCallById(callId);
   if (!call) call = await getCallByCallSid(callId);
   if (!call) return reply.code(404).send({ error: 'Not found' });
-  if (firmId && call.firmId !== firmId) return reply.code(404).send({ error: 'Not found' });
+  if (call.firmId !== firmId) return reply.code(404).send({ error: 'Not found' });
 
   const leads = await loadLeads(call.firmId);
   const lead = leads.find((l) => l.id === call.leadId);

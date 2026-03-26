@@ -35,6 +35,55 @@ export function FirmEditForm({
   const [copied, setCopied] = useState(false);
   const [billingLoading, setBillingLoading] = useState(false);
 
+  const apiBase = process.env.NEXT_PUBLIC_API_BASE ?? 'http://127.0.0.1:5050';
+  const [areaCode, setAreaCode] = useState('');
+  const [phoneResults, setPhoneResults] = useState<{ phoneNumber: string; friendlyName: string }[]>([]);
+  const [phoneSearching, setPhoneSearching] = useState(false);
+  const [phonePurchasing, setPhonePurchasing] = useState(false);
+  const [phoneError, setPhoneError] = useState<string | null>(null);
+  const [selectedNumber, setSelectedNumber] = useState<string | null>(null);
+
+  async function searchNumbers() {
+    setPhoneSearching(true);
+    setPhoneError(null);
+    setPhoneResults([]);
+    setSelectedNumber(null);
+    try {
+      const resp = await fetch(`${apiBase}/api/firms/${form.id}/phone/search?areaCode=${encodeURIComponent(areaCode)}`);
+      if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || `Search failed (${resp.status})`);
+      const payload = await resp.json();
+      setPhoneResults(payload.data ?? []);
+      if (!payload.data?.length) setPhoneError('No numbers found for that area code — try another.');
+    } catch (err) {
+      setPhoneError(err instanceof Error ? err.message : 'Search failed');
+    } finally {
+      setPhoneSearching(false);
+    }
+  }
+
+  async function purchaseNumber() {
+    if (!selectedNumber) return;
+    setPhonePurchasing(true);
+    setPhoneError(null);
+    try {
+      const resp = await fetch(`${apiBase}/api/firms/${form.id}/phone/purchase`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phoneNumber: selectedNumber }),
+      });
+      if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || `Purchase failed (${resp.status})`);
+      const payload = await resp.json();
+      set('twilio_phone', payload.data.phoneNumber);
+      setPhoneResults([]);
+      setSelectedNumber(null);
+      setAreaCode('');
+    } catch (err) {
+      setPhoneError(err instanceof Error ? err.message : 'Purchase failed');
+    } finally {
+      setPhonePurchasing(false);
+    }
+  }
+
   function set<K extends keyof FirmSettings>(key: K, value: FirmSettings[K]) {
     setForm((prev) => ({ ...prev, [key]: value }));
   }
@@ -102,6 +151,75 @@ export function FirmEditForm({
           <p className="mt-1.5 text-xs text-slate-400">
             Set this as the Voice webhook (HTTP POST) in Twilio for this client's number.
           </p>
+        </CardContent>
+      </Card>
+
+      {/* ── Phone Number ── */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Phone Number</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {form.twilio_phone ? (
+            <div className="space-y-1">
+              <p className="text-2xl font-semibold tracking-wide text-slate-900">{form.twilio_phone}</p>
+              <p className="text-xs text-slate-400">This is the number callers dial to reach Ava.</p>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <p className="text-sm text-slate-500">No phone number assigned yet. Search by area code to pick one.</p>
+              <div className="flex items-end gap-2">
+                <div className="grid gap-1.5">
+                  <Label htmlFor="areaCode">Area Code</Label>
+                  <Input
+                    id="areaCode"
+                    placeholder="415"
+                    maxLength={3}
+                    value={areaCode}
+                    onChange={(e) => setAreaCode(e.target.value.replace(/\D/g, '').slice(0, 3))}
+                    className="w-24"
+                  />
+                </div>
+                <Button type="button" variant="outline" disabled={areaCode.length !== 3 || phoneSearching} onClick={searchNumbers}>
+                  {phoneSearching ? 'Searching…' : 'Search'}
+                </Button>
+              </div>
+              {phoneResults.length > 0 && (
+                <div className="space-y-2">
+                  <p className="text-xs font-medium text-slate-500">Select a number then click Purchase</p>
+                  <div className="grid gap-1.5">
+                    {phoneResults.map((n) => (
+                      <label
+                        key={n.phoneNumber}
+                        className={`flex cursor-pointer items-center gap-3 rounded-lg border px-3 py-2 text-sm transition-colors ${
+                          selectedNumber === n.phoneNumber
+                            ? 'border-sky-500 bg-sky-50 text-sky-900'
+                            : 'border-slate-200 hover:border-slate-300 hover:bg-slate-50'
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="phoneNumber"
+                          value={n.phoneNumber}
+                          checked={selectedNumber === n.phoneNumber}
+                          onChange={() => setSelectedNumber(n.phoneNumber)}
+                          className="accent-sky-600"
+                        />
+                        <span className="font-mono">{n.phoneNumber}</span>
+                        <span className="ml-auto text-xs text-slate-400">{n.friendlyName}</span>
+                      </label>
+                    ))}
+                  </div>
+                  <Button type="button" disabled={!selectedNumber || phonePurchasing} onClick={purchaseNumber}>
+                    {phonePurchasing ? 'Purchasing…' : 'Purchase Number'}
+                  </Button>
+                </div>
+              )}
+              {phoneError && (
+                <p className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{phoneError}</p>
+              )}
+            </div>
+          )}
         </CardContent>
       </Card>
 

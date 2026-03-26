@@ -228,6 +228,7 @@ export default function OnboardingPage() {
         intake_rules: INTAKE_RULES[form.industry] ?? INTAKE_RULES.Other,
         notification_email: form.notificationEmail,
         notification_phone: form.notificationPhone,
+        ...(form.twilioPhone.trim() ? { twilio_phone: form.twilioPhone.trim() } : {}),
       });
       setCreatedFirmId(firmId);
     } catch {
