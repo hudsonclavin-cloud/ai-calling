@@ -123,6 +123,7 @@ let fillerKeys = []; // populated at boot via synthesizeToDisk
 
 // Per-session last filler index (avoids consecutive repeated filler within a call)
 const fillerLastIdxMap = new Map();
+const DYNAMIC_FILLER_TIMEOUT_MS = Number(process.env.DYNAMIC_FILLER_TIMEOUT_MS ?? 800);
 
 // ── Default firm config (used as fallback if no file found) ──────────────────
 // To add a new firm: copy firm_default.json → firm_yourname.json and edit it.
@@ -1549,6 +1550,47 @@ async function scoreCallQuality(session) {
   }
 }
 
+async function generateDynamicFiller({ userText, lastQuestionText }) {
+  if (!OPENAI_API_KEY) return null;
+  try {
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        temperature: 0.7,
+        max_tokens: 20,
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You are a warm phone receptionist named Ava. The caller just finished speaking. ' +
+              'Reply with ONLY a short (2 to 8 word) natural verbal filler that acknowledges what they said ' +
+              'before you go look something up. Sound human — not robotic. ' +
+              'Do NOT ask a question. Do NOT include quotes or punctuation beyond commas and periods. ' +
+              'Do NOT use "Absolutely", "Certainly", "Of course", "Sure thing", or "Great". ' +
+              'Examples: "Oh, one moment.", "Got it, just a sec.", "Okay, hold on.", "Mm, one moment.", "Sure, give me just a second."',
+          },
+          {
+            role: 'user',
+            content:
+              `Ava asked: ${lastQuestionText || '(call just started)'}\n` +
+              `Caller said: ${userText.slice(0, 300)}`,
+          },
+        ],
+      }),
+      signal: AbortSignal.timeout(DYNAMIC_FILLER_TIMEOUT_MS),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const text = (data.choices?.[0]?.message?.content || '').trim().replace(/^["']|["']$/g, '');
+    if (!text || text.length > 80 || text.length < 3) return null;
+    return text;
+  } catch {
+    return null; // AbortError (timeout) or network error → fall back to static
+  }
+}
+
 function fireNotifications(session, firmConfig) {
   app.log.info(
     { leadId: session.leadId, done: session.done, hasResendKey: !!RESEND_API_KEY, notificationEmail: firmConfig?.notification_email || '' },
@@ -2485,19 +2527,29 @@ app.post('/twiml', async (req, reply) => {
       const processingPromise = runNextStepController({ firmId, callSid, fromPhone, userText });
       pendingResponses.set(callSid, { promise: processingPromise, t0 });
 
-      // Pick a random pre-cached filler phrase (anti-repeat: avoid last used index)
+      // Static filler index computed first (anti-repeat state maintained regardless of dynamic path)
       const lastFillerIdx = fillerLastIdxMap.get(callSid) ?? -1;
       let fillerIdx;
       do { fillerIdx = Math.floor(Math.random() * FILLER_PHRASES.length); }
       while (FILLER_PHRASES.length > 1 && fillerIdx === lastFillerIdx);
       fillerLastIdxMap.set(callSid, fillerIdx);
       const fillerKey = fillerKeys[fillerIdx];
-      const fillerAudioUrl = fillerKey
+      const staticFillerAudioUrl = fillerKey
         ? `${PUBLIC_BASE_URL}/api/tts?key=${encodeURIComponent(fillerKey)}`
         : `${PUBLIC_BASE_URL}/tts-live?text=${encodeURIComponent(FILLER_PHRASES[fillerIdx])}&firmId=${encodeURIComponent(firmId)}`;
+
+      // Race GPT-generated contextual filler against timeout; null → use static
+      const dynamicText = await generateDynamicFiller({
+        userText,
+        lastQuestionText: session.lastQuestionText || '',
+      });
+      const fillerAudioUrl = dynamicText
+        ? `${PUBLIC_BASE_URL}/tts-live?text=${encodeURIComponent(dynamicText)}&firmId=${encodeURIComponent(firmId)}`
+        : staticFillerAudioUrl;
+
       const resultUrl = `${PUBLIC_BASE_URL}/twiml-result?callSid=${encodeURIComponent(callSid)}&firmId=${encodeURIComponent(firmId)}`;
 
-      app.log.info({ callSid, fillerIdx, fillerCached: !!fillerKey }, 'filler-sent');
+      app.log.info({ callSid, fillerIdx, fillerCached: !!fillerKey, dynamicFiller: dynamicText ?? null }, 'filler-sent');
       reply.header('Content-Type', 'text/xml');
       return reply.send(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
