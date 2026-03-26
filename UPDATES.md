@@ -9,11 +9,29 @@
 - **Custom domain** — tryava.ai or meetava.ai not yet configured
 - **Confirmation email reliability** — was on the known problems list; no explicit fix was ever committed
 - **Non-admin sign-out** — `app-shell.tsx` uses `<Link href="/login">` for non-admin clients instead of `signOut()`, which may not fully terminate the NextAuth session
-- **Ava voice naturalness** — still listed as priority #1; humanization work is ongoing, not solved
+- **Ava voice naturalness** — robotic ack bug fixed; real-world call testing still needed to confirm quality
+- **Tone setting** — toneInstruction bug fixed; firms can now actually use warm/professional/friendly
 
 ---
 
 ## Session Log (newest first)
+
+### 2026-03-25 — Eliminate robotic acknowledgments, fix voice naturalness (#1)
+**Changed:**
+- `streaming/server.mjs`: Fixed bug where `toneInstruction` was computed but never injected into the system prompt — tone setting was silently doing nothing
+- `streaming/server.mjs`: Rewrote system prompt — now explicitly requires every `next_question_text` to open with a natural human acknowledgment; bans robotic phrases by name ("Of course.", "Sure thing.", "Absolutely.", "Certainly!", etc.)
+- `streaming/server.mjs`: Removed `effectiveLlmAck` regex/length gate — previously any LLM response under 80 chars that didn't start with a narrow set of phrases got a deterministic ack like "Sure thing." prepended on top; now if the LLM returned any text, it's used as-is
+- `streaming/server.mjs`: Fixed default opening — removed "I'm going to ask you a few quick questions" IVR phrasing
+- `streaming/server.mjs`: Bumped temperature 0.7 → 0.8 for more varied phrasing
+**Fixed:**
+- Ava was saying "Sure thing. And who am I speaking with?" — deterministic ack bolted onto LLM text
+- Tone configuration (warm/professional/friendly) had no effect — toneInstruction variable was a dead assignment
+- Opening line sounded like an IVR system
+**Still broken / needs follow-up:**
+- Voice naturalness is better but real-world call testing needed to confirm
+- Confirmation email reliability still not addressed
+
+---
 
 ### 2026-03-25 — Self-serve phone number provisioning + onboarding bug fix
 **Changed:**
