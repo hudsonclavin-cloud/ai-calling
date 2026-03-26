@@ -171,12 +171,16 @@ app.log.info({
   OPENAI_API_KEY:    !!OPENAI_API_KEY,
   ELEVENLABS_API_KEY: !!ELEVENLABS_API_KEY,
   RESEND_API_KEY:    !!RESEND_API_KEY,
+  RESEND_FROM_EMAIL,
   TWILIO_ACCOUNT_SID: !!TWILIO_ACCOUNT_SID,
   STRIPE_SECRET_KEY:  !!STRIPE_SECRET_KEY,
   WEB_BASE_URL,
   ADMIN_API_KEY:      !!ADMIN_API_KEY,
   DEMO_PHONE_NUMBER: process.env.DEMO_PHONE_NUMBER || '(not set)',
 }, 'BOOT env check');
+if (RESEND_FROM_EMAIL.endsWith('@resend.dev')) {
+  app.log.warn({ RESEND_FROM_EMAIL }, 'EMAIL WARNING: RESEND_FROM_EMAIL uses Resend sandbox domain — emails can only be delivered to the Resend account owner\'s address. Set RESEND_FROM_EMAIL to a verified sender domain for production.');
+}
 await app.register(formbody);
 
 // Capture raw body for Stripe webhook signature verification
@@ -1354,6 +1358,7 @@ function ctaButton(text, url, color = '#6d28d9') {
 async function sendEmailNotification(session, firmConfig) {
   if (!RESEND_API_KEY) { app.log.warn({ leadId: session.leadId }, 'sendEmailNotification: RESEND_API_KEY not set — skipping'); return; }
   if (!firmConfig.notification_email) { app.log.warn({ leadId: session.leadId, firmId: firmConfig.id }, 'sendEmailNotification: no notification_email on firm — skipping'); return; }
+  app.log.info({ leadId: session.leadId, from: RESEND_FROM_EMAIL, to: firmConfig.notification_email }, 'sendEmailNotification: attempting send');
 
   const { full_name, callback_number, practice_area, case_summary } = session.collected;
   const name = full_name || 'Unknown Caller';
@@ -1403,6 +1408,7 @@ async function sendEmailNotification(session, firmConfig) {
 async function sendPartialEmailNotification(session, firmConfig) {
   if (!RESEND_API_KEY) { app.log.warn({ leadId: session.leadId }, 'sendPartialEmailNotification: RESEND_API_KEY not set — skipping'); return; }
   if (!firmConfig.notification_email) { app.log.warn({ leadId: session.leadId, firmId: firmConfig.id }, 'sendPartialEmailNotification: no notification_email on firm — skipping'); return; }
+  app.log.info({ leadId: session.leadId, from: RESEND_FROM_EMAIL, to: firmConfig.notification_email }, 'sendPartialEmailNotification: attempting send');
   const { full_name, callback_number, practice_area, calling_for } = session.collected || {};
   const name = full_name || 'Unknown Caller';
   const phone = callback_number || session.phoneFromCallerId || session.fromPhone;
@@ -2025,8 +2031,8 @@ app.post('/test-email', async (req, reply) => {
   if (!to) return reply.code(400).send({ error: 'Missing ?to= query param or body.to' });
   if (!RESEND_API_KEY) return reply.code(503).send({ error: 'RESEND_API_KEY not set' });
 
-  const fromWarning = (RESEND_FROM_EMAIL && !RESEND_FROM_EMAIL.endsWith('@resend.dev'))
-    ? `WARNING: using custom domain ${RESEND_FROM_EMAIL} — ensure it is verified in Resend`
+  const fromWarning = RESEND_FROM_EMAIL.endsWith('@resend.dev')
+    ? `WARNING: using Resend sandbox sender (${RESEND_FROM_EMAIL}) — emails can only be delivered to the Resend account owner's address. Set RESEND_FROM_EMAIL to a verified sender domain for production.`
     : null;
 
   try {
