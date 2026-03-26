@@ -34,6 +34,8 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || '';
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'XrExE9yKIg1WjnnlVkGX'; // Matilda (warm, conversational)
+// eleven_turbo_v2_5: latency-optimized for streaming (recommended for phone)
+// eleven_flash_v2_5: newer, may offer better expressiveness — test latency before switching
 const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID || 'eleven_turbo_v2_5';
 const TTS_TIMEOUT_MS = Number(process.env.TTS_TIMEOUT_MS || 2500);
 const MAX_TTS_CHARS = Number(process.env.MAX_TTS_CHARS || 180);
@@ -107,10 +109,15 @@ let holdKey = null; // set at boot before prewarm
 // Thinking filler phrases — played immediately when caller finishes speaking, before OpenAI responds
 const FILLER_PHRASES = [
   'One moment.',
-  'Just a moment.',
-  'One second.',
+  'Just a sec.',
+  'Okay, hold on.',
+  'Mm, one moment.',
   'Right with you.',
-  'Let me pull that up.',
+  'Let me grab that.',
+  'One second.',
+  'Hold on just a moment.',
+  'Okay.',
+  'Sure, one sec.',
 ];
 let fillerKeys = []; // populated at boot via synthesizeToDisk
 
@@ -811,6 +818,13 @@ OFFICE HOURS: ${hoursContext}
 
 ${industryContext}
 
+TTS — YOUR TEXT WILL BE READ ALOUD, NOT READ ON SCREEN:
+- Use em-dashes for natural thinking pauses: "Oh — that sounds really hard."
+- Use "..." for soft trailing questions: "And your name is...?"
+- NEVER write digits for phone numbers: write "five five five, zero one four two" not "555-0142"
+- NEVER write "$": write "five hundred dollars" not "$500"
+- One breath per sentence. Two thoughts? Connect with a dash, not a period.
+
 Return only strict JSON per schema.`;
 
   app.log.info({
@@ -948,13 +962,67 @@ function mergeExtracted(session, extracted, userText, firmConfig) {
   return updates;
 }
 
-// ── SSML natural pauses ───────────────────────────────────────────────────────
+// ── SSML enrichment ───────────────────────────────────────────────────────────
 
-function addNaturalPauses(text) {
-  return text.replace(
-    /^(Got it|Of course|Sure|Absolutely|Certainly|I understand|Thank you|Understood|Perfect|Okay|Of course)\.\s+/i,
-    "$1.<break time='350ms'/> "
+function numberToWords(n) {
+  if (n === 0) return 'zero';
+  const ones = ['','one','two','three','four','five','six','seven','eight','nine',
+                 'ten','eleven','twelve','thirteen','fourteen','fifteen','sixteen',
+                 'seventeen','eighteen','nineteen'];
+  const tens = ['','','twenty','thirty','forty','fifty','sixty','seventy','eighty','ninety'];
+  function below1000(n) {
+    if (n < 20) return ones[n];
+    if (n < 100) return tens[Math.floor(n/10)] + (n%10 ? ' ' + ones[n%10] : '');
+    return ones[Math.floor(n/100)] + ' hundred' + (n%100 ? ' ' + below1000(n%100) : '');
+  }
+  if (n < 1000) return below1000(n);
+  if (n < 1000000) {
+    const rem = n % 1000;
+    return below1000(Math.floor(n/1000)) + ' thousand' + (rem ? ' ' + below1000(rem) : '');
+  }
+  return String(n);
+}
+
+function enrichForSpeech(text) {
+  let s = String(text || '');
+  let ssmlAdded = false;
+
+  // Post-ack pause
+  s = s.replace(
+    /^(Got it|Of course|Sure|Absolutely|Certainly|I understand|Thank you|Understood|Perfect|Okay)\.\s+/i,
+    (_, ack) => { ssmlAdded = true; return `${ack}.<break time='350ms'/> `; }
   );
+
+  // Em-dash / en-dash mid-thought pause: "Oh — that's hard"
+  s = s.replace(/ [—–] /g, () => { ssmlAdded = true; return `<break time='200ms'/>`; });
+
+  // Ellipsis trailing-off: "And your name is...?"
+  s = s.replace(/\.\.\./g, () => { ssmlAdded = true; return `<break time='280ms'/>`; });
+
+  // Mid-sentence comma pause (only before lowercase words — clause-internal, not list-start)
+  s = s.replace(/,(\s+)(?=[a-z])/g, (_, space) => {
+    ssmlAdded = true;
+    return `,<break time='80ms'/>${space}`;
+  });
+
+  // Phone number → spoken digits: "555-0142" → "five five five, zero one four two"
+  const digitWords = ['zero','one','two','three','four','five','six','seven','eight','nine'];
+  s = s.replace(/\b(\d{3})-(\d{3})-(\d{4})\b/g, (_, a, b, c) =>
+    [...a, ...b, ...c].map(d => digitWords[+d]).join(' ')
+  );
+  s = s.replace(/\b(\d{3})-(\d{4})\b/g, (_, a, b) =>
+    `${[...a].map(d => digitWords[+d]).join(' ')}, ${[...b].map(d => digitWords[+d]).join(' ')}`
+  );
+
+  // Dollar amounts: "$500" → "five hundred dollars"
+  s = s.replace(/\$(\d{1,3}(?:,\d{3})*)/g, (_, numStr) => {
+    const n = parseInt(numStr.replace(/,/g, ''), 10);
+    return isNaN(n) ? _ : `${numberToWords(n)} dollars`;
+  });
+
+  // Wrap in <speak> only when SSML was injected
+  if (ssmlAdded || /<break/.test(s)) s = `<speak>${s}</speak>`;
+  return s;
 }
 
 // ── Speech composition (firm-aware) ──────────────────────────────────────────
@@ -976,10 +1044,10 @@ function composeSpeakText({ session, bodyText, callSid, firmConfig, llmAck = '' 
 
   // LLM provided its own acknowledgment — next_question_text already has it baked in,
   // so return it directly instead of prepending a redundant deterministic ack.
-  if (llmAck) return addNaturalPauses(trimmed);
+  if (llmAck) return enrichForSpeech(trimmed);
 
   const ack = getNextAck(callSid || session.callSid, firmConfig);
-  return addNaturalPauses(`${ack} ${trimmed}`);
+  return enrichForSpeech(`${ack} ${trimmed}`);
 }
 
 // ── XML + TwiML ───────────────────────────────────────────────────────────────
@@ -999,7 +1067,7 @@ function gatherTwiml({ actionUrl, speakText, ttsKey, liveUrl = null, emptyCount 
     ? `<Play>${xmlEscape(`${PUBLIC_BASE_URL}/api/tts?key=${encodeURIComponent(effectiveKey)}`)}</Play>`
     : liveUrl
       ? `<Play>${xmlEscape(liveUrl)}</Play>`
-      : `<Say>${xmlEscape(speakText)}</Say>`;
+      : `<Say>${xmlEscape(speakText.replace(/<[^>]+>/g, ''))}</Say>`;
   const redirectUrl = addQueryParam(addQueryParam(actionUrl, 'empty', '1'), 'rc', Number(emptyCount) + 1);
   const hintsAttr = hints ? ` hints="${xmlEscape(hints)}"` : '';
 
@@ -1031,7 +1099,7 @@ function doneTwiml({ speakText, ttsKey, liveUrl = null, firmId = '', callSid = '
     ? `<Play>${xmlEscape(`${PUBLIC_BASE_URL}/api/tts?key=${encodeURIComponent(effectiveKey)}`)}</Play>`
     : liveUrl
       ? `<Play>${xmlEscape(liveUrl)}</Play>`
-      : `<Say>${xmlEscape(speakText)}</Say>`;
+      : `<Say>${xmlEscape(speakText.replace(/<[^>]+>/g, ''))}</Say>`;
 
   // Grace period: keep the line open for 4 seconds after Ava's goodbye so the caller
   // can add anything before we hang up. Only applies to real call endings (not errors/rate-limits).
@@ -1080,11 +1148,11 @@ async function synthesizeToDisk(text) {
           model_id: ELEVENLABS_MODEL_ID,
           enable_ssml_parsing: true,
           voice_settings: {
-            stability:        Number(process.env.ELEVEN_STABILITY      ?? 0.45),
-            similarity_boost: Number(process.env.ELEVEN_SIMILARITY     ?? 0.85),
-            style:            Number(process.env.ELEVEN_STYLE          ?? 0.20),
+            stability:        Number(process.env.ELEVEN_STABILITY      ?? 0.38),
+            similarity_boost: Number(process.env.ELEVEN_SIMILARITY     ?? 0.80),
+            style:            Number(process.env.ELEVEN_STYLE          ?? 0.38),
             use_speaker_boost: String(process.env.ELEVEN_SPEAKER_BOOST ?? 'true').toLowerCase() === 'true',
-            speed:            Number(process.env.ELEVEN_SPEED          ?? 1.05),
+            speed:            Number(process.env.ELEVEN_SPEED          ?? 0.96),
           },
         }),
         signal: controller.signal,
@@ -2217,11 +2285,11 @@ app.get('/tts-live', async (req, reply) => {
           model_id: ELEVENLABS_MODEL_ID,
           enable_ssml_parsing: true,
           voice_settings: {
-            stability:        Number(process.env.ELEVEN_STABILITY      ?? 0.45),
-            similarity_boost: Number(process.env.ELEVEN_SIMILARITY     ?? 0.85),
-            style:            Number(process.env.ELEVEN_STYLE          ?? 0.20),
+            stability:        Number(process.env.ELEVEN_STABILITY      ?? 0.38),
+            similarity_boost: Number(process.env.ELEVEN_SIMILARITY     ?? 0.80),
+            style:            Number(process.env.ELEVEN_STYLE          ?? 0.38),
             use_speaker_boost: String(process.env.ELEVEN_SPEAKER_BOOST ?? 'true').toLowerCase() === 'true',
-            speed:            Number(process.env.ELEVEN_SPEED          ?? 1.05),
+            speed:            Number(process.env.ELEVEN_SPEED          ?? 0.96),
           },
         }),
         signal: controller.signal,
@@ -3063,9 +3131,9 @@ if (RESEND_FROM_EMAIL && !RESEND_FROM_EMAIL.endsWith('@resend.dev')) {
 app.log.info({
   ELEVENLABS_MODEL_ID,
   ELEVENLABS_VOICE_ID: ELEVENLABS_VOICE_ID ? ELEVENLABS_VOICE_ID.slice(0, 8) + '...' : '(unset)',
-  ELEVEN_STABILITY:     process.env.ELEVEN_STABILITY     ?? '(default 0.55)',
-  ELEVEN_SIMILARITY:    process.env.ELEVEN_SIMILARITY    ?? '(default 0.85)',
-  ELEVEN_STYLE:         process.env.ELEVEN_STYLE         ?? '(default 0.15)',
+  ELEVEN_STABILITY:     process.env.ELEVEN_STABILITY     ?? '(default 0.38)',
+  ELEVEN_SIMILARITY:    process.env.ELEVEN_SIMILARITY    ?? '(default 0.80)',
+  ELEVEN_STYLE:         process.env.ELEVEN_STYLE         ?? '(default 0.38)',
   ELEVEN_SPEAKER_BOOST: process.env.ELEVEN_SPEAKER_BOOST ?? '(default true)',
 }, 'BOOT ElevenLabs voice config');
 

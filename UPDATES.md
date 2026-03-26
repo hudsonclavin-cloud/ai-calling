@@ -9,12 +9,31 @@
 - **Custom domain** — tryava.ai or meetava.ai not yet configured
 - **Confirmation email reliability** — was on the known problems list; no explicit fix was ever committed
 - **Non-admin sign-out** — `app-shell.tsx` uses `<Link href="/login">` for non-admin clients instead of `signOut()`, which may not fully terminate the NextAuth session
-- **Ava voice naturalness** — robotic ack bug fixed; real-world call testing still needed to confirm quality
+- **Ava voice naturalness** — SSML enrichment + voice settings tuned (2026-03-26); real-world Twilio call testing still needed to confirm audible improvement
 - **Tone setting** — toneInstruction bug fixed; firms can now actually use warm/professional/friendly
 
 ---
 
 ## Session Log (newest first)
+
+### 2026-03-26 — Ava human voice upgrade (prosody, SSML, voice settings)
+**Changed:**
+- `streaming/server.mjs`: Expanded filler phrase pool from 5 → 10 phrases (more variety between turns)
+- `streaming/server.mjs`: Replaced `addNaturalPauses()` with `enrichForSpeech()` — handles post-ack pauses, em-dash/en-dash mid-thought breaks, ellipsis trailing-off, comma clause pauses, phone number → spoken digits, and dollar amounts → words
+- `streaming/server.mjs`: Added `numberToWords()` helper for dollar amount conversion
+- `streaming/server.mjs`: Updated `<Say>` TwiML fallback in both `gatherTwiml` and `doneTwiml` to strip SSML tags before xmlEscape (prevents literal `<speak>` text on ElevenLabs outage)
+- `streaming/server.mjs`: Tuned ElevenLabs voice settings (both `synthesizeToDisk` and `/tts-live`): stability 0.45→0.38, similarity_boost 0.85→0.80, style 0.20→0.38, speed 1.05→0.96
+- `streaming/server.mjs`: Added TTS system prompt block instructing LLM to use em-dashes, ellipses, spelled-out numbers, and one-breath sentences
+- `streaming/server.mjs`: Added model comment for `eleven_flash_v2_5` as future candidate
+- `streaming/scripts/test-voice.mjs`: Synced TTS system prompt block into `buildSystemPrompt()`
+**Fixed:**
+- TTS was missing prosody cues — em-dashes and ellipses now trigger SSML breaks
+- Phone numbers and dollar amounts were spoken as raw digits/symbols
+- Voice sounded slightly fast and over-consistent — speed/stability/style tuned for warmer phone delivery
+**Still broken / needs follow-up:**
+- Real-world call testing needed to confirm audible improvement on Twilio G.711
+
+---
 
 ### 2026-03-25 — Eliminate robotic acknowledgments, fix voice naturalness (#1)
 **Changed:**
