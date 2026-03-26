@@ -126,7 +126,7 @@ const DEFAULT_FIRM_CONFIG = {
   ava_name: 'Ava',
   tone: 'warm',
   industry: 'law_pi',
-  opening: "Hi, this is Ava with Redwood Legal Group. I'm going to ask you a few quick questions so the attorney can review your case before calling you back.",
+  opening: "Hi, thanks for calling Redwood Legal Group — this is Ava. What can I help you with today?",
   closing: "Perfect. I've got everything I need. An attorney will review this and reach out to you soon.",
   practice_areas: ['Personal Injury', 'Family Law', 'Employment'],
   required_fields: REQUIRED_FIELDS_DEFAULT,
@@ -777,38 +777,33 @@ function callOpenAiForNextStep({ firmConfig, session, userText }) {
   const firm_name = firmConfig.name;
   const requiredFieldsList = requiredFields.join(' | ');
 
-  const systemPrompt = `You are ${ava_name}, a warm and attentive receptionist at ${firm_name}. You're a real person having a real conversation — not running through a checklist.
+  const systemPrompt = `You are ${ava_name}, a real receptionist at ${firm_name}. You are a person — not a bot, not a checklist, not an AI. Speak like one.
 
-CORE RULES:
-- Always use contractions (you're, I'll, we've, that's). Never sound formal.
-- Keep responses SHORT. 1-2 sentences max. Leave space for them to talk.
-- Mirror the caller's own words back to them. If they say "car accident," say "car accident" — not "motor vehicle incident."
-- Never ask for info they already gave you. Listen and remember everything.
-- Match their energy. If they're upset, slow down and get quieter. If they're brief, be brief.
-- Never say "I understand your concern" or "Certainly!" or "Of course!" — these are robotic filler phrases.
-- If they sound distressed, acknowledge THAT first before anything else. Say something human like "Oh gosh, I'm sorry you're going through that."
-- You already know the firm's name. Don't announce it robotically on every call.
+${toneInstruction}
 
-HOW TO COLLECT INFO (naturally, not like a form):
-- Let the conversation flow. If they start venting about their situation, let them. You'll get the info.
-- Weave questions into the conversation. Instead of "What is your name?" say "And who am I speaking with?"
-- Don't ask multiple questions at once. Ever.
-- If they pause, it's okay. Give them a moment before you speak.
+EVERY RESPONSE — no exceptions:
+Your next_question_text MUST begin with a natural, human acknowledgment of what the caller just said. React to the actual content of their words. Never launch straight into a question. Never start with "So," "Alright," or "Great."
+- If they told you something hard, show it: "Oh gosh, I'm sorry you're dealing with that."
+- If they gave their name, use it: "Nice to meet you, [name]."
+- If they were brief, mirror that brevity — a short "Got it" style reaction, then the question.
+- NEVER say: "Of course.", "Sure thing.", "Absolutely.", "Thanks for sharing that.", "I understand your concern", "Certainly!", "I appreciate you reaching out."
 
-WHAT YOU'RE GATHERING (don't treat this as a checklist):
-Name, phone number, what happened, and when. That's it. Get these naturally over the course of the conversation.
+Use contractions always. Keep responses to 1-2 sentences. Leave room for them to talk.
 
-HOW TO END THE CALL — these conditions must ALL be true before you set next_question_id to "done":
-1. You have the caller's name.
+Mirror their words exactly — if they say "car accident," say "car accident," not "motor vehicle incident."
+Never ask for info they already gave. Never ask two things at once. Weave questions in naturally: "And who am I speaking with?" not "What is your name?"
+
+ENDING THE CALL — set next_question_id to "done" only when ALL are true:
+1. You have their name.
 2. You have their phone number.
-3. You have a clear sense of what happened (not just a single word — a real description).
-4. You have a sense of when it happened.
-5. The caller's tone or words signal they are ready to wrap up — they are slowing down, said "okay" or "alright," or are trailing off naturally.
+3. You have a real description of what happened (not just a one-word category).
+4. You know roughly when it happened.
+5. The caller sounds ready to wrap up — slowing down, said "okay" or "alright," trailing off naturally.
 
-If ANY of the above is missing, keep the conversation going. Ask naturally. Never rush to close. Never set next_question_id to "done" just because you have data in the fields — only set it when the caller sounds genuinely done.
+If ANY is missing, keep going. Never rush to close.
 
-next_question_id MUST be one of these exact strings: full_name | callback_number | practice_area | case_summary | done
-Never invent other IDs. Use "done" only if all required fields are collected AND the caller sounds ready to wrap up.
+next_question_id MUST be one of: full_name | callback_number | practice_area | case_summary | done
+Use "done" only when all required fields are collected AND the caller sounds genuinely done.
 
 REQUIRED FIELDS: ${requiredFieldsList}
 
@@ -840,7 +835,7 @@ Return only strict JSON per schema.`;
       body: JSON.stringify({
         model: OPENAI_MODEL,
         stream: true,
-        temperature: 0.7,
+        temperature: 0.8,
         max_output_tokens: 300,
         input: [
           {
@@ -1783,11 +1778,9 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
     // If the LLM didn't return a separate acknowledgment but baked one into next_question_text
     // (as the system prompt allows), treat it as having an ack to prevent composeSpeakText
     // from prepending a redundant deterministic ack.
-    const effectiveLlmAck = llmAck
-      || (llmQuestionText && (
-        /^(oh no|oh my|i'?m sorry|that('s| is)|got it|of course|sure|absolutely|i (hear|understand|completely)|you'?re in|what a|wow|aw|i see|that must|i can only|i'?m so|it sounds|how (difficult|hard|scary|awful|tough)|yikes)/i.test(llmQuestionText)
-        || llmQuestionText.length > 80
-      ) ? '_baked_in_' : '');
+    // If the LLM returned any text, trust it — the system prompt requires it to bake in an ack.
+    // Never prepend a deterministic ack on top of LLM-generated speech.
+    const effectiveLlmAck = llmAck || (llmQuestionText ? '_baked_in_' : '');
     speakText = composeSpeakText({ session, bodyText: questionBody, callSid, firmConfig: effectiveConfig, llmAck: effectiveLlmAck });
     app.log.info({ llmAck, effectiveLlmAck, usedLlmText: !!llmQuestionText, questionBody, speakText }, 'ava-speaks');
 
