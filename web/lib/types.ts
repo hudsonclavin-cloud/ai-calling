@@ -51,6 +51,7 @@ export interface LeadSummary {
   call_duration_seconds?: number;
   recording_url?: string;
   recording_duration?: number;
+  call_summary?: string | null;
 }
 
 export interface QualityScore {
@@ -83,6 +84,7 @@ export interface LeadDetail {
   call_duration_seconds?: number;
   recording_url?: string;
   recording_duration?: number;
+  call_summary?: string | null;
 }
 
 export interface AnalyticsData {

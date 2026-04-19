@@ -1429,7 +1429,7 @@ async function sendPartialEmailNotification(session, firmConfig) {
   if (!RESEND_API_KEY) { app.log.warn({ leadId: session.leadId }, 'sendPartialEmailNotification: RESEND_API_KEY not set — skipping'); return; }
   if (!firmConfig.notification_email) { app.log.warn({ leadId: session.leadId, firmId: firmConfig.id }, 'sendPartialEmailNotification: no notification_email on firm — skipping'); return; }
   app.log.info({ leadId: session.leadId, from: RESEND_FROM_EMAIL, to: firmConfig.notification_email }, 'sendPartialEmailNotification: attempting send');
-  const { full_name, callback_number, practice_area, calling_for } = session.collected || {};
+  const { full_name, callback_number, practice_area, case_summary, calling_for } = session.collected || {};
   const name = full_name || 'Unknown Caller';
   const phone = callback_number || session.phoneFromCallerId || session.fromPhone;
   const area = practice_area || 'General';
@@ -1448,6 +1448,7 @@ async function sendPartialEmailNotification(session, firmConfig) {
       ${calling_for ? infoRow('Calling For', calling_for) : ''}
       ${infoRow('Fields Captured', capturedFields)}
     </table>
+    ${case_summary ? `<div style="margin-top:20px"><p style="margin:0 0 8px;font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#94a3b8">Partial Summary</p><blockquote style="margin:0;padding:14px 16px;background:#fffbeb;border-left:4px solid #d97706;border-radius:0 8px 8px 0;font-size:14px;color:#1e293b;line-height:1.6">${case_summary}</blockquote></div>` : ''}
     ${ctaButton('View in Dashboard', dashUrl, '#d97706')}`;
 
   const html = emailShell({ headerColor: '#d97706', headerLabel: 'Partial Intake', headerTitle: `Partial Lead — ${name}`, body, firmName: firmConfig.name });
@@ -1576,6 +1577,41 @@ async function scoreCallQuality(session) {
   }
 }
 
+async function generateCallSummary(session) {
+  if (!OPENAI_API_KEY || !session.transcript?.length) return;
+  try {
+    const transcript = session.transcript.map((e) => `${e.role}: ${e.text}`).join('\n');
+    const collected = session.collected || {};
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        temperature: 0,
+        max_tokens: 120,
+        messages: [
+          {
+            role: 'system',
+            content: 'You are summarizing a phone intake call for a law firm receptionist. Write 2-3 plain English sentences describing what happened: who called, what their situation is, and what was collected. Write in third person. Be specific — use the caller\'s actual words. Do not use bullet points or headers. Do not start with "The caller". Keep it under 80 words.',
+          },
+          {
+            role: 'user',
+            content: `Collected fields: ${JSON.stringify(collected)}\n\nTranscript:\n${transcript.slice(0, 3000)}`,
+          },
+        ],
+      }),
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    const summary = (data.choices?.[0]?.message?.content || '').trim();
+    if (!summary) return;
+    await patchLead(session.leadId, { call_summary: summary });
+    app.log.info({ leadId: session.leadId }, 'call summary saved');
+  } catch (err) {
+    app.log.warn({ err: String(err), leadId: session.leadId }, 'call summary generation failed');
+  }
+}
+
 async function generateDynamicFiller({ userText, lastQuestionText }) {
   if (!OPENAI_API_KEY) return null;
   try {
@@ -1624,13 +1660,16 @@ function fireNotifications(session, firmConfig) {
   );
   if (!session.done) return;
   sendEmailNotification(session, firmConfig)
-    .catch((err) => app.log.error({ err: String(err), leadId: session.leadId }, 'email notification failed'));
+    .catch(() => new Promise((r) => setTimeout(r, 3000))
+      .then(() => sendEmailNotification(session, firmConfig))
+      .catch((err) => app.log.error({ err: String(err), leadId: session.leadId }, 'email notification failed after retry')));
   sendSmsNotification(session, firmConfig)
     .catch((err) => app.log.warn({ err: String(err), leadId: session.leadId }, 'sms notification failed'));
   // Build a minimal lead object for the webhook payload
   const lead = { id: session.leadId, firmId: session.firmId, fromPhone: session.fromPhone, status: 'ready_for_review', ...session.collected };
   fireWebhooks(lead, session.firmId, firmConfig);
   scoreCallQuality(session); // fire-and-forget
+  generateCallSummary(session); // fire-and-forget
 }
 
 // ── Webhook delivery ──────────────────────────────────────────────────────────

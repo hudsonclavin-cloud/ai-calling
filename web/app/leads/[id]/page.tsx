@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
-import { ArrowLeft, Clock3, Mic2, ScrollText, Star } from "lucide-react";
+import { ArrowLeft, Clock3, FileText, Mic2, ScrollText, Star } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -126,6 +126,22 @@ export default async function LeadDetailPage({
                 ))}
               </div>
             )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ── Call Summary ── */}
+      {lead.call_summary && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <FileText className="h-4 w-4 text-violet-600" />
+              Call Summary
+            </CardTitle>
+            <CardDescription>AI-generated narrative of the call.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <p className="text-sm leading-relaxed text-slate-700">{lead.call_summary}</p>
           </CardContent>
         </Card>
       )}

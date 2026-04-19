@@ -60,6 +60,7 @@ function parseLead(row) {
     call_duration_seconds: row.call_duration_seconds != null ? Number(row.call_duration_seconds) : 0,
     recording_url:         row.recording_url ? String(row.recording_url) : null,
     recording_duration:    row.recording_duration != null ? Number(row.recording_duration) : null,
+    call_summary:          row.call_summary ? String(row.call_summary) : null,
   };
 }
 
@@ -247,6 +248,9 @@ export async function initSchema() {
   if (!cols.includes('recording_duration')) {
     await client.execute(`ALTER TABLE leads ADD COLUMN recording_duration INTEGER`);
   }
+  if (!cols.includes('call_summary')) {
+    await client.execute(`ALTER TABLE leads ADD COLUMN call_summary TEXT`);
+  }
 }
 
 // ── Public async API ──────────────────────────────────────────────────────────
@@ -300,7 +304,7 @@ export async function getLeadsByPhone(phone, firmId) {
 
 // Patch arbitrary whitelisted fields on a lead row
 export async function patchLead(id, updates) {
-  const allowed = ['status', 'contacted_at', 'quality_score', 'is_urgent', 'call_duration_seconds', 'recording_url', 'recording_duration'];
+  const allowed = ['status', 'contacted_at', 'quality_score', 'is_urgent', 'call_duration_seconds', 'recording_url', 'recording_duration', 'call_summary'];
   const entries = Object.entries(updates).filter(([k]) => allowed.includes(k));
   if (!entries.length) return;
   const now = nowIso();
