@@ -16,6 +16,23 @@ function getClient() {
   return _client;
 }
 
+// ── Per-call async lock ───────────────────────────────────────────────────────
+// Serializes all DB writes for a given callSid so persistSessionArtifacts and
+// patchLead calls from concurrent Twilio webhooks never race for the writer lock.
+const callWriteQueues = new Map();
+
+export function withCallLock(key, fn) {
+  if (!key) return Promise.resolve().then(fn);
+  const prev = callWriteQueues.get(key) || Promise.resolve();
+  const tail = prev.then(() => fn(), () => fn());
+  const sanitized = tail.then(() => {}, () => {});
+  callWriteQueues.set(key, sanitized);
+  sanitized.then(() => {
+    if (callWriteQueues.get(key) === sanitized) callWriteQueues.delete(key);
+  });
+  return tail;
+}
+
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 function nowIso() { return new Date().toISOString(); }
@@ -221,6 +238,23 @@ export async function initSchema() {
   `);
   await client.execute(`CREATE INDEX IF NOT EXISTS idx_whlogs_firm ON webhook_logs(firm_id, created_at DESC)`);
 
+  // email_logs table — audit trail for every Resend send attempt
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS email_logs (
+      id        TEXT PRIMARY KEY,
+      leadId    TEXT,
+      firmId    TEXT,
+      "to"      TEXT NOT NULL,
+      subject   TEXT,
+      status    TEXT NOT NULL CHECK(status IN ('sent','failed')),
+      resend_id TEXT,
+      error     TEXT,
+      sentAt    TEXT NOT NULL
+    )
+  `);
+  await client.execute(`CREATE INDEX IF NOT EXISTS idx_elogs_leadId ON email_logs(leadId)`);
+  await client.execute(`CREATE INDEX IF NOT EXISTS idx_elogs_firmId_sentAt ON email_logs(firmId, sentAt DESC)`);
+
   // Migrations: add columns that may not exist in older schemas
   const colInfo = await client.execute(`PRAGMA table_info(leads)`);
   const cols = colInfo.rows.map(r => String(r.name));
@@ -352,7 +386,17 @@ export async function getWebhookLogs(firmId, limit = 50) {
 
 // ── Efficient transactional artifact persist ──────────────────────────────────
 
-export async function persistSessionArtifacts(session, { assistantText, callerText, done }) {
+export async function logEmailAttempt({ leadId, firmId, to, subject, status, resend_id, error }) {
+  const id = `elog_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  await getClient().execute({
+    sql: `INSERT INTO email_logs (id, leadId, firmId, "to", subject, status, resend_id, error, sentAt)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [id, leadId || null, firmId || null, to, subject || null, status, resend_id || null, error || null, nowIso()],
+  });
+}
+
+export function persistSessionArtifacts(session, { assistantText, callerText, done }) {
+  return withCallLock(session.callSid || session.leadId, async () => {
   const client = getClient();
   const now = nowIso();
   const newEntries = [];
@@ -467,6 +511,7 @@ export async function persistSessionArtifacts(session, { assistantText, callerTe
     await tx.rollback();
     throw e;
   }
+  }); // end withCallLock
 }
 
 // ── One-time JSON → SQLite migration ─────────────────────────────────────────

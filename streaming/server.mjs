@@ -23,6 +23,8 @@ import {
   getLeadById,
   createWebhookLog,
   getWebhookLogs,
+  withCallLock,
+  logEmailAttempt,
 } from './db.mjs';
 
 const fetch = globalThis.fetch;
@@ -1417,6 +1419,62 @@ async function sendWelcomeEmail(firm) {
 
 // ── Email HTML builder helpers ────────────────────────────────────────────────
 
+function isSandboxFromAddress(from) {
+  return !from || /@resend\.dev$/i.test(String(from).trim());
+}
+
+async function resendPost({ from, to, subject, html }) {
+  const res = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from, to: [to], subject, html }),
+  });
+  const text = await res.text().catch(() => '');
+  if (!res.ok) {
+    const err = new Error(`Resend ${res.status}: ${text || res.statusText}`);
+    err.status = res.status;
+    throw err;
+  }
+  try { return JSON.parse(text); } catch { return {}; }
+}
+
+// Central delivery: retries with exponential backoff, logs every outcome.
+// Never throws — callers fire-and-forget safely.
+async function sendEmailWithRetry({ leadId, firmId, to, subject, html }) {
+  if (!RESEND_API_KEY) {
+    app.log.warn({ leadId, to }, 'email-skip: RESEND_API_KEY not set');
+    await logEmailAttempt({ leadId, firmId, to: to || '(none)', subject, status: 'failed', error: 'RESEND_API_KEY not set' }).catch(() => {});
+    return { ok: false, error: 'no_api_key' };
+  }
+  if (!to) {
+    app.log.warn({ leadId }, 'email-skip: no recipient');
+    await logEmailAttempt({ leadId, firmId, to: '(none)', subject, status: 'failed', error: 'no recipient' }).catch(() => {});
+    return { ok: false, error: 'no_recipient' };
+  }
+  const from = RESEND_FROM_EMAIL || 'onboarding@resend.dev';
+  if (isSandboxFromAddress(from)) {
+    app.log.warn({ leadId, to, from }, 'email-warn: RESEND_FROM_EMAIL is the Resend sandbox — deliveries to addresses other than the Resend account owner will be silently dropped. Set RESEND_FROM_EMAIL to an address on a verified domain.');
+  }
+  const delaysMs = [0, 1000, 4000];
+  let lastErr;
+  for (let i = 0; i < delaysMs.length; i++) {
+    if (delaysMs[i]) await new Promise((r) => setTimeout(r, delaysMs[i]));
+    try {
+      const data = await resendPost({ from, to, subject, html });
+      await logEmailAttempt({ leadId, firmId, to, subject, status: 'sent', resend_id: data.id }).catch((e) => app.log.warn({ err: String(e) }, 'email-log-insert-failed'));
+      app.log.info({ id: data.id, leadId, to, attempt: i + 1 }, 'email-sent');
+      return { ok: true, id: data.id };
+    } catch (err) {
+      lastErr = err;
+      if (err.status && err.status >= 400 && err.status < 500 && err.status !== 429) break;
+      app.log.warn({ err: err.message, leadId, to, attempt: i + 1 }, 'email-attempt-failed');
+    }
+  }
+  await logEmailAttempt({ leadId, firmId, to, subject, status: 'failed', error: lastErr?.message || 'unknown' }).catch((e) => app.log.warn({ err: String(e) }, 'email-log-insert-failed'));
+  app.log.error({ err: lastErr?.message, leadId, to }, 'email-failed-after-retries');
+  return { ok: false, error: lastErr?.message };
+}
+
 function emailShell({ headerColor, headerLabel, headerTitle, body, firmName }) {
   return `<!DOCTYPE html>
 <html lang="en">
@@ -1486,19 +1544,13 @@ async function sendEmailNotification(session, firmConfig) {
     firmName: firmConfig.name,
   });
 
-  try {
-    const res = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from: RESEND_FROM_EMAIL, to: [firmConfig.notification_email], subject: `New lead — ${name} (${area})`, html }),
-    });
-    if (!res.ok) { const e = await res.text().catch(() => ''); throw new Error(`Resend error ${res.status}: ${e}`); }
-    const data = await res.json().catch(() => ({}));
-    app.log.info({ id: data.id, leadId: session.leadId, to: firmConfig.notification_email }, 'email-sent');
-  } catch (err) {
-    app.log.error({ err: err.message, leadId: session.leadId, to: firmConfig.notification_email }, 'email-failed');
-    throw err;
-  }
+  await sendEmailWithRetry({
+    leadId: session.leadId,
+    firmId: session.firmId,
+    to: firmConfig.notification_email,
+    subject: `New lead — ${name} (${area})`,
+    html,
+  });
 }
 
 async function sendPartialEmailNotification(session, firmConfig) {
@@ -1529,19 +1581,13 @@ async function sendPartialEmailNotification(session, firmConfig) {
 
   const html = emailShell({ headerColor: '#d97706', headerLabel: 'Partial Intake', headerTitle: `Partial Lead — ${name}`, body, firmName: firmConfig.name });
 
-  try {
-    const res = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from: RESEND_FROM_EMAIL, to: [firmConfig.notification_email], subject: `[Partial] Lead from ${name} (${area})`, html }),
-    });
-    if (!res.ok) { const e = await res.text().catch(() => ''); throw new Error(`Resend error ${res.status}: ${e}`); }
-    const data = await res.json().catch(() => ({}));
-    app.log.info({ id: data.id, leadId: session.leadId, to: firmConfig.notification_email }, 'email-sent');
-  } catch (err) {
-    app.log.error({ err: err.message, leadId: session.leadId, to: firmConfig.notification_email }, 'email-failed');
-    throw err;
-  }
+  await sendEmailWithRetry({
+    leadId: session.leadId,
+    firmId: session.firmId,
+    to: firmConfig.notification_email,
+    subject: `[Partial] Lead from ${name} (${area})`,
+    html,
+  });
 }
 
 async function sendVoicemailEmailNotification({ fromPhone, transcript, firmConfig, leadId }) {
@@ -1736,9 +1782,7 @@ function fireNotifications(session, firmConfig) {
   );
   if (!session.done) return;
   sendEmailNotification(session, firmConfig)
-    .catch(() => new Promise((r) => setTimeout(r, 3000))
-      .then(() => sendEmailNotification(session, firmConfig))
-      .catch((err) => app.log.error({ err: String(err), leadId: session.leadId }, 'email notification failed after retry')));
+    .catch((err) => app.log.error({ err: String(err), leadId: session.leadId }, 'email notification unexpected failure'));
   sendSmsNotification(session, firmConfig)
     .catch((err) => app.log.warn({ err: String(err), leadId: session.leadId }, 'sms notification failed'));
   // Build a minimal lead object for the webhook payload
@@ -2351,6 +2395,7 @@ app.get('/api/leads', async (req, reply) => {
   if (!firmId && !isAdmin) return reply.code(400).send({ error: 'firmId required' });
   const leads = await loadLeads(firmId || undefined);
   leads.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+  reply.header('Cache-Control', 'no-store, must-revalidate');
   return { data: leads };
 });
 
@@ -2842,42 +2887,46 @@ app.post('/call-status', async (req, reply) => {
 
   if (callStatus !== 'completed' || !callSid) return reply.code(204).send();
 
-  const sessions = await loadSessions();
-  const session = sessions[callSid];
+  // Acknowledge Twilio immediately — never let Twilio time out waiting on our DB writes.
+  reply.code(204).send();
 
-  if (!session) return reply.code(204).send();
+  withCallLock(callSid, async () => {
+    // Reload session inside the lock so we see the final state after any in-flight /twiml turn.
+    const sessions = await loadSessions();
+    const session = sessions[callSid];
+    if (!session) return;
 
-  // Always save call duration if available
-  if (callDuration > 0 && session.leadId) {
-    patchLead(session.leadId, { call_duration_seconds: callDuration })
-      .catch((err) => app.log.warn({ err: String(err), callSid }, 'call-status: duration patch failed'));
-  }
+    // Duration patch is now inside the lock — can't race persistSessionArtifacts.
+    if (callDuration > 0 && session.leadId) {
+      try {
+        await patchLead(session.leadId, { call_duration_seconds: callDuration });
+      } catch (err) {
+        app.log.warn({ err: String(err), callSid }, 'call-status: duration patch failed');
+      }
+    }
 
-  // Session already marked done — full lead already saved, just clean up
-  if (session.done) {
-    deleteSession(callSid).catch((err) => app.log.warn({ err: String(err), callSid }, 'call-status: session delete failed'));
-    return reply.code(204).send();
-  }
+    // Session already marked done — full lead already saved by the last /twiml turn, just clean up.
+    if (session.done) {
+      await deleteSession(callSid).catch((err) => app.log.warn({ err: String(err), callSid }, 'call-status: session delete failed'));
+      return;
+    }
 
-  // Caller hung up before intake completed — persist as partial lead
-  app.log.info({ callSid, leadId: session.leadId, callDuration }, 'call-status: saving partial lead');
+    // Caller hung up before intake completed — persist as partial lead.
+    app.log.info({ callSid, leadId: session.leadId, callDuration }, 'call-status: saving partial lead');
+    try {
+      await persistSessionArtifacts(session, { assistantText: '', callerText: '', done: false });
+      await patchLead(session.leadId, { status: 'partial' });
+      const firmConfig = await loadFirmConfig(session.firmId || 'firm_default');
+      const partialLead = { id: session.leadId, firmId: session.firmId, fromPhone: session.fromPhone, status: 'partial', ...session.collected };
+      sendPartialEmailNotification(session, firmConfig)
+        .catch((err) => app.log.warn({ err: String(err), leadId: session.leadId }, 'partial email unexpected failure'));
+      fireWebhooks(partialLead, session.firmId, firmConfig);
+    } catch (err) {
+      app.log.warn({ err: String(err), callSid }, 'call-status: partial lead save failed');
+    }
 
-  try {
-    await persistSessionArtifacts(session, { assistantText: '', callerText: '', done: false });
-    await patchLead(session.leadId, { status: 'partial' });
-
-    const firmConfig = await loadFirmConfig(session.firmId || 'firm_default');
-    sendPartialEmailNotification(session, firmConfig)
-      .catch((err) => app.log.warn({ err: String(err), leadId: session.leadId }, 'partial email failed'));
-    const partialLead = { id: session.leadId, firmId: session.firmId, fromPhone: session.fromPhone, status: 'partial', ...session.collected };
-    fireWebhooks(partialLead, session.firmId, firmConfig);
-  } catch (err) {
-    app.log.warn({ err: String(err), callSid }, 'call-status: partial lead save failed');
-  }
-
-  deleteSession(callSid).catch((err) => app.log.warn({ err: String(err), callSid }, 'call-status: session delete failed'));
-
-  return reply.code(204).send();
+    await deleteSession(callSid).catch((err) => app.log.warn({ err: String(err), callSid }, 'call-status: session delete failed'));
+  }).catch((err) => app.log.error({ err: String(err), callSid }, 'call-status: lock body failed'));
 });
 
 // POST /recording-status — Twilio recording status callback; saves recording URL to lead
@@ -2888,21 +2937,16 @@ app.post('/recording-status', async (req, reply) => {
 
   if (!callSid || !recordingUrl) return reply.code(204).send();
 
-  try {
+  reply.code(204).send();
+
+  withCallLock(callSid, async () => {
     const sessions = await loadSessions();
     const session = sessions[callSid];
     if (session?.leadId) {
-      await patchLead(session.leadId, {
-        recording_url: recordingUrl,
-        recording_duration: duration,
-      });
+      await patchLead(session.leadId, { recording_url: recordingUrl, recording_duration: duration });
       app.log.info({ callSid, leadId: session.leadId, duration }, 'recording-saved');
     }
-  } catch (err) {
-    app.log.warn({ err: String(err), callSid }, 'recording-status handler failed');
-  }
-
-  return reply.code(204).send();
+  }).catch((err) => app.log.warn({ err: String(err), callSid }, 'recording-status handler failed'));
 });
 
 // GET /api/calls/:id/recording — proxy Twilio recording audio to client
