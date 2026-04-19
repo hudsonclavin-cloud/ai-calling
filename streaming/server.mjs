@@ -118,6 +118,22 @@ const FILLER_PHRASES = [
   'Hold on just a moment.',
   'Okay.',
   'Sure, one sec.',
+  "Let me look that up.",
+  "Hold tight.",
+  "Give me just a second.",
+  "One sec, let me check.",
+  "Mm, let me see.",
+  "Hang on just a moment.",
+  "Bear with me one sec.",
+  "Let me pull that up.",
+  "Okay, just a moment.",
+  "Mm-hm, one second.",
+  "Let me make a note of that.",
+  "Right, one moment.",
+  "Hold on, let me check.",
+  "Okay, give me just a sec.",
+  "Let me find that for you.",
+  "Just a moment.",
 ];
 let fillerKeys = []; // populated at boot via synthesizeToDisk
 
@@ -145,7 +161,7 @@ const DEFAULT_FIRM_CONFIG = {
     case_summary: "Briefly — what happened and what kind of help are you looking for?",
     final_clarify: "One last thing — anything else the attorney should know?",
   },
-  acknowledgments: ['Of course.', 'Sure thing.', 'Absolutely.', 'Thanks.', 'Got it.'],
+  acknowledgments: ['Got it.', 'Makes sense.', 'Okay.', 'Right.', 'Mm-hm.', 'I hear you.', 'Understood.'],
   max_questions: 8,
   max_reprompts: 2,
   office_hours: 'Mon-Fri 8:00 AM - 6:00 PM',
@@ -239,10 +255,10 @@ function peekNextAck(callSid, firmConfig) {
 
 function getEarlyExitPhrase(firmConfig) {
   const phrases = [
-    firmConfig.early_exit_phrases?.[0] || "Of course — no problem at all. Whenever you're ready, we're here. Take care!",
-    firmConfig.early_exit_phrases?.[1] || "Absolutely — no worries at all. Feel free to call back anytime. Take care!",
-    firmConfig.early_exit_phrases?.[2] || "Of course — I completely understand. We're here whenever you need us. Have a great day!",
-    firmConfig.early_exit_phrases?.[3] || "Sure thing — no problem at all. Just give us a call whenever you're ready. Take care!",
+    firmConfig.early_exit_phrases?.[0] || "No problem — call us back anytime. Take care!",
+    firmConfig.early_exit_phrases?.[1] || "That's totally fine. We're here whenever you need us.",
+    firmConfig.early_exit_phrases?.[2] || "Not a problem at all. Just give us a ring when you're ready.",
+    firmConfig.early_exit_phrases?.[3] || "We'll be here. Take care!",
   ];
   return phrases[Math.floor(Math.random() * phrases.length)];
 }
@@ -251,15 +267,15 @@ function getRepromptPhrases(firmConfig) {
   if (firmConfig.reprompt_phrases) return firmConfig.reprompt_phrases;
   return [
     null,
-    "I'm still here — I just didn't quite catch that. {QUESTION}",
-    "Sorry about that — could you try one more time? {QUESTION}",
+    "Let me make sure I got that right — {QUESTION}",
+    "Could you say that one more time? {QUESTION}",
   ];
 }
 
 function getRepromptClosePhrase(firmConfig, closing) {
   const phrases = [
-    firmConfig.reprompt_phrases?.[3] || `No worries at all — I've noted your call. ${closing}`,
-    firmConfig.reprompt_phrases?.[4] || `That's completely okay — I'll make sure someone reaches out. ${closing}`,
+    firmConfig.reprompt_phrases?.[3] || `No worries — I've got your call noted. ${closing}`,
+    firmConfig.reprompt_phrases?.[4] || `That's okay — I'll make sure someone reaches out. ${closing}`,
   ];
   return phrases[Math.floor(Math.random() * phrases.length)];
 }
@@ -581,7 +597,9 @@ function detectUrgency(text) {
 
 function detectEarlyExit(text) {
   const lower = String(text || '').toLowerCase();
-  return /\b(never\s*mind|nevermind|forget it|don'?t worry|i('m| am) (good|fine|all set|okay)|i('ll| will) call back|i'?ll try again|goodbye|good\s*bye|i'?m done|no thanks|not interested|cancel|i changed my mind|scratch that|disregard)\b/.test(lower);
+  // Only fire on unambiguous, explicit exit signals — never on colloquial phrases like
+  // "I'm fine" or "don't worry" which callers say mid-conversation without meaning to hang up.
+  return /\b(never\s*mind|nevermind|forget it|i('ll| will) call back|i'?ll try again|good\s*bye|i'?m done|no thanks|not interested|i changed my mind|scratch that|disregard|i('ll| will) call back later|i don'?t need help|i'?m (all set|good for now)|end (the )?call)\b/.test(lower);
 }
 
 function isLikelyName(value, sourceText) {
@@ -854,7 +872,7 @@ Return only strict JSON per schema.`;
       body: JSON.stringify({
         model: OPENAI_MODEL,
         stream: true,
-        temperature: 0.8,
+        temperature: 0.95,
         max_output_tokens: 300,
         input: [
           {
@@ -1085,14 +1103,16 @@ function gatherTwiml({ actionUrl, speakText, ttsKey, liveUrl = null, emptyCount 
 </Response>`;
 }
 
-function voicemailTwiml({ firmId, callSid, fromPhone, firmConfig }) {
-  const msg = xmlEscape(
-    `Hi, you've reached ${firmConfig?.name || 'our office'}. Please leave your name, phone number, and a brief message after the tone and we'll get back to you shortly.`
-  );
+async function voicemailTwiml({ firmId, callSid, fromPhone, firmConfig }) {
+  const rawMsg = `Hi, you've reached ${firmConfig?.name || 'our office'}. Please leave your name, phone number, and a brief message after the tone and we'll get back to you shortly.`;
   const actionUrl = `${PUBLIC_BASE_URL}/voicemail-recording?firmId=${encodeURIComponent(firmId)}&callSid=${encodeURIComponent(callSid)}&from=${encodeURIComponent(fromPhone)}`;
+  const ttsKey = await synthesizeToDisk(rawMsg).catch(() => null);
+  const speakerNode = ttsKey
+    ? `<Play>${xmlEscape(`${PUBLIC_BASE_URL}/api/tts?key=${encodeURIComponent(ttsKey)}`)}</Play>`
+    : `<Say voice="alice">${xmlEscape(rawMsg)}</Say>`;
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="alice">${msg}</Say>
+  ${speakerNode}
   <Record maxLength="60" transcribe="false" action="${xmlEscape(actionUrl)}" method="POST" playBeep="true"/>
   <Hangup/>
 </Response>`;
@@ -1132,7 +1152,7 @@ async function synthesizeToDisk(text) {
   const safeText = truncateForSpeech(text, MAX_TTS_CHARS);
   if (!safeText || !ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) return null;
 
-  const voiceSettingsKey = `${process.env.ELEVEN_STABILITY ?? '0.20'}|${process.env.ELEVEN_SIMILARITY ?? '0.75'}|${process.env.ELEVEN_STYLE ?? '0.35'}|${process.env.ELEVEN_SPEAKER_BOOST ?? 'true'}|${process.env.ELEVEN_SPEED ?? '1.15'}`;
+  const voiceSettingsKey = `${process.env.ELEVEN_STABILITY ?? '0.40'}|${process.env.ELEVEN_SIMILARITY ?? '0.75'}|${process.env.ELEVEN_STYLE ?? '0.35'}|${process.env.ELEVEN_SPEAKER_BOOST ?? 'true'}|${process.env.ELEVEN_SPEED ?? '1.10'}`;
   const key = sha1(`${ELEVENLABS_VOICE_ID}|${ELEVENLABS_MODEL_ID}|${voiceSettingsKey}|${safeText}`);
   const filePath = path.join(AUDIO_DIR, `${key}.mp3`);
   const already = await fs.readFile(filePath).catch(() => null);
@@ -1153,11 +1173,11 @@ async function synthesizeToDisk(text) {
           model_id: ELEVENLABS_MODEL_ID,
           enable_ssml_parsing: true,
           voice_settings: {
-            stability:        Number(process.env.ELEVEN_STABILITY      ?? 0.38),
-            similarity_boost: Number(process.env.ELEVEN_SIMILARITY     ?? 0.80),
-            style:            Number(process.env.ELEVEN_STYLE          ?? 0.38),
+            stability:        Number(process.env.ELEVEN_STABILITY      ?? 0.40),
+            similarity_boost: Number(process.env.ELEVEN_SIMILARITY     ?? 0.75),
+            style:            Number(process.env.ELEVEN_STYLE          ?? 0.35),
             use_speaker_boost: String(process.env.ELEVEN_SPEAKER_BOOST ?? 'true').toLowerCase() === 'true',
-            speed:            Number(process.env.ELEVEN_SPEED          ?? 0.96),
+            speed:            Number(process.env.ELEVEN_SPEED          ?? 1.10),
           },
         }),
         signal: controller.signal,
@@ -1689,6 +1709,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   // Early exit detection — caller wants to end the call before intake is complete
   if (callerText && detectEarlyExit(callerText)) {
     session.done = true;
+    sessionAckIndex.delete(callSid);
     const exitText = getEarlyExitPhrase(firmConfig);
     appendTranscript(session, 'assistant', exitText);
     sessions[callSid] = session;
@@ -2302,7 +2323,7 @@ app.get('/tts-live', async (req, reply) => {
   if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) return reply.code(503).send('TTS unavailable');
 
   const safeText = truncateForSpeech(text, MAX_TTS_CHARS);
-  const voiceSettingsKey = `${process.env.ELEVEN_STABILITY ?? '0.20'}|${process.env.ELEVEN_SIMILARITY ?? '0.75'}|${process.env.ELEVEN_STYLE ?? '0.35'}|${process.env.ELEVEN_SPEAKER_BOOST ?? 'true'}|${process.env.ELEVEN_SPEED ?? '1.15'}`;
+  const voiceSettingsKey = `${process.env.ELEVEN_STABILITY ?? '0.40'}|${process.env.ELEVEN_SIMILARITY ?? '0.75'}|${process.env.ELEVEN_STYLE ?? '0.35'}|${process.env.ELEVEN_SPEAKER_BOOST ?? 'true'}|${process.env.ELEVEN_SPEED ?? '1.10'}`;
   const key = sha1(`${ELEVENLABS_VOICE_ID}|${ELEVENLABS_MODEL_ID}|${voiceSettingsKey}|${safeText}`);
   const filePath = path.join(AUDIO_DIR, `${key}.mp3`);
 
@@ -2333,11 +2354,11 @@ app.get('/tts-live', async (req, reply) => {
           model_id: ELEVENLABS_MODEL_ID,
           enable_ssml_parsing: true,
           voice_settings: {
-            stability:        Number(process.env.ELEVEN_STABILITY      ?? 0.38),
-            similarity_boost: Number(process.env.ELEVEN_SIMILARITY     ?? 0.80),
-            style:            Number(process.env.ELEVEN_STYLE          ?? 0.38),
+            stability:        Number(process.env.ELEVEN_STABILITY      ?? 0.40),
+            similarity_boost: Number(process.env.ELEVEN_SIMILARITY     ?? 0.75),
+            style:            Number(process.env.ELEVEN_STYLE          ?? 0.35),
             use_speaker_boost: String(process.env.ELEVEN_SPEAKER_BOOST ?? 'true').toLowerCase() === 'true',
-            speed:            Number(process.env.ELEVEN_SPEED          ?? 0.96),
+            speed:            Number(process.env.ELEVEN_SPEED          ?? 1.10),
           },
         }),
         signal: controller.signal,
@@ -2420,7 +2441,7 @@ app.post('/twiml', async (req, reply) => {
   if (answeredBy === 'machine_start' || answeredBy === 'fax') {
     const vmConfig = await loadFirmConfig(firmId);
     reply.header('Content-Type', 'text/xml');
-    return reply.send(voicemailTwiml({ firmId, callSid, fromPhone, firmConfig: vmConfig }));
+    return reply.send(await voicemailTwiml({ firmId, callSid, fromPhone, firmConfig: vmConfig }));
   }
 
   try {
