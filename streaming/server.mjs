@@ -1482,12 +1482,12 @@ async function sendEmailWithRetry({ leadId, firmId, to, subject, html }) {
       lastErr = err;
       if (err.status && err.status >= 400 && err.status < 500 && err.status !== 429) break;
       app.log.warn({ err, leadId, to, attempt: i + 1 }, 'email-attempt-failed');
-      console.warn('email-attempt-failed', err);
+      console.error('[Email] Resend error:', err);
     }
   }
   await logEmailAttempt({ leadId, firmId, to, subject, status: 'failed', error: lastErr?.message || 'unknown' }).catch((e) => app.log.warn({ err: String(e) }, 'email-log-insert-failed'));
   app.log.error({ err: lastErr, leadId, to }, 'email-failed-after-retries');
-  console.error('email-failed-after-retries', lastErr);
+  console.error('[Email] Resend error:', lastErr);
   return { ok: false, error: lastErr?.message };
 }
 
@@ -1529,11 +1529,12 @@ async function sendEmailNotification(session, firmConfig) {
   const notificationEmail = String(firmConfig?.notification_email || '').trim();
   if (!RESEND_API_KEY) {
     app.log.warn({ leadId: session.leadId }, 'sendEmailNotification: RESEND_API_KEY not set — skipping');
+    console.warn('[Email] Skipping — RESEND_API_KEY not set');
     return;
   }
   if (!notificationEmail) {
     app.log.warn({ leadId: session.leadId, firmId: firmConfig?.id }, 'sendEmailNotification: no notification_email on firm — skipping');
-    console.warn('sendEmailNotification: no notification_email on firm', { leadId: session.leadId, firmId: firmConfig?.id });
+    console.warn('[Email] Skipping — notification_email not set for firm:', firmConfig?.id);
     return;
   }
   app.log.info({ leadId: session.leadId, from: RESEND_FROM_EMAIL, to: notificationEmail }, 'sendEmailNotification: attempting send');
@@ -1807,13 +1808,13 @@ async function fireNotifications(session, firmConfig) {
   if (!session.done) return;
   if (!RESEND_API_KEY) {
     app.log.warn({ leadId: session.leadId }, 'fireNotifications: RESEND_API_KEY not set — email notification will be skipped');
-    console.warn('fireNotifications: RESEND_API_KEY not set — email notification will be skipped', { leadId: session.leadId });
+    console.warn('[Email] Skipping — RESEND_API_KEY not set');
   }
   try {
     await sendEmailNotification(session, firmConfig);
   } catch (err) {
     app.log.error({ err, leadId: session.leadId }, 'email notification unexpected failure');
-    console.error('email notification unexpected failure', err);
+    console.error('[Email] Resend error:', err);
   }
   sendSmsNotification(session, firmConfig)
     .catch((err) => app.log.warn({ err: String(err), leadId: session.leadId }, 'sms notification failed'));
