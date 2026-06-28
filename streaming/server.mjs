@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import Fastify from 'fastify';
 import formbody from '@fastify/formbody';
+import { twilioSignaturePreHandler } from './lib/twilio-signature.mjs';
 import Stripe from 'stripe';
 import crypto from 'node:crypto';
 import { Readable, PassThrough } from 'node:stream';
@@ -2567,7 +2568,7 @@ app.get('/tts-live', async (req, reply) => {
   return reply.send(passthrough);
 });
 
-app.post('/twiml', async (req, reply) => {
+app.post('/twiml', { preHandler: twilioSignaturePreHandler }, async (req, reply) => {
   const tTwimlStart = Date.now();
   const callSid = String(req.body?.CallSid || '').trim();
   const fromPhone = normalizePhone(req.body?.From);
@@ -2775,7 +2776,7 @@ app.post('/twiml', async (req, reply) => {
 
 // POST /twiml-result — Twilio follows this redirect after the filler phrase plays.
 // By this point, runNextStepController has had ~1-2s head start; we just await and return real TwiML.
-app.post('/twiml-result', async (req, reply) => {
+app.post('/twiml-result', { preHandler: twilioSignaturePreHandler }, async (req, reply) => {
   const callSid = String(req.body?.CallSid || req.query?.callSid || '').trim();
   const firmId = String(req.query?.firmId || 'firm_default').trim();
 
@@ -2836,7 +2837,7 @@ app.post('/twiml-result', async (req, reply) => {
 // POST /twiml-grace — grace period after Ava's closing line.
 // Twilio holds the line for 4 seconds and POSTs here whether or not the caller speaks.
 // Speech → un-done the session and continue. Silence → hang up.
-app.post('/twiml-grace', async (req, reply) => {
+app.post('/twiml-grace', { preHandler: twilioSignaturePreHandler }, async (req, reply) => {
   const callSid = String(req.body?.CallSid || req.query?.callSid || '').trim();
   const firmId = String(req.query?.firmId || 'firm_default').trim();
   const speech = String(req.body?.SpeechResult || '').trim();
@@ -2880,7 +2881,7 @@ app.post('/twiml-grace', async (req, reply) => {
 });
 
 // POST /call-status — Twilio status callback; saves partial leads on hangup
-app.post('/call-status', async (req, reply) => {
+app.post('/call-status', { preHandler: twilioSignaturePreHandler }, async (req, reply) => {
   const callSid = String(req.body?.CallSid || '').trim();
   const callStatus = String(req.body?.CallStatus || '').trim();
   const callDuration = parseInt(req.body?.CallDuration || '0', 10);
@@ -2930,7 +2931,7 @@ app.post('/call-status', async (req, reply) => {
 });
 
 // POST /recording-status — Twilio recording status callback; saves recording URL to lead
-app.post('/recording-status', async (req, reply) => {
+app.post('/recording-status', { preHandler: twilioSignaturePreHandler }, async (req, reply) => {
   const callSid = String(req.body?.CallSid || '').trim();
   const recordingUrl = String(req.body?.RecordingUrl || '').trim();
   const duration = parseInt(req.body?.RecordingDuration || '0', 10);
@@ -2980,7 +2981,7 @@ app.get('/api/calls/:id/recording', async (req, reply) => {
 });
 
 // POST /voicemail-recording — Twilio Record action callback; transcribes + saves voicemail lead
-app.post('/voicemail-recording', async (req, reply) => {
+app.post('/voicemail-recording', { preHandler: twilioSignaturePreHandler }, async (req, reply) => {
   reply.header('Content-Type', 'text/xml');
   const emptyResponse = `<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`;
 
