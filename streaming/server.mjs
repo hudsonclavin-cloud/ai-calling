@@ -2393,7 +2393,7 @@ app.get('/api/calls/:id/transcript', async (req, reply) => {
 app.get('/api/leads', async (req, reply) => {
   const firmId = String(req.query?.firmId || '').trim();
   const isAdmin = ADMIN_API_KEY && req.headers?.['x-admin-key'] === ADMIN_API_KEY;
-  if (!firmId && !isAdmin) return reply.code(400).send({ error: 'firmId required' });
+  if ((!firmId || firmId === '') && !isAdmin) return reply.code(400).send({ error: 'firmId required and must be non-empty' });
   const leads = await loadLeads(firmId || undefined);
   leads.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
   reply.header('Cache-Control', 'no-store, must-revalidate');
