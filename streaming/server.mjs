@@ -3352,6 +3352,8 @@ app.post('/api/billing/webhook', async (req, reply) => {
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 
+const isMain = process.argv[1] === fileURLToPath(import.meta.url);
+
 app.log.info(`BOOT PORT=${PORT} PUBLIC_BASE_URL=${PUBLIC_BASE_URL}`);
 app.log.info({
   RESEND_API_KEY_prefix:     RESEND_API_KEY     ? RESEND_API_KEY.slice(0, 4)     : '(unset)',
@@ -3375,28 +3377,32 @@ app.log.info({
   ELEVEN_SPEAKER_BOOST: process.env.ELEVEN_SPEAKER_BOOST ?? '(default true)',
 }, 'BOOT ElevenLabs voice config');
 
-try {
-  await app.listen({ port: PORT, host: '0.0.0.0' });
-  app.log.info(`HTTP listening on http://127.0.0.1:${PORT}`);
+if (isMain) {
+  try {
+    await app.listen({ port: PORT, host: '0.0.0.0' });
+    app.log.info(`HTTP listening on http://127.0.0.1:${PORT}`);
 
-  // Ensure audio directory exists before prewarm (critical on Railway — must be under volume mount)
-  await fs.mkdir(AUDIO_DIR, { recursive: true });
-  console.log('AUDIO_DIR ready:', AUDIO_DIR);
-  if (!AUDIO_DIR.startsWith('/app/data') && !AUDIO_DIR.startsWith('/data')) {
-    console.warn('WARNING: AUDIO_DIR is not under a Railway volume mount — cached audio will be lost on redeploy:', AUDIO_DIR);
+    // Ensure audio directory exists before prewarm (critical on Railway — must be under volume mount)
+    await fs.mkdir(AUDIO_DIR, { recursive: true });
+    console.log('AUDIO_DIR ready:', AUDIO_DIR);
+    if (!AUDIO_DIR.startsWith('/app/data') && !AUDIO_DIR.startsWith('/data')) {
+      console.warn('WARNING: AUDIO_DIR is not under a Railway volume mount — cached audio will be lost on redeploy:', AUDIO_DIR);
+    }
+
+    // Pre-synthesize hold phrase — must be ready before any call comes in
+    holdKey = await synthesizeToDisk(HOLD_PHRASE);
+    console.log('hold-phrase ready:', holdKey ? `OK (${holdKey.slice(0, 8)})` : 'FAILED — <Say> still used as last resort');
+
+    // Pre-synthesize filler phrases in parallel — ready before any call comes in
+    fillerKeys = await Promise.all(FILLER_PHRASES.map((p) => synthesizeToDisk(p).catch(() => null)));
+    const fillerReady = fillerKeys.filter(Boolean).length;
+    console.log(`filler-phrases ready: ${fillerReady}/${FILLER_PHRASES.length}`);
+
+    prewarmTtsCache().catch((err) => app.log.warn({ err: String(err) }, 'TTS prewarm error'));
+  } catch (err) {
+    app.log.error({ err: String(err) }, 'Server failed to start');
+    process.exit(1);
   }
-
-  // Pre-synthesize hold phrase — must be ready before any call comes in
-  holdKey = await synthesizeToDisk(HOLD_PHRASE);
-  console.log('hold-phrase ready:', holdKey ? `OK (${holdKey.slice(0, 8)})` : 'FAILED — <Say> still used as last resort');
-
-  // Pre-synthesize filler phrases in parallel — ready before any call comes in
-  fillerKeys = await Promise.all(FILLER_PHRASES.map((p) => synthesizeToDisk(p).catch(() => null)));
-  const fillerReady = fillerKeys.filter(Boolean).length;
-  console.log(`filler-phrases ready: ${fillerReady}/${FILLER_PHRASES.length}`);
-
-  prewarmTtsCache().catch((err) => app.log.warn({ err: String(err) }, 'TTS prewarm error'));
-} catch (err) {
-  app.log.error({ err: String(err) }, 'Server failed to start');
-  process.exit(1);
 }
+
+export { app };
