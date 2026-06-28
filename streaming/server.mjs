@@ -2907,7 +2907,8 @@ app.post('/call-status', { preHandler: twilioSignaturePreHandler }, async (req, 
     }
 
     // Session already marked done — full lead already saved by the last /twiml turn, just clean up.
-    if (session.done) {
+    if (session.done === true) {
+      await persistSessionArtifacts(session, { assistantText: '', callerText: '', done: true });
       await deleteSession(callSid).catch((err) => app.log.warn({ err: String(err), callSid }, 'call-status: session delete failed'));
       return;
     }
