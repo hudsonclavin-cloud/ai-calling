@@ -184,7 +184,6 @@ const DEFAULT_FIRM_CONFIG = {
   timezone: 'America/New_York',
   disclaimer: 'This call is informational only and does not create an attorney-client relationship.',
   intake_rules: 'Collect caller contact details and a short case summary. Escalate emergency threats to 911 guidance.',
-  notification_email: '',
   notification_phone: '',
   greeting_style: 'casual',
   custom_intro: null,
@@ -410,17 +409,21 @@ async function loadFirmConfig(firmId) {
   const id = String(firmId || 'firm_default').trim();
   const filePath = path.join(FIRMS_DIR, `${id}.json`);
   const raw = await readJson(filePath, null);
+  const defaultRaw = id === 'firm_default'
+    ? raw
+    : await readJson(path.join(FIRMS_DIR, 'firm_default.json'), null);
+  const baseConfig = defaultRaw ? { ...DEFAULT_FIRM_CONFIG, ...defaultRaw } : { ...DEFAULT_FIRM_CONFIG };
   if (!raw) {
     app.log.warn(`Firm config not found for "${id}", using default`);
-    return { ...DEFAULT_FIRM_CONFIG };
+    return { ...baseConfig };
   }
   // Merge with defaults so missing keys always have a safe value
-  const industry = raw.industry || DEFAULT_FIRM_CONFIG.industry;
+  const industry = raw.industry || baseConfig.industry || DEFAULT_FIRM_CONFIG.industry;
   return {
-    ...DEFAULT_FIRM_CONFIG,
+    ...baseConfig,
     ...raw,
-    question_overrides: { ...DEFAULT_FIRM_CONFIG.question_overrides, ...(raw.question_overrides || {}) },
-    acknowledgments: raw.acknowledgments?.length ? raw.acknowledgments : DEFAULT_FIRM_CONFIG.acknowledgments,
+    question_overrides: { ...baseConfig.question_overrides, ...(raw.question_overrides || {}) },
+    acknowledgments: raw.acknowledgments?.length ? raw.acknowledgments : baseConfig.acknowledgments,
     required_fields: raw.required_fields?.length ? raw.required_fields : (INDUSTRY_REQUIRED_FIELDS[industry] || REQUIRED_FIELDS_DEFAULT),
   };
 }
