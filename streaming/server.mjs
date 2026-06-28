@@ -1,4 +1,14 @@
 import 'dotenv/config';
+
+const REQUIRED_ENV = ['PUBLIC_BASE_URL', 'OPENAI_API_KEY', 'ELEVENLABS_API_KEY'];
+for (const key of REQUIRED_ENV) {
+  if (!process.env[key]) {
+    console.error(`FATAL: Missing required env var: ${key}`);
+    process.exit(1);
+  }
+}
+console.log('[Startup] All required env vars present');
+
 import Fastify from 'fastify';
 import formbody from '@fastify/formbody';
 import { twilioSignaturePreHandler } from './lib/twilio-signature.mjs';
