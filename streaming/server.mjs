@@ -38,6 +38,9 @@ if (isMain) {
     }
   }
   console.log('[Startup] All required env vars present');
+  if (!process.env.NOTIFICATION_EMAIL) {
+    console.warn('[Startup] Optional env var NOTIFICATION_EMAIL is not set; default firm notification_email will be empty unless firm_default.json provides one.');
+  }
 }
 
 const fetch = globalThis.fetch;
@@ -184,6 +187,7 @@ const DEFAULT_FIRM_CONFIG = {
   timezone: 'America/New_York',
   disclaimer: 'This call is informational only and does not create an attorney-client relationship.',
   intake_rules: 'Collect caller contact details and a short case summary. Escalate emergency threats to 911 guidance.',
+  notification_email: process.env.NOTIFICATION_EMAIL || '',
   notification_phone: '',
   greeting_style: 'casual',
   custom_intro: null,
