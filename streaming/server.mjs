@@ -1,14 +1,4 @@
 import 'dotenv/config';
-
-const REQUIRED_ENV = ['PUBLIC_BASE_URL', 'OPENAI_API_KEY', 'ELEVENLABS_API_KEY'];
-for (const key of REQUIRED_ENV) {
-  if (!process.env[key]) {
-    console.error(`FATAL: Missing required env var: ${key}`);
-    process.exit(1);
-  }
-}
-console.log('[Startup] All required env vars present');
-
 import Fastify from 'fastify';
 import formbody from '@fastify/formbody';
 import { twilioSignaturePreHandler } from './lib/twilio-signature.mjs';
@@ -37,6 +27,18 @@ import {
   withCallLock,
   logEmailAttempt,
 } from './db.mjs';
+
+const isMain = process.argv[1] === fileURLToPath(import.meta.url);
+const REQUIRED_ENV = ['PUBLIC_BASE_URL', 'OPENAI_API_KEY', 'ELEVENLABS_API_KEY'];
+if (isMain) {
+  for (const key of REQUIRED_ENV) {
+    if (!process.env[key]) {
+      console.error(`FATAL: Missing required env var: ${key}`);
+      process.exit(1);
+    }
+  }
+  console.log('[Startup] All required env vars present');
+}
 
 const fetch = globalThis.fetch;
 if (!fetch) throw new Error('Node 18+ is required (global fetch).');
@@ -235,7 +237,7 @@ function checkRateLimit(key, maxHits, windowMs) {
 }
 
 // Purge stale entries every 5 minutes to prevent memory growth
-setInterval(() => {
+const rateLimitCleanupTimer = setInterval(() => {
   const cutoff = Date.now() - 5 * 60_000;
   for (const [key, hits] of rateLimitStore.entries()) {
     const fresh = hits.filter((t) => t > cutoff);
@@ -243,6 +245,7 @@ setInterval(() => {
     else rateLimitStore.set(key, fresh);
   }
 }, 5 * 60_000);
+rateLimitCleanupTimer.unref?.();
 
 // ── Per-session ack index (avoids repeated acknowledgments) ──────────────────
 const sessionAckIndex = new Map();
@@ -1478,11 +1481,13 @@ async function sendEmailWithRetry({ leadId, firmId, to, subject, html }) {
     } catch (err) {
       lastErr = err;
       if (err.status && err.status >= 400 && err.status < 500 && err.status !== 429) break;
-      app.log.warn({ err: err.message, leadId, to, attempt: i + 1 }, 'email-attempt-failed');
+      app.log.warn({ err, leadId, to, attempt: i + 1 }, 'email-attempt-failed');
+      console.warn('email-attempt-failed', err);
     }
   }
   await logEmailAttempt({ leadId, firmId, to, subject, status: 'failed', error: lastErr?.message || 'unknown' }).catch((e) => app.log.warn({ err: String(e) }, 'email-log-insert-failed'));
-  app.log.error({ err: lastErr?.message, leadId, to }, 'email-failed-after-retries');
+  app.log.error({ err: lastErr, leadId, to }, 'email-failed-after-retries');
+  console.error('email-failed-after-retries', lastErr);
   return { ok: false, error: lastErr?.message };
 }
 
@@ -1521,9 +1526,17 @@ function ctaButton(text, url, color = '#6d28d9') {
 }
 
 async function sendEmailNotification(session, firmConfig) {
-  if (!RESEND_API_KEY) { app.log.warn({ leadId: session.leadId }, 'sendEmailNotification: RESEND_API_KEY not set — skipping'); return; }
-  if (!firmConfig.notification_email) { app.log.warn({ leadId: session.leadId, firmId: firmConfig.id }, 'sendEmailNotification: no notification_email on firm — skipping'); return; }
-  app.log.info({ leadId: session.leadId, from: RESEND_FROM_EMAIL, to: firmConfig.notification_email }, 'sendEmailNotification: attempting send');
+  const notificationEmail = String(firmConfig?.notification_email || '').trim();
+  if (!RESEND_API_KEY) {
+    app.log.warn({ leadId: session.leadId }, 'sendEmailNotification: RESEND_API_KEY not set — skipping');
+    return;
+  }
+  if (!notificationEmail) {
+    app.log.warn({ leadId: session.leadId, firmId: firmConfig?.id }, 'sendEmailNotification: no notification_email on firm — skipping');
+    console.warn('sendEmailNotification: no notification_email on firm', { leadId: session.leadId, firmId: firmConfig?.id });
+    return;
+  }
+  app.log.info({ leadId: session.leadId, from: RESEND_FROM_EMAIL, to: notificationEmail }, 'sendEmailNotification: attempting send');
 
   const { full_name, callback_number, practice_area, case_summary } = session.collected;
   const name = full_name || 'Unknown Caller';
@@ -1558,7 +1571,7 @@ async function sendEmailNotification(session, firmConfig) {
   await sendEmailWithRetry({
     leadId: session.leadId,
     firmId: session.firmId,
-    to: firmConfig.notification_email,
+    to: notificationEmail,
     subject: `New lead — ${name} (${area})`,
     html,
   });
@@ -1786,14 +1799,22 @@ async function generateDynamicFiller({ userText, lastQuestionText }) {
   }
 }
 
-function fireNotifications(session, firmConfig) {
+async function fireNotifications(session, firmConfig) {
   app.log.info(
     { leadId: session.leadId, done: session.done, hasResendKey: !!RESEND_API_KEY, notificationEmail: firmConfig?.notification_email || '' },
     'fireNotifications called',
   );
   if (!session.done) return;
-  sendEmailNotification(session, firmConfig)
-    .catch((err) => app.log.error({ err: String(err), leadId: session.leadId }, 'email notification unexpected failure'));
+  if (!RESEND_API_KEY) {
+    app.log.warn({ leadId: session.leadId }, 'fireNotifications: RESEND_API_KEY not set — email notification will be skipped');
+    console.warn('fireNotifications: RESEND_API_KEY not set — email notification will be skipped', { leadId: session.leadId });
+  }
+  try {
+    await sendEmailNotification(session, firmConfig);
+  } catch (err) {
+    app.log.error({ err, leadId: session.leadId }, 'email notification unexpected failure');
+    console.error('email notification unexpected failure', err);
+  }
   sendSmsNotification(session, firmConfig)
     .catch((err) => app.log.warn({ err: String(err), leadId: session.leadId }, 'sms notification failed'));
   // Build a minimal lead object for the webhook payload
@@ -2172,7 +2193,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   persistSessionArtifacts(session, { assistantText: speakText, callerText, done: session.done })
     .then(() => { if (session.done) app.log.info({ callSid, leadId: session.leadId }, 'persistArtifacts OK — lead saved to DB'); })
     .catch((err) => app.log.error({ err: String(err), callSid, leadId: session.leadId }, 'persistArtifacts FAILED — lead not saved'));
-  fireNotifications(session, firmConfig);
+  await fireNotifications(session, firmConfig);
 
   return {
     firmConfig,
@@ -2697,7 +2718,7 @@ app.post('/twiml', { preHandler: twilioSignaturePreHandler }, async (req, reply)
         saveSessions(sessions).catch((err) => app.log.warn({ err: String(err), callSid }, 'saveSessions failed'));
         persistSessionArtifacts(session, { assistantText: speakText, callerText: '', done })
           .catch((err) => app.log.warn({ err: String(err), callSid }, 'persistArtifacts failed'));
-        fireNotifications(session, firmConfig);
+        await fireNotifications(session, firmConfig);
         ttsKey = await ttsPromise;
       }
     } else {
@@ -3363,8 +3384,6 @@ app.post('/api/billing/webhook', async (req, reply) => {
 });
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
-
-const isMain = process.argv[1] === fileURLToPath(import.meta.url);
 
 app.log.info(`BOOT PORT=${PORT} PUBLIC_BASE_URL=${PUBLIC_BASE_URL}`);
 app.log.info({
