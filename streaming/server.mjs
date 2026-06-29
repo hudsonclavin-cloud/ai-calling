@@ -1231,7 +1231,7 @@ function doneTwiml({ speakText, ttsKey, liveUrl = null, firmId = '', callSid = '
     const graceUrl = `${PUBLIC_BASE_URL}/twiml-grace?callSid=${encodeURIComponent(callSid)}&firmId=${encodeURIComponent(firmId)}`;
     return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Gather input="speech" action="${xmlEscape(graceUrl)}" method="POST" speechTimeout="1" timeout="4" actionOnEmptyResult="true" bargeIn="false" enhanced="true" language="en-US" profanityFilter="false">
+  <Gather input="speech" action="${xmlEscape(graceUrl)}" method="POST" speechTimeout="1" timeout="2" actionOnEmptyResult="true" bargeIn="false" enhanced="true" language="en-US" profanityFilter="false">
     ${speakerNode}
   </Gather>
   <Hangup/>
@@ -1272,10 +1272,10 @@ async function synthesizeToDisk(text) {
           model_id: ELEVENLABS_MODEL_ID,
           enable_ssml_parsing: true,
           voice_settings: {
-            stability:        Number(process.env.ELEVEN_STABILITY      ?? 0.40),
+            stability:        Number(process.env.ELEVEN_STABILITY      ?? 0.55),
             similarity_boost: Number(process.env.ELEVEN_SIMILARITY     ?? 0.75),
-            style:            Number(process.env.ELEVEN_STYLE          ?? 0.35),
-            use_speaker_boost: String(process.env.ELEVEN_SPEAKER_BOOST ?? 'true').toLowerCase() === 'true',
+            style:            parseFloat(process.env.ELEVEN_STYLE) || 0.10,
+            use_speaker_boost: process.env.ELEVEN_SPEAKER_BOOST !== 'false',
             speed:            Number(process.env.ELEVEN_SPEED          ?? 1.10),
           },
         }),
@@ -2201,6 +2201,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   persistSessionArtifacts(session, { assistantText: speakText, callerText, done: session.done })
     .then(() => { if (session.done) app.log.info({ callSid, leadId: session.leadId }, 'persistArtifacts OK — lead saved to DB'); })
     .catch((err) => app.log.error({ err: String(err), callSid, leadId: session.leadId }, 'persistArtifacts FAILED — lead not saved'));
+  app.log.info({ leadId: session.leadId, sessionDone: session.done, firmId: session.firmId, notificationEmailFromConfig: firmConfig?.notification_email || '(empty)' }, 'about to call fireNotifications');
   await fireNotifications(session, firmConfig);
 
   return {
@@ -2554,10 +2555,10 @@ app.get('/tts-live', async (req, reply) => {
           model_id: ELEVENLABS_MODEL_ID,
           enable_ssml_parsing: true,
           voice_settings: {
-            stability:        Number(process.env.ELEVEN_STABILITY      ?? 0.40),
+            stability:        Number(process.env.ELEVEN_STABILITY      ?? 0.55),
             similarity_boost: Number(process.env.ELEVEN_SIMILARITY     ?? 0.75),
-            style:            Number(process.env.ELEVEN_STYLE          ?? 0.35),
-            use_speaker_boost: String(process.env.ELEVEN_SPEAKER_BOOST ?? 'true').toLowerCase() === 'true',
+            style:            parseFloat(process.env.ELEVEN_STYLE) || 0.10,
+            use_speaker_boost: process.env.ELEVEN_SPEAKER_BOOST !== 'false',
             speed:            Number(process.env.ELEVEN_SPEED          ?? 1.10),
           },
         }),
@@ -2726,6 +2727,7 @@ app.post('/twiml', { preHandler: twilioSignaturePreHandler }, async (req, reply)
         saveSessions(sessions).catch((err) => app.log.warn({ err: String(err), callSid }, 'saveSessions failed'));
         persistSessionArtifacts(session, { assistantText: speakText, callerText: '', done })
           .catch((err) => app.log.warn({ err: String(err), callSid }, 'persistArtifacts failed'));
+        app.log.info({ leadId: session.leadId, sessionDone: session.done, firmId: session.firmId, notificationEmailFromConfig: firmConfig?.notification_email || '(empty)' }, 'about to call fireNotifications');
         await fireNotifications(session, firmConfig);
         ttsKey = await ttsPromise;
       }
