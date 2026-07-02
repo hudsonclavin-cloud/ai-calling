@@ -1937,7 +1937,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
     appendTranscript(session, 'assistant', exitText);
     sessions[callSid] = session;
     const ttsKey = await synthesizeToDisk(exitText).catch(() => null);
-    saveSessions(sessions).catch((err) => app.log.warn({ err: String(err), callSid }, 'early-exit saveSessions failed'));
+    await saveSessions(sessions);
     persistSessionArtifacts(session, { assistantText: exitText, callerText, done: true }).catch((err) => app.log.warn({ err: String(err), callSid }, 'early-exit persistArtifacts failed'));
     return { firmConfig, session, payload: { speakText: exitText, ttsKey, done: true, nextField: null, timings: {} } };
   }
@@ -2221,8 +2221,8 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   }
   const tAfterTts = Date.now();
 
-  // Fire-and-forget — the TwiML response doesn't depend on write completion
-  saveSessions(sessions).catch((err) => app.log.warn({ err: String(err), callSid }, 'saveSessions failed'));
+  // Persist session state before returning so follow-up routes can read their writes.
+  await saveSessions(sessions);
   persistSessionArtifacts(session, { assistantText: speakText, callerText, done: session.done })
     .then(() => { if (session.done) app.log.info({ callSid, leadId: session.leadId }, 'persistArtifacts OK — lead saved to DB'); })
     .catch((err) => app.log.error({ err: String(err), callSid, leadId: session.leadId }, 'persistArtifacts FAILED — lead not saved'));
@@ -2750,7 +2750,7 @@ app.post('/twiml', { preHandler: twilioSignaturePreHandler }, async (req, reply)
         session.updatedAt = nowIso();
         sessions[callSid] = session;
         const ttsPromise = synthesizeToDisk(speakText);
-        saveSessions(sessions).catch((err) => app.log.warn({ err: String(err), callSid }, 'saveSessions failed'));
+        await saveSessions(sessions);
         persistSessionArtifacts(session, { assistantText: speakText, callerText: '', done })
           .catch((err) => app.log.warn({ err: String(err), callSid }, 'persistArtifacts failed'));
         app.log.info({ leadId: session.leadId, sessionDone: session.done, firmId: session.firmId, notificationEmailFromConfig: firmConfig?.notification_email || '(empty)' }, 'about to call fireNotifications');
@@ -3465,8 +3465,15 @@ if (isMain) {
     holdKey = await synthesizeToDisk(HOLD_PHRASE);
     console.log('hold-phrase ready:', holdKey ? `OK (${holdKey.slice(0, 8)})` : 'FAILED — <Say> still used as last resort');
 
-    // Pre-synthesize filler phrases in parallel — ready before any call comes in
-    fillerKeys = await Promise.all(FILLER_PHRASES.map((p) => synthesizeToDisk(p).catch(() => null)));
+    // Batch to respect ElevenLabs 10-concurrent-request limit — prevents 429 storm on every deploy
+    fillerKeys = new Array(FILLER_PHRASES.length);
+    const FILLER_BATCH = 8;
+    for (let i = 0; i < FILLER_PHRASES.length; i += FILLER_BATCH) {
+      const batch = FILLER_PHRASES.slice(i, i + FILLER_BATCH);
+      const results = await Promise.all(batch.map((p) => synthesizeToDisk(p).catch(() => null)));
+      for (let j = 0; j < results.length; j++) fillerKeys[i + j] = results[j];
+      if (i + FILLER_BATCH < FILLER_PHRASES.length) await new Promise((r) => setTimeout(r, 500));
+    }
     const fillerReady = fillerKeys.filter(Boolean).length;
     console.log(`filler-phrases ready: ${fillerReady}/${FILLER_PHRASES.length}`);
 
