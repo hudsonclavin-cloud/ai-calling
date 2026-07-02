@@ -535,12 +535,12 @@ function createSession({ callSid, firmId, fromPhone, firmConfig }) {
   // Always initialize all default fields; effectiveConfig controls which are required
   const collected = {};
   for (const field of REQUIRED_FIELDS_DEFAULT) {
-    collected[field] = field === 'callback_number' ? (fromPhone || '') : '';
+    collected[field] = '';
   }
   // Also initialize any firm-specific fields not in the default set
   for (const field of (firmConfig.required_fields || REQUIRED_FIELDS_DEFAULT)) {
     if (!(field in collected)) {
-      collected[field] = field === 'callback_number' ? (fromPhone || '') : '';
+      collected[field] = '';
     }
   }
   collected.calling_for = '';
@@ -549,6 +549,7 @@ function createSession({ callSid, firmId, fromPhone, firmConfig }) {
     callSid,
     firmId,
     fromPhone,
+    phoneFromCallerId: fromPhone || '',
     callId: `call_${sha1(`${callSid}|${firmId}`)}`,
     leadId: `lead_${sha1(`${firmId}|${fromPhone}`)}`,
     turnCount: 0,
@@ -1912,6 +1913,7 @@ function buildAdaptiveFiller(topic) {
 }
 
 async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
+  return withCallLock(callSid, async () => {
   // Load this firm's config from its JSON file
   const firmConfig = await loadFirmConfig(firmId || 'firm_default');
   const sessions = await loadSessions();
@@ -2239,6 +2241,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
       timings: { t1: tOpenAiStart, t2: tAfterOpenAi, t3: tAfterCompose, t4: tAfterTts },
     },
   };
+  });
 }
 
 function applyRepromptText(session, firmConfig) {
