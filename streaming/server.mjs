@@ -2165,6 +2165,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   if (!speakText || !speakText.trim()) {
     app.log.error({ callSid, done, nextDecision }, 'speakText was empty — using closing as fallback');
     speakText = effectiveConfig.closing || DEFAULT_FIRM_CONFIG.closing;
+    session.done = true;
   }
 
   appendTranscript(session, 'assistant', speakText);
