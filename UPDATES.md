@@ -16,6 +16,24 @@
 
 ## Session Log (newest first)
 
+### 2026-07-03 — Six-agent backend audit + concurrency deadlock fix shipped
+**Changed:**
+- `streaming/db.mjs`: Split `persistSessionArtifacts` into a lock-free `persistSessionArtifactsUnlocked` delegate; the public `persistSessionArtifacts` now wraps it in `withCallLock` (commit `cdcee5a`)
+- `streaming/server.mjs`: `/call-status` now calls `persistSessionArtifactsUnlocked` inside its own `withCallLock(callSid)` body (was re-entering the same lock → deadlock); `/recording-status` falls back to `getCallByCallSid()` when the session row is already deleted (commit `cdcee5a`)
+- Pushed `cdcee5a` to `origin/main` → Railway auto-deploy
+- Ran a read-only six-lens audit of the streaming backend; full findings written to `ava-audit-report.md` (repo root, untracked — not committed)
+**Fixed:**
+- **R1 (P0):** `withCallLock` re-entrancy deadlock — every completed call was hanging the partial-lead persist, `deleteSession`, and recording save. Confirmed by two independent audit agents (one reproduced it empirically). This is the root cause behind "confirmation emails unreliable," "dashboard updates unreliable," and session rows accumulating.
+- **R20 (P1):** recording URL was dropped when Twilio's recording callback arrived after the session was deleted — now recovered via the calls table.
+**Still broken / needs follow-up (from the audit, highest first):**
+- **R3 (P0):** the live `speakText was empty` (C2) bug is fully traced — done-gate diverges from the question generator, poisons `lastQuestionId=null`, an empty ghost turn is misrouted as a first turn → duplicate goodbye + falsely marks lead `intake_complete`. Falsification test is in the report; run it before fixing. This is the "hangs up too early" bug.
+- **R4 (P0):** Stripe checkout metadata never reaches the Subscription object → `subscription.updated` no-ops → a paying customer's line auto-suspends on trial day 8. Fix before Stripe activation.
+- **R2 (P0):** whole-table `loadSessions`/`saveSessions` clobbers concurrent calls' rows. Needs single-row `getSession`/`saveSession` helpers.
+- **R5–R8 (P1 security):** unauthenticated `/api/*` routes let a guessed firmId buy Twilio numbers, cancel subscriptions, read cross-tenant PII/secrets, and SSRF. Part of "client data persistence + protection."
+- **R11–R13, R14/R15/R21:** dead early-TTS path (`event.delta` shape), "One moment please." shadowing real questions on TTS failure, dropped bare-name answers, and caller-ID laundering / lead-sharing. See `ava-audit-report.md` for the full ranked list and root-cause clusters.
+
+---
+
 ### 2026-03-26 — Ava human voice upgrade (prosody, SSML, voice settings)
 **Changed:**
 - `streaming/server.mjs`: Expanded filler phrase pool from 5 → 10 phrases (more variety between turns)
