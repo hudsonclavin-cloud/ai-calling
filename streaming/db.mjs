@@ -395,8 +395,7 @@ export async function logEmailAttempt({ leadId, firmId, to, subject, status, res
   });
 }
 
-export function persistSessionArtifacts(session, { assistantText, callerText, done }) {
-  return withCallLock(session.callSid || session.leadId, async () => {
+async function persistSessionArtifactsUnlocked(session, { assistantText, callerText, done }) {
   const client = getClient();
   const now = nowIso();
   const newEntries = [];
@@ -511,8 +510,13 @@ export function persistSessionArtifacts(session, { assistantText, callerText, do
     await tx.rollback();
     throw e;
   }
-  }); // end withCallLock
 }
+
+export function persistSessionArtifacts(session, opts) {
+  return withCallLock(session.callSid || session.leadId, () => persistSessionArtifactsUnlocked(session, opts));
+}
+
+export { persistSessionArtifactsUnlocked };
 
 // ── One-time JSON → SQLite migration ─────────────────────────────────────────
 

@@ -20,6 +20,7 @@ import {
   saveSessions,
   deleteSession,
   persistSessionArtifacts,
+  persistSessionArtifactsUnlocked,
   patchLead,
   getLeadById,
   createWebhookLog,
@@ -2980,7 +2981,7 @@ app.post('/call-status', { preHandler: twilioSignaturePreHandler }, async (req, 
 
     // Session already marked done — full lead already saved by the last /twiml turn, just clean up.
     if (session.done === true) {
-      await persistSessionArtifacts(session, { assistantText: '', callerText: '', done: true });
+      await persistSessionArtifactsUnlocked(session, { assistantText: '', callerText: '', done: true });
       await deleteSession(callSid).catch((err) => app.log.warn({ err: String(err), callSid }, 'call-status: session delete failed'));
       return;
     }
@@ -2988,7 +2989,7 @@ app.post('/call-status', { preHandler: twilioSignaturePreHandler }, async (req, 
     // Caller hung up before intake completed — persist as partial lead.
     app.log.info({ callSid, leadId: session.leadId, callDuration }, 'call-status: saving partial lead');
     try {
-      await persistSessionArtifacts(session, { assistantText: '', callerText: '', done: false });
+      await persistSessionArtifactsUnlocked(session, { assistantText: '', callerText: '', done: false });
       await patchLead(session.leadId, { status: 'partial' });
       const firmConfig = await loadFirmConfig(session.firmId || 'firm_default');
       const partialLead = { id: session.leadId, firmId: session.firmId, fromPhone: session.fromPhone, status: 'partial', ...session.collected };
@@ -3019,6 +3020,14 @@ app.post('/recording-status', { preHandler: twilioSignaturePreHandler }, async (
     if (session?.leadId) {
       await patchLead(session.leadId, { recording_url: recordingUrl, recording_duration: duration });
       app.log.info({ callSid, leadId: session.leadId, duration }, 'recording-saved');
+    } else {
+      const call = await getCallByCallSid(callSid).catch(() => null);
+      if (call?.leadId) {
+        await patchLead(call.leadId, { recording_url: recordingUrl, recording_duration: duration });
+        app.log.info({ callSid, leadId: call.leadId }, 'recording-status: saved via calls-table fallback (session already deleted)');
+      } else {
+        app.log.warn({ callSid }, 'recording-status: no session and no call row — recording_url dropped');
+      }
     }
   }).catch((err) => app.log.warn({ err: String(err), callSid }, 'recording-status handler failed'));
 });
