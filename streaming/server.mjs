@@ -558,6 +558,7 @@ function createSession({ callSid, firmId, fromPhone, firmConfig }) {
     callerType: null,          // null | 'new' | 'returning'
     callerTypeReprompts: 0,    // failed detection attempts before defaulting
     knownName: '',             // set when returning caller is detected with a known name
+    carriedCallback: '',       // prior-call number to CONFIRM (never auto-trusted) for returning callers
     isUrgent: false,           // true when urgency keywords detected
     urgencySpoken: false,      // true after urgency acknowledgment has been spoken
     phoneRetryPending: false,  // true when caller gave digits but extraction failed
@@ -581,6 +582,24 @@ const FILLER_WORDS = new Set([
   'ok', 'okay', 'yes', 'no', 'sure', 'go ahead', 'ready', 'hi', 'hello',
   'yeah', 'yep', 'yup', 'alright', 'sounds good', 'got it', 'uh huh',
 ]);
+
+const AFFIRMATIVE_WORDS = new Set([
+  'yes', 'yeah', 'yep', 'yup', 'sure', 'correct', 'right', 'ok', 'okay',
+  'sounds good', 'that works', "that's right", "that's correct", 'still good',
+  'same number', 'same', 'uh huh', 'mm hm', 'mhm',
+]);
+
+// Returning-caller callback confirmation: does this utterance affirm the on-file
+// number? Negatives / "different number" short-circuit to false so we never treat
+// a correction as confirmation.
+function isAffirmative(text) {
+  const t = String(text || '').trim().toLowerCase().replace(/[.!,?]+$/, '');
+  if (!t) return false;
+  if (/\b(no|nope|different|another|change|wrong)\b/.test(t)) return false;
+  if (AFFIRMATIVE_WORDS.has(t)) return true;
+  if (t.length <= 40 && /\b(yes|yeah|yep|correct|that's right|still (good|works)|same( number)?)\b/.test(t)) return true;
+  return false;
+}
 
 function extractStructuredDeterministic(userText) {
   const text = String(userText || '').trim();
@@ -690,12 +709,22 @@ function getQuestionText(questionId, firmConfig) {
 
 function getEffectiveConfig(session, firmConfig) {
   if (session.callerType !== 'returning') return firmConfig;
+  // A carried callback number from a prior call is UNVERIFIED for this call, so
+  // callback_number stays required — but phrased as a confirmation. Only the last
+  // 4 digits are ever spoken (a spoofed/mistyped caller ID must not leak a stored
+  // number). audit R3 / Defect B (04:37 lead had a number Ava never asked for).
+  const carriedDigits = String(session.carriedCallback || '').replace(/\D/g, '');
+  const last4 = carriedDigits.slice(-4);
+  const callbackQuestion = last4
+    ? `I have a number ending in ${last4} on file — is that still the best way to reach you, or is there a better number?`
+    : "And what's the best number to reach you?";
   return {
     ...firmConfig,
-    required_fields: ['full_name', 'case_summary'],
+    required_fields: ['full_name', 'case_summary', 'callback_number'],
     question_overrides: {
       ...firmConfig.question_overrides,
       case_summary: "Got it. And briefly, what's the reason for your call today?",
+      callback_number: callbackQuestion,
     },
     closing: "Perfect. I'll let the team know you called. Someone will be in touch shortly.",
   };
@@ -1948,9 +1977,15 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
     const history = await lookupCallerHistory(normalizedPhone, firmConfig.id);
     if (history.isReturning) {
       session.callerType = 'returning';
-      // Pre-populate captured fields so Ava doesn't re-ask
+      // Pre-populate captured fields so Ava doesn't re-ask — EXCEPT callback_number,
+      // which is unverified for THIS call and must be explicitly confirmed (audit R3 /
+      // Defect B). Stash the carried number for the confirmation prompt only.
       for (const [k, v] of Object.entries(history.capturedFields)) {
+        if (k === 'callback_number') continue;
         if (v && !session.collected[k]) session.collected[k] = v;
+      }
+      if (history.capturedFields.callback_number) {
+        session.carriedCallback = history.capturedFields.callback_number;
       }
       if (history.capturedFields.full_name) {
         session.knownName = history.capturedFields.full_name;
@@ -2072,6 +2107,19 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
     }
   }
 
+  // Returning-caller callback confirmation (audit R3 / Defect B): when Ava asked the
+  // caller to confirm the on-file number and they affirm (without speaking a new one),
+  // promote the carried value into collected. A refusal / non-answer leaves it empty,
+  // so the gate keeps asking rather than saving an unverified number.
+  if (session.carriedCallback
+      && session.lastQuestionId === 'callback_number'
+      && callerText
+      && !String(session.collected.callback_number || '').trim()
+      && !fieldUpdates.callback_number
+      && isAffirmative(callerText)) {
+    session.collected.callback_number = session.carriedCallback;
+  }
+
   const maxQ = firmConfig.max_questions || 8;
   const reachedQuestionCap = session.turnCount >= maxQ;
   const requiredFields = effectiveConfig.required_fields || REQUIRED_FIELDS_DEFAULT;
@@ -2110,16 +2158,59 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   const done = hardCap
     || (allCorePresent && !llmWantsContinue && (allCollected || nextDecision.done));
 
+  // ── Gate/generator divergence interceptor (audit R3) ───────────────────────
+  // If the done-gate says NOT done but the deterministic generator has exhausted
+  // its questions (returns its {done:true, nextQuestionId:null} sentinel), do NOT
+  // let that null sentinel flow into session.lastQuestionId — that poisons the
+  // /twiml first-turn routing and fires the C2 empty-speakText guard. Instead
+  // synthesize a concrete question for the first core field the gate still wants.
+  if (!done && nextDecision.done === true) {
+    const coreFields = ['full_name', 'case_summary', 'callback_number'];
+    const missingCore = coreFields.filter(
+      (f) => String(session.collected[f] || '').trim().length < 2,
+    );
+    const targetField = missingCore[0] || 'final_clarify';
+    const overrideText = getQuestionText(targetField, effectiveConfig);
+    const fallbackText =
+      targetField === 'callback_number' ? "I just need one more thing — what's the best number to reach you?"
+      : targetField === 'full_name'     ? "Before I let you go — can I get your name?"
+      : targetField === 'case_summary'  ? "And briefly, what's the reason for your call today?"
+      : "One last thing — anything else the attorney should know?";
+    nextDecision = {
+      done: false,
+      nextField: targetField,
+      nextQuestionId: targetField,
+      nextQuestionText: overrideText || fallbackText,
+    };
+    app.log.warn(
+      {
+        tag: 'GATE_GENERATOR_DIVERGENCE',
+        callSid,
+        missingField: targetField,
+        missingCore,
+        collectedKeys: Object.keys(session.collected),
+        caller_type: session.callerType,
+        turnCount: session.turnCount,
+      },
+      'gate/generator divergence — synthesizing question for unsatisfied core field',
+    );
+  }
+
   let speakText = effectiveConfig.closing || DEFAULT_FIRM_CONFIG.closing;
   let nextField = null;
   // llmAck is no longer a separate field — acknowledgment is baked into next_question_text
   const llmAck = '';
 
   if (!done) {
-    session.turnCount += 1;
-    session.lastQuestionId = nextDecision.nextQuestionId;
-    session.lastQuestionText = nextDecision.nextQuestionText;
-    session.askedQuestionIds.push(nextDecision.nextQuestionId);
+    // EDIT 4 (audit R45) — never advance turn state on a null question id. Post-EDIT-1
+    // this always holds; kept as a seatbelt against a null sentinel reaching this branch
+    // (this codebase's history is fallback values quietly masking invariant violations).
+    if (nextDecision.nextQuestionId != null) {
+      session.turnCount += 1;
+      session.lastQuestionId = nextDecision.nextQuestionId;
+      session.lastQuestionText = nextDecision.nextQuestionText;
+      session.askedQuestionIds.push(nextDecision.nextQuestionId);
+    }
     nextField = nextDecision.nextField;
 
     // LLM's next_question_text has the emotional ack baked in per system prompt — use it directly.
@@ -2181,11 +2272,14 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
     );
   }
 
-  // C2 — guard against empty speakText
+  // C2 — guard against empty speakText. Do NOT force-close (audit R36): an empty
+  // speakText is a phrasing bug, not a completed intake. Reprompt the last question
+  // (or a clarifier) and keep the line open so the caller isn't hung up mid-intake.
   if (!speakText || !speakText.trim()) {
-    app.log.error({ callSid, done, nextDecision }, 'speakText was empty — using closing as fallback');
-    speakText = effectiveConfig.closing || DEFAULT_FIRM_CONFIG.closing;
-    session.done = true;
+    app.log.error({ callSid, done, nextDecision }, 'speakText was empty — reprompting instead of closing');
+    speakText = (session.lastQuestionText && session.lastQuestionText.trim())
+      || getQuestionText('final_clarify', effectiveConfig)
+      || 'Sorry — could you say that again?';
   }
 
   appendTranscript(session, 'assistant', speakText);
@@ -2731,12 +2825,23 @@ app.post('/twiml', { preHandler: twilioSignaturePreHandler }, async (req, reply)
       }
     }
 
+    // EDIT 6 (audit R36) — if this session already completed, do not re-run the
+    // controller. A stray empty-SpeechResult POST (Gather actionOnEmptyResult,
+    // webhook retry) on a done session must not re-enter first-turn logic and
+    // produce a duplicate goodbye. Speak the closing once and hang up.
+    if (session.done === true) {
+      const closing = firmConfig.closing || DEFAULT_FIRM_CONFIG.closing;
+      const closeKey = await synthesizeToDisk(closing).catch(() => null);
+      reply.header('Content-Type', 'text/xml');
+      return reply.send(doneTwiml({ speakText: closing, ttsKey: closeKey }));
+    }
+
     let speakText = '';
     let done = false;
     let ttsKey = null;
 
     if (!userText) {
-      if (!session.lastQuestionId) {
+      if (session.turnCount === 0) {
         // First turn — controller handles TTS prefetch internally
         const firstStep = await runNextStepController({ firmId, callSid, fromPhone, userText: '' });
         speakText = firstStep.payload.speakText;
