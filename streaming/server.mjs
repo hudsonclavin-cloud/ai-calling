@@ -127,38 +127,26 @@ let holdKey = null; // set at boot before prewarm
 
 // Thinking filler phrases — played immediately when caller finishes speaking, before OpenAI responds
 const FILLER_PHRASES = [
-  'One moment.',
-  'Just a sec.',
-  'Okay, hold on.',
-  'Mm, one moment.',
-  'Right with you.',
-  'Let me grab that.',
-  'One second.',
-  'Hold on just a moment.',
-  'Okay.',
-  'Sure, one sec.',
-  "Let me look that up.",
-  "Hold tight.",
-  "Give me just a second.",
-  "One sec, let me check.",
-  "Mm, let me see.",
-  "Hang on just a moment.",
-  "Bear with me one sec.",
-  "Let me pull that up.",
-  "Okay, just a moment.",
-  "Mm-hm, one second.",
-  "Let me make a note of that.",
-  "Right, one moment.",
-  "Hold on, let me check.",
-  "Okay, give me just a sec.",
-  "Let me find that for you.",
-  "Just a moment.",
+  'Mm-hm.',
+  'Okay —',
+  'Right.',
+  'One sec.',
+  'Sure — one moment.',
+  'Mm-hm, okay.',
+  'Alright —',
+  'Let me note that.',
+  'Okay, one moment.',
+  'Just a second.',
 ];
+const QUESTION_FILLER = 'Good question — one sec.';
+const FILLER_PREWARM_PHRASES = [...FILLER_PHRASES, QUESTION_FILLER];
 let fillerKeys = []; // populated at boot via synthesizeToDisk
+let questionFillerKey = null;
 
 // Per-session last filler index (avoids consecutive repeated filler within a call)
 const fillerLastIdxMap = new Map();
 const DYNAMIC_FILLER_TIMEOUT_MS = Number(process.env.DYNAMIC_FILLER_TIMEOUT_MS ?? 800);
+const FILLER_GATE_MS = 1200;
 
 // ── Default firm config (used as fallback if no file found) ──────────────────
 // To add a new firm: copy firm_default.json → firm_yourname.json and edit it.
@@ -1277,7 +1265,7 @@ async function synthesizeToDisk(text) {
   const safeText = truncateForSpeech(text, MAX_TTS_CHARS);
   if (!safeText || !ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) return null;
 
-  const voiceSettingsKey = `${process.env.ELEVEN_STABILITY ?? '0.40'}|${process.env.ELEVEN_SIMILARITY ?? '0.75'}|${process.env.ELEVEN_STYLE ?? '0.35'}|${process.env.ELEVEN_SPEAKER_BOOST ?? 'true'}|${process.env.ELEVEN_SPEED ?? '1.10'}`;
+  const voiceSettingsKey = `${process.env.ELEVEN_STABILITY ?? '0.40'}|${process.env.ELEVEN_SIMILARITY ?? '0.75'}|${process.env.ELEVEN_STYLE ?? '0.35'}|${process.env.ELEVEN_SPEAKER_BOOST ?? 'true'}|${process.env.ELEVEN_SPEED ?? '1.00'}`;
   const key = sha1(`${ELEVENLABS_VOICE_ID}|${ELEVENLABS_MODEL_ID}|${voiceSettingsKey}|${safeText}`);
   const filePath = path.join(AUDIO_DIR, `${key}.mp3`);
   const already = await fs.readFile(filePath).catch(() => null);
@@ -1302,7 +1290,7 @@ async function synthesizeToDisk(text) {
             similarity_boost: Number(process.env.ELEVEN_SIMILARITY     ?? 0.75),
             style:            parseFloat(process.env.ELEVEN_STYLE) || 0.10,
             use_speaker_boost: process.env.ELEVEN_SPEAKER_BOOST !== 'false',
-            speed:            Number(process.env.ELEVEN_SPEED          ?? 1.10),
+            speed:            Number(process.env.ELEVEN_SPEED          ?? 1.00),
           },
         }),
         signal: controller.signal,
@@ -1934,12 +1922,14 @@ function extractCallerTopic(userText) {
 function buildAdaptiveFiller(topic) {
   if (!topic) return null;
   const templates = [
-    `Oh - ${topic}. Let me get the details.`,
-    `Right, ${topic}. One moment.`,
-    `Got it - ${topic}. Let me pull that up.`,
-    `Okay, ${topic}. Just a second.`,
+    `Oh — ${topic}. One sec.`,
   ];
   return templates[Math.floor(Math.random() * templates.length)];
+}
+
+function isCallerQuestion(userText) {
+  const text = String(userText || '').trim();
+  return /\?$/.test(text) || /^(who|what|when|where|why|how|is|are|am|do|does|did|can|could|will|would|should)\b/i.test(text);
 }
 
 async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
@@ -2645,7 +2635,7 @@ app.get('/tts-live', async (req, reply) => {
   if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) return reply.code(503).send('TTS unavailable');
 
   const safeText = truncateForSpeech(text, MAX_TTS_CHARS);
-  const voiceSettingsKey = `${process.env.ELEVEN_STABILITY ?? '0.40'}|${process.env.ELEVEN_SIMILARITY ?? '0.75'}|${process.env.ELEVEN_STYLE ?? '0.35'}|${process.env.ELEVEN_SPEAKER_BOOST ?? 'true'}|${process.env.ELEVEN_SPEED ?? '1.10'}`;
+  const voiceSettingsKey = `${process.env.ELEVEN_STABILITY ?? '0.40'}|${process.env.ELEVEN_SIMILARITY ?? '0.75'}|${process.env.ELEVEN_STYLE ?? '0.35'}|${process.env.ELEVEN_SPEAKER_BOOST ?? 'true'}|${process.env.ELEVEN_SPEED ?? '1.00'}`;
   const key = sha1(`${ELEVENLABS_VOICE_ID}|${ELEVENLABS_MODEL_ID}|${voiceSettingsKey}|${safeText}`);
   const filePath = path.join(AUDIO_DIR, `${key}.mp3`);
 
@@ -2680,7 +2670,7 @@ app.get('/tts-live', async (req, reply) => {
             similarity_boost: Number(process.env.ELEVEN_SIMILARITY     ?? 0.75),
             style:            parseFloat(process.env.ELEVEN_STYLE) || 0.10,
             use_speaker_boost: process.env.ELEVEN_SPEAKER_BOOST !== 'false',
-            speed:            Number(process.env.ELEVEN_SPEED          ?? 1.10),
+            speed:            Number(process.env.ELEVEN_SPEED          ?? 1.00),
           },
         }),
         signal: controller.signal,
@@ -2884,13 +2874,31 @@ app.post('/twiml', { preHandler: twilioSignaturePreHandler }, async (req, reply)
 </Response>`);
       }
 
-      // Normal turn — start processing in background, play filler immediately while OpenAI runs
+      // Normal turn — start processing in background, then only play filler if OpenAI is slow
       const processingPromise = runNextStepController({ firmId, callSid, fromPhone, userText });
-      pendingResponses.set(callSid, { promise: processingPromise, t0 });
+      const pending = { promise: processingPromise, t0 };
+      pendingResponses.set(callSid, pending);
 
-      const callerTopic = extractCallerTopic(userText);
-      const adaptiveFiller = buildAdaptiveFiller(callerTopic);
-      app.log.info({ callSid, callerTopic, usedAdaptive: !!adaptiveFiller }, 'filler-selected');
+      const winner = await Promise.race([
+        pending.promise.then(() => 'ready', () => 'slow'),
+        new Promise(r => setTimeout(() => r('slow'), FILLER_GATE_MS)),
+      ]);
+
+      if (winner === 'ready') {
+        let step;
+        try {
+          step = await pending.promise;
+        } finally {
+          pendingResponses.delete(callSid);
+        }
+        reply.header('Content-Type', 'text/xml');
+        return reply.send(buildPendingResultTwiml({ step, pending, firmId, callSid }));
+      }
+
+      const questionFiller = isCallerQuestion(userText);
+      const callerTopic = questionFiller ? null : extractCallerTopic(userText);
+      const adaptiveFiller = questionFiller ? null : buildAdaptiveFiller(callerTopic);
+      app.log.info({ callSid, callerTopic, questionFiller, usedAdaptive: !!adaptiveFiller }, 'filler-selected');
 
       // Static filler index computed first (anti-repeat state maintained regardless of dynamic path)
       const lastFillerIdx = fillerLastIdxMap.get(callSid) ?? -1;
@@ -2898,24 +2906,17 @@ app.post('/twiml', { preHandler: twilioSignaturePreHandler }, async (req, reply)
       do { fillerIdx = Math.floor(Math.random() * FILLER_PHRASES.length); }
       while (FILLER_PHRASES.length > 1 && fillerIdx === lastFillerIdx);
       fillerLastIdxMap.set(callSid, fillerIdx);
-      const fillerText = adaptiveFiller || FILLER_PHRASES[fillerIdx];
-      const fillerKey = adaptiveFiller ? null : fillerKeys[fillerIdx];
+      const fillerText = questionFiller ? QUESTION_FILLER : (adaptiveFiller || FILLER_PHRASES[fillerIdx]);
+      const fillerKey = questionFiller ? questionFillerKey : (adaptiveFiller ? null : fillerKeys[fillerIdx]);
       const staticFillerAudioUrl = fillerKey
         ? `${PUBLIC_BASE_URL}/api/tts?key=${encodeURIComponent(fillerKey)}`
         : `${PUBLIC_BASE_URL}/tts-live?text=${encodeURIComponent(fillerText)}&firmId=${encodeURIComponent(firmId)}`;
 
-      // Race GPT-generated contextual filler against timeout; null → use adaptive/static
-      const dynamicText = adaptiveFiller ? null : await generateDynamicFiller({
-        userText,
-        lastQuestionText: session.lastQuestionText || '',
-      });
-      const fillerAudioUrl = dynamicText
-        ? `${PUBLIC_BASE_URL}/tts-live?text=${encodeURIComponent(dynamicText)}&firmId=${encodeURIComponent(firmId)}`
-        : staticFillerAudioUrl;
+      const fillerAudioUrl = staticFillerAudioUrl;
 
       const resultUrl = `${PUBLIC_BASE_URL}/twiml-result?callSid=${encodeURIComponent(callSid)}&firmId=${encodeURIComponent(firmId)}`;
 
-      app.log.info({ callSid, fillerIdx, fillerCached: !!fillerKey, dynamicFiller: dynamicText ?? null, adaptiveFiller: adaptiveFiller ?? null }, 'filler-sent');
+      app.log.info({ callSid, fillerIdx, fillerCached: !!fillerKey, questionFiller, dynamicFiller: null, adaptiveFiller: adaptiveFiller ?? null }, 'filler-sent');
       reply.header('Content-Type', 'text/xml');
       return reply.send(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -2954,6 +2955,38 @@ app.post('/twiml', { preHandler: twilioSignaturePreHandler }, async (req, reply)
 
 // POST /twiml-result — Twilio follows this redirect after the filler phrase plays.
 // By this point, runNextStepController has had ~1-2s head start; we just await and return real TwiML.
+function buildPendingResultTwiml({ step, pending, firmId, callSid }) {
+  const { speakText, ttsKey, done } = step.payload;
+  const { t1, t2, t3, t4 } = step.payload.timings;
+  app.log.info({
+    type: 'latency-trace',
+    callSid,
+    stt_to_openai_ms: t1 - pending.t0,
+    openai_ms: t2 - t1,
+    compose_ms: t3 - t2,
+    tts_ms: t4 - t3,
+    total_ms: t4 - pending.t0,
+  }, 'latency-trace');
+
+  const liveUrl = !ttsKey
+    ? `${PUBLIC_BASE_URL}/tts-live?text=${encodeURIComponent(speakText)}&firmId=${encodeURIComponent(firmId)}`
+    : null;
+
+  app.log.info({ callSid, ttsHit: !!ttsKey, liveStream: !!liveUrl }, 'twiml-result-sent');
+
+  if (done) return doneTwiml({ speakText, ttsKey, liveUrl, firmId, callSid });
+
+  const practiceHints = (step.firmConfig.practice_areas || []).join(', ');
+  return gatherTwiml({
+    actionUrl: `${PUBLIC_BASE_URL}/twiml?firmId=${encodeURIComponent(firmId)}`,
+    speakText,
+    ttsKey,
+    liveUrl,
+    emptyCount: step.session.repromptCount,
+    hints: practiceHints,
+  });
+}
+
 app.post('/twiml-result', { preHandler: twilioSignaturePreHandler }, async (req, reply) => {
   const callSid = String(req.body?.CallSid || req.query?.callSid || '').trim();
   const firmId = String(req.query?.firmId || 'firm_default').trim();
@@ -2975,37 +3008,7 @@ app.post('/twiml-result', { preHandler: twilioSignaturePreHandler }, async (req,
   }
 
   try {
-    const { speakText, ttsKey, done } = step.payload;
-    const { t1, t2, t3, t4 } = step.payload.timings;
-    app.log.info({
-      type: 'latency-trace',
-      callSid,
-      stt_to_openai_ms: t1 - pending.t0,
-      openai_ms: t2 - t1,
-      compose_ms: t3 - t2,
-      tts_ms: t4 - t3,
-      total_ms: t4 - pending.t0,
-    }, 'latency-trace');
-
-    const liveUrl = !ttsKey
-      ? `${PUBLIC_BASE_URL}/tts-live?text=${encodeURIComponent(speakText)}&firmId=${encodeURIComponent(firmId)}`
-      : null;
-
-    app.log.info({ callSid, ttsHit: !!ttsKey, liveStream: !!liveUrl }, 'twiml-result-sent');
-
-    if (done) return reply.send(doneTwiml({ speakText, ttsKey, liveUrl, firmId, callSid }));
-
-    const practiceHints = (step.firmConfig.practice_areas || []).join(', ');
-    return reply.send(
-      gatherTwiml({
-        actionUrl: `${PUBLIC_BASE_URL}/twiml?firmId=${encodeURIComponent(firmId)}`,
-        speakText,
-        ttsKey,
-        liveUrl,
-        emptyCount: step.session.repromptCount,
-        hints: practiceHints,
-      })
-    );
+    return reply.send(buildPendingResultTwiml({ step, pending, firmId, callSid }));
   } catch (err) {
     app.log.error({ err: String(err), stack: err?.stack, callSid }, '/twiml-result failed');
     return reply.send(doneTwiml({ speakText: getErrorMessage(), ttsKey: null }));
@@ -3580,16 +3583,17 @@ if (isMain) {
     console.log('hold-phrase ready:', holdKey ? `OK (${holdKey.slice(0, 8)})` : 'FAILED — <Say> still used as last resort');
 
     // Batch to respect ElevenLabs 10-concurrent-request limit — prevents 429 storm on every deploy
-    fillerKeys = new Array(FILLER_PHRASES.length);
+    fillerKeys = new Array(FILLER_PREWARM_PHRASES.length);
     const FILLER_BATCH = 8;
-    for (let i = 0; i < FILLER_PHRASES.length; i += FILLER_BATCH) {
-      const batch = FILLER_PHRASES.slice(i, i + FILLER_BATCH);
+    for (let i = 0; i < FILLER_PREWARM_PHRASES.length; i += FILLER_BATCH) {
+      const batch = FILLER_PREWARM_PHRASES.slice(i, i + FILLER_BATCH);
       const results = await Promise.all(batch.map((p) => synthesizeToDisk(p).catch(() => null)));
       for (let j = 0; j < results.length; j++) fillerKeys[i + j] = results[j];
-      if (i + FILLER_BATCH < FILLER_PHRASES.length) await new Promise((r) => setTimeout(r, 500));
+      if (i + FILLER_BATCH < FILLER_PREWARM_PHRASES.length) await new Promise((r) => setTimeout(r, 500));
     }
+    questionFillerKey = fillerKeys[FILLER_PHRASES.length] || null;
     const fillerReady = fillerKeys.filter(Boolean).length;
-    console.log(`filler-phrases ready: ${fillerReady}/${FILLER_PHRASES.length}`);
+    console.log(`filler-phrases ready: ${fillerReady}/${FILLER_PREWARM_PHRASES.length}`);
 
     prewarmTtsCache().catch((err) => app.log.warn({ err: String(err) }, 'TTS prewarm error'));
   } catch (err) {
