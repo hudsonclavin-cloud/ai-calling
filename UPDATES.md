@@ -16,6 +16,17 @@
 
 ## Session Log (newest first)
 
+### 2026-07-05 — Caller-audible hotfix: timeouts, notification latch, live stream delta, audible errors
+**Changed (`streaming/server.mjs` only):**
+- EDIT 1: fixed the Responses-API stream delta read (`event.delta` is a string) → early-stream text extraction works, streaming actually helps latency.
+- EDIT 2/3: bounded the OpenAI fetch (`OPENAI_TIMEOUT_MS` default 8000) and the Resend `resendPost` fetch (`RESEND_TIMEOUT_MS` default 5000) with `AbortSignal.timeout` — no more unbounded caller-side dead air; retry backoff `[0,1000,4000]` unchanged.
+- EDIT 4: speech-path `fireNotifications` is now fire-and-forget (`.catch` logs `fireNotifications background failure`) — the goodbye no longer waits on the email. (persist ordering unchanged: `saveSessions` + fire-and-forget artifacts already ran before it.)
+- EDIT 5: added a `notified` idempotency latch (`createSession` + guard/set inside `fireNotifications`).
+- EDIT 6: `holdKey` ("One moment please.") now substitutes ONLY when `speakText` is empty — error/rate-limit/timeout messages are audible for the first time (via `/tts-live` when a `liveUrl` is present, else `<Say>`).
+- EDIT 7: question-turn `speechTimeout="1" → "auto"` (grace builder untouched) — recovers ~300-700ms/turn of endpointing tax; A/B by ear and revert one line if end-of-speech detection degrades.
+- EDIT 8: retired the adaptive filler — removed `buildAdaptiveFiller`/`extractCallerTopic` (both had a single call site); every filler now resolves to a prewarmed key, so no live TTS and no parroted STT ("Oh — <your words>. One sec.") on the filler path.
+**Known limitation / follow-up:** the EDIT 5 latch is in-memory only. On both fire sites `saveSessions` runs before `fireNotifications`, so `notified=true` (set inside `fireNotifications`) is not persisted that turn — a grace re-trip that reloads the session sees `notified:false` and can still duplicate. Full cross-request idempotency needs `notified` persisted (e.g., set it before the pre-fire `saveSessions`, guarded so the send still fires, or a module-level notified-set). Flagged, not fixed in this pass.
+
 ### 2026-07-05 — Front-desk dashboard shipped (backend-served, key-guarded)
 **Changed:**
 - Added `streaming/dashboard.html` — standalone message-slip front-desk UI (inert without the admin key; polls the data endpoint every 30s).

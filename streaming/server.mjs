@@ -559,6 +559,7 @@ function createSession({ callSid, firmId, fromPhone, firmConfig }) {
     transcript: [],
     disclaimerShown: false,
     done: false,
+    notified: false,           // idempotency latch — true once notifications have been dispatched
     createdAt: nowIso(),
     updatedAt: nowIso(),
   };
@@ -982,6 +983,7 @@ clarifying_note is optional internal context for your next turn - use it for ton
   const result = (async () => {
     const res = await fetch('https://api.openai.com/v1/responses', {
       method: 'POST',
+      signal: AbortSignal.timeout(Number(process.env.OPENAI_TIMEOUT_MS ?? 8000)),
       headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: OPENAI_MODEL,
@@ -1027,7 +1029,7 @@ clarifying_note is optional internal context for your next turn - use it for ton
         let event;
         try { event = JSON.parse(data); } catch { continue; }
         if (event.type === 'response.output_text.delta') {
-          deltaAccum += event.delta?.text || '';
+          deltaAccum += typeof event.delta === 'string' ? event.delta : (event.delta?.text || '');
           if (!earlyResolved) {
             const match = deltaAccum.match(/"next_question_text"\s*:\s*"((?:[^"\\]|\\.)*)"/);
             if (match) {
@@ -1199,7 +1201,8 @@ function xmlEscape(s) {
 }
 
 function gatherTwiml({ actionUrl, speakText, ttsKey, liveUrl = null, emptyCount = 0, hints = '' }) {
-  const effectiveKey = ttsKey || holdKey;
+  const hasSpeakText = !!(speakText && speakText.trim());
+  const effectiveKey = ttsKey || (hasSpeakText ? null : holdKey);
   const speakerNode = effectiveKey
     ? `<Play>${xmlEscape(`${PUBLIC_BASE_URL}/api/tts?key=${encodeURIComponent(effectiveKey)}`)}</Play>`
     : liveUrl
@@ -1210,7 +1213,7 @@ function gatherTwiml({ actionUrl, speakText, ttsKey, liveUrl = null, emptyCount 
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Gather input="speech" action="${xmlEscape(actionUrl)}" method="POST" speechTimeout="1" timeout="6" actionOnEmptyResult="true" bargeIn="true" enhanced="true" language="en-US" profanityFilter="false"${hintsAttr}>
+  <Gather input="speech" action="${xmlEscape(actionUrl)}" method="POST" speechTimeout="auto" timeout="6" actionOnEmptyResult="true" bargeIn="true" enhanced="true" language="en-US" profanityFilter="false"${hintsAttr}>
     ${speakerNode}
   </Gather>
   <Redirect method="POST">${xmlEscape(redirectUrl)}</Redirect>
@@ -1233,7 +1236,8 @@ async function voicemailTwiml({ firmId, callSid, fromPhone, firmConfig }) {
 }
 
 function doneTwiml({ speakText, ttsKey, liveUrl = null, firmId = '', callSid = '' }) {
-  const effectiveKey = ttsKey || holdKey;
+  const hasSpeakText = !!(speakText && speakText.trim());
+  const effectiveKey = ttsKey || (hasSpeakText ? null : holdKey);
   const speakerNode = effectiveKey
     ? `<Play>${xmlEscape(`${PUBLIC_BASE_URL}/api/tts?key=${encodeURIComponent(effectiveKey)}`)}</Play>`
     : liveUrl
@@ -1462,6 +1466,7 @@ function isSandboxFromAddress(from) {
 async function resendPost({ from, to, subject, html }) {
   const res = await fetch('https://api.resend.com/emails', {
     method: 'POST',
+    signal: AbortSignal.timeout(Number(process.env.RESEND_TIMEOUT_MS ?? 5000)),
     headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ from, to: [to], subject, html }),
   });
@@ -1828,6 +1833,11 @@ async function fireNotifications(session, firmConfig) {
     'fireNotifications called',
   );
   if (!session.done) return;
+  if (session.notified) {
+    app.log.debug({ leadId: session.leadId }, 'notifications already sent — skipping');
+    return;
+  }
+  session.notified = true; // close the latch before the first send is dispatched (race-safe)
   if (!RESEND_API_KEY) {
     app.log.warn({ leadId: session.leadId }, 'fireNotifications: RESEND_API_KEY not set — email notification will be skipped');
     console.warn('[Email] Skipping — RESEND_API_KEY not set');
@@ -1903,30 +1913,6 @@ async function lookupCallerHistory(phone, firmId) {
 }
 
 // ── Core controller ───────────────────────────────────────────────────────────
-
-function extractCallerTopic(userText) {
-  if (!userText || typeof userText !== 'string') return null;
-  const text = userText.trim();
-  if (text.length < 3) return null;
-  const match = text.match(/(?:about|after|because of|with|for|regarding|in|from)\s+(?:a |an |the |my )?([a-zA-Z][a-zA-Z\s'-]{2,40}?)(?:[.?!,]|$)/i);
-  if (match && match[1]) {
-    const topic = match[1].trim().toLowerCase();
-    if (topic.length >= 3 && topic.length <= 40) return topic;
-  }
-  const words = text.split(/\s+/).filter(w => w.length > 2);
-  if (words.length >= 3) {
-    return words.slice(0, Math.min(5, words.length)).join(' ').toLowerCase();
-  }
-  return null;
-}
-
-function buildAdaptiveFiller(topic) {
-  if (!topic) return null;
-  const templates = [
-    `Oh — ${topic}. One sec.`,
-  ];
-  return templates[Math.floor(Math.random() * templates.length)];
-}
 
 function isCallerQuestion(userText) {
   const text = String(userText || '').trim();
@@ -2313,7 +2299,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
     .then(() => { if (session.done) app.log.info({ callSid, leadId: session.leadId }, 'persistArtifacts OK — lead saved to DB'); })
     .catch((err) => app.log.error({ err: String(err), callSid, leadId: session.leadId }, 'persistArtifacts FAILED — lead not saved'));
   app.log.info({ leadId: session.leadId, sessionDone: session.done, firmId: session.firmId, notificationEmailFromConfig: firmConfig?.notification_email || '(empty)' }, 'about to call fireNotifications');
-  await fireNotifications(session, firmConfig);
+  fireNotifications(session, firmConfig).catch(err => app.log.error({ err: String(err) }, 'fireNotifications background failure'));
 
   return {
     firmConfig,
@@ -2923,18 +2909,17 @@ app.post('/twiml', { preHandler: twilioSignaturePreHandler }, async (req, reply)
       }
 
       const questionFiller = isCallerQuestion(userText);
-      const callerTopic = questionFiller ? null : extractCallerTopic(userText);
-      const adaptiveFiller = questionFiller ? null : buildAdaptiveFiller(callerTopic);
-      app.log.info({ callSid, callerTopic, questionFiller, usedAdaptive: !!adaptiveFiller }, 'filler-selected');
+      app.log.info({ callSid, questionFiller }, 'filler-selected');
 
-      // Static filler index computed first (anti-repeat state maintained regardless of dynamic path)
+      // Static filler index computed (anti-repeat state maintained). Every filler now
+      // resolves to a prewarmed key — no live TTS and no parroted STT on the filler path.
       const lastFillerIdx = fillerLastIdxMap.get(callSid) ?? -1;
       let fillerIdx;
       do { fillerIdx = Math.floor(Math.random() * FILLER_PHRASES.length); }
       while (FILLER_PHRASES.length > 1 && fillerIdx === lastFillerIdx);
       fillerLastIdxMap.set(callSid, fillerIdx);
-      const fillerText = questionFiller ? QUESTION_FILLER : (adaptiveFiller || FILLER_PHRASES[fillerIdx]);
-      const fillerKey = questionFiller ? questionFillerKey : (adaptiveFiller ? null : fillerKeys[fillerIdx]);
+      const fillerText = questionFiller ? QUESTION_FILLER : FILLER_PHRASES[fillerIdx];
+      const fillerKey = questionFiller ? questionFillerKey : fillerKeys[fillerIdx];
       const staticFillerAudioUrl = fillerKey
         ? `${PUBLIC_BASE_URL}/api/tts?key=${encodeURIComponent(fillerKey)}`
         : `${PUBLIC_BASE_URL}/tts-live?text=${encodeURIComponent(fillerText)}&firmId=${encodeURIComponent(firmId)}`;
@@ -2943,7 +2928,7 @@ app.post('/twiml', { preHandler: twilioSignaturePreHandler }, async (req, reply)
 
       const resultUrl = `${PUBLIC_BASE_URL}/twiml-result?callSid=${encodeURIComponent(callSid)}&firmId=${encodeURIComponent(firmId)}`;
 
-      app.log.info({ callSid, fillerIdx, fillerCached: !!fillerKey, questionFiller, dynamicFiller: null, adaptiveFiller: adaptiveFiller ?? null }, 'filler-sent');
+      app.log.info({ callSid, fillerIdx, fillerCached: !!fillerKey, questionFiller }, 'filler-sent');
       reply.header('Content-Type', 'text/xml');
       return reply.send(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
