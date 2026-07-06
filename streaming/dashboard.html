@@ -646,12 +646,19 @@
     renderList();
   });
   $('refreshBtn').addEventListener('click', ()=>load(true));
-  $('keyform').addEventListener('submit', e=>{
-    e.preventDefault();
+  let gateSubmitting = false;
+  function submitGate(){
+    if(gateSubmitting) return;
     const k = $('keyInput').value.trim();
     if(!k){ $('gateErr').textContent='Enter the admin key to continue.'; return; }
-    setKey(k); $('gateErr').textContent=''; show('loading'); load();
-  });
+    gateSubmitting = true;
+    setKey(k); $('gateErr').textContent=''; show('loading');
+    Promise.resolve(load()).finally(()=>{ gateSubmitting = false; });
+  }
+  $('keyform').addEventListener('submit', e=>{ e.preventDefault(); submitGate(); });
+  const gateBtn = $('keyform').querySelector('button');
+  if(gateBtn) gateBtn.addEventListener('click', e=>{ e.preventDefault(); submitGate(); });
+  $('keyInput').addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); submitGate(); } });
 
   /* ── Polling: pause when tab hidden ── */
   function startPoll(){

@@ -2576,17 +2576,40 @@ app.get('/api/dashboard-leads', async (req, reply) => {
     return reply.code(401).send({ error: 'unauthorized' });
   }
   const firmId = String(req.query?.firmId || 'firm_default').trim() || 'firm_default';
-  const leads = await listLeadsForDashboard(firmId, 100);
-  reply.header('Cache-Control', 'no-store, must-revalidate');
-  return reply.send({ firmId, leads });
+  let timer;
+  try {
+    // Bound the DB read so a stalled query fails fast+logged instead of hanging
+    // the request until the edge returns a silent 502.
+    const leads = await Promise.race([
+      listLeadsForDashboard(firmId, 100),
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('dashboard-leads db read timed out')),
+          Number(process.env.DASHBOARD_DB_TIMEOUT_MS ?? 8000),
+        );
+      }),
+    ]);
+    clearTimeout(timer);
+    reply.header('Cache-Control', 'no-store, must-revalidate');
+    return reply.send({ firmId, leads });
+  } catch (err) {
+    clearTimeout(timer);
+    app.log.error({ err: String(err), firmId }, 'dashboard-leads: failed to load leads');
+    return reply.code(500).send({ error: 'failed to load leads' });
+  }
 });
 
 // GET /dashboard — serves the static front-desk page. The page is inert without
 // the admin key (the data endpoint above is what's guarded), so no auth here.
 app.get('/dashboard', async (req, reply) => {
-  const html = await fs.readFile(path.join(__dirname, 'dashboard.html'), 'utf8');
-  reply.header('Content-Type', 'text/html; charset=utf-8');
-  return reply.send(html);
+  try {
+    const html = await fs.readFile(path.join(__dirname, 'dashboard.html'), 'utf8');
+    reply.header('Content-Type', 'text/html; charset=utf-8');
+    return reply.send(html);
+  } catch (err) {
+    app.log.error({ err: String(err) }, 'dashboard: failed to read dashboard.html');
+    return reply.code(500).send('dashboard unavailable');
+  }
 });
 
 app.post('/api/next-step', async (req, reply) => {

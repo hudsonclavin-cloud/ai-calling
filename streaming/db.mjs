@@ -328,20 +328,19 @@ export async function loadLeads(firmId) {
 
 export async function saveLeads(leads) { await _saveLeads(leads); }
 
-// Read-only helper for the front-desk dashboard. Returns rows as plain objects
-// keyed by column name with values exactly as stored (JSON columns stay as
-// strings — the dashboard parses them defensively client-side).
+// Read-only helper for the front-desk dashboard. Coerces every row through the
+// shared parseLead parser (exactly like loadLeads) so the returned objects are
+// guaranteed JSON-safe primitives. Returning raw libsql row values risks
+// non-serializable types (e.g. BigInt from INTEGER columns) that throw inside
+// Fastify's JSON serialization — which on the deployed edge surfaces as a 502
+// with no application log. The dashboard client parses object/array columns
+// defensively, so pre-parsed JSON columns are compatible.
 export async function listLeadsForDashboard(firmId, limit = 100) {
   const result = await getClient().execute({
     sql: 'SELECT * FROM leads WHERE firmId = ? ORDER BY updatedAt DESC LIMIT ?',
     args: [firmId, limit],
   });
-  const cols = result.columns;
-  return result.rows.map((row) => {
-    const obj = {};
-    for (const c of cols) obj[c] = row[c];
-    return obj;
-  });
+  return result.rows.map(parseLead);
 }
 
 export async function getLeadsByPhone(phone, firmId) {

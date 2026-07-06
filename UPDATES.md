@@ -16,6 +16,16 @@
 
 ## Session Log (newest first)
 
+### 2026-07-06 — Dashboard `/api/dashboard-leads` 502: harden the data path
+**Symptom:** `/dashboard` HTML loaded but clicking Open returned a 502 from the Railway edge with NO application logs. Local reproduction returned 200 — but only because the local DB was empty; the real-row path was never exercised.
+**Changed (`streaming/db.mjs` + `streaming/server.mjs`):**
+- `listLeadsForDashboard` now maps rows through the shared `parseLead` (same as `loadLeads`) instead of returning raw libsql row values. Raw values risk non-JSON-serializable types (e.g. BigInt from INTEGER columns) that throw during Fastify serialization → which surfaces on the edge as a silent 502.
+- The `/api/dashboard-leads` handler now wraps the DB read in try/catch + an 8s timeout (`DASHBOARD_DB_TIMEOUT_MS`), so a stalled or throwing query returns a **logged** 500 fast instead of hanging until the edge 502s. `/dashboard` got a try/catch too.
+**Verified:** booted locally, seeded a realistic lead (INTEGER + JSON-string columns) into the dev DB, confirmed 200 with fully-coerced JSON, then removed the seed. **Note:** since the code reproduces as 200, this hardens the failure surface and — critically — makes any remaining prod failure LOGGED and diagnosable rather than silent. If it still 502s after deploy, the Railway log will now name the cause (and the older `/api/leads` route reading the same table is the comparison probe).
+
+### 2026-07-05 — Dashboard gate button unresponsive: belt-and-suspenders rebind
+**Changed (`streaming/dashboard.html` only):** the admin-key gate's "Open" button did nothing on click (no fetch, no console error). File integrity was clean (682 lines, LF-only, no CRLF) — the cause was upstream of the file itself. Fix: extracted the submit logic into a shared `submitGate()` guarded by an in-flight flag, and wired it to three independent triggers — form submit, direct button click, and Enter keydown on the key input — so the gate unlocks even if one event path is being swallowed.
+
 ### 2026-07-05 — Caller-audible hotfix: timeouts, notification latch, live stream delta, audible errors
 **Changed (`streaming/server.mjs` only):**
 - EDIT 1: fixed the Responses-API stream delta read (`event.delta` is a string) → early-stream text extraction works, streaming actually helps latency.
