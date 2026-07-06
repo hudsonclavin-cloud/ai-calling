@@ -328,6 +328,22 @@ export async function loadLeads(firmId) {
 
 export async function saveLeads(leads) { await _saveLeads(leads); }
 
+// Read-only helper for the front-desk dashboard. Returns rows as plain objects
+// keyed by column name with values exactly as stored (JSON columns stay as
+// strings — the dashboard parses them defensively client-side).
+export async function listLeadsForDashboard(firmId, limit = 100) {
+  const result = await getClient().execute({
+    sql: 'SELECT * FROM leads WHERE firmId = ? ORDER BY updatedAt DESC LIMIT ?',
+    args: [firmId, limit],
+  });
+  const cols = result.columns;
+  return result.rows.map((row) => {
+    const obj = {};
+    for (const c of cols) obj[c] = row[c];
+    return obj;
+  });
+}
+
 export async function getLeadsByPhone(phone, firmId) {
   const result = await getClient().execute({
     sql: 'SELECT * FROM leads WHERE fromPhone = ? AND firmId = ? ORDER BY updatedAt DESC LIMIT 5',

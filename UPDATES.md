@@ -16,6 +16,14 @@
 
 ## Session Log (newest first)
 
+### 2026-07-05 — Front-desk dashboard shipped (backend-served, key-guarded)
+**Changed:**
+- Added `streaming/dashboard.html` — standalone message-slip front-desk UI (inert without the admin key; polls the data endpoint every 30s).
+- `streaming/db.mjs`: new read-only `listLeadsForDashboard(firmId, limit)` — parameterized `SELECT * FROM leads WHERE firmId=? ORDER BY updatedAt DESC LIMIT ?`, returns plain column-keyed objects with JSON columns left as strings for the client to parse.
+- `streaming/server.mjs`: `GET /api/dashboard-leads` (requires `x-admin-key`; 503 if `ADMIN_API_KEY` unset, 401 on mismatch, never logs the key) + `GET /dashboard` (serves the HTML via `fs.readFile` from `__dirname`).
+- Note: no `/demo` route existed to mirror, so the page is served from the streaming backend directly (required anyway — it fetches `/api/dashboard-leads` same-origin).
+**Follow-up:** the endpoint returns PII behind a single shared admin key — replace with the Cluster F per-firm auth layer when it lands.
+
 ### 2026-07-03 — Six-agent backend audit + concurrency deadlock fix shipped
 **Changed:**
 - `streaming/db.mjs`: Split `persistSessionArtifacts` into a lock-free `persistSessionArtifactsUnlocked` delegate; the public `persistSessionArtifacts` now wraps it in `withCallLock` (commit `cdcee5a`)

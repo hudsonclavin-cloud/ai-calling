@@ -1,0 +1,682 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ava — Front Desk</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Instrument+Sans:wght@400;500;600&family=Spline+Sans+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#0F1420;
+    --ink-2:#121829;
+    --panel:#161E31;
+    --panel-2:#1B2439;
+    --line:#242F49;
+    --line-soft:#1D2740;
+    --paper:#EAE5D9;
+    --paper-dim:#B9B3A4;
+    --dim:#8A93A8;
+    --faint:#5C657C;
+    --slip:#E7998F;
+    --slip-deep:#C9776E;
+    --ok:#8FBFA4;
+    --amber:#D9B36B;
+    --mono:'Spline Sans Mono',ui-monospace,monospace;
+    --sans:'Instrument Sans',system-ui,sans-serif;
+    --disp:'Bricolage Grotesque',var(--sans);
+    --r:10px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:var(--ink);
+    color:var(--paper);
+    font-family:var(--sans);
+    font-size:15px;
+    line-height:1.5;
+    -webkit-font-smoothing:antialiased;
+  }
+  ::selection{background:var(--slip);color:var(--ink)}
+  button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
+  input{font:inherit;color:inherit}
+  a{color:inherit}
+
+  /* ── Top bar ─────────────────────────────────────────── */
+  .bar{
+    display:flex;align-items:center;gap:14px;
+    padding:14px 22px;
+    border-bottom:1px solid var(--line-soft);
+    background:linear-gradient(180deg,var(--ink-2),var(--ink));
+  }
+  .wordmark{
+    font-family:var(--disp);font-weight:800;font-size:21px;letter-spacing:-.02em;
+    display:flex;align-items:baseline;gap:2px;
+  }
+  .wordmark i{
+    font-style:normal;color:var(--slip);
+    display:inline-block;transform:translateY(-1px);
+  }
+  .bar .sub{
+    font-family:var(--mono);font-size:11.5px;color:var(--dim);
+    letter-spacing:.04em;text-transform:uppercase;
+    padding-left:14px;border-left:1px solid var(--line);
+  }
+  .bar .spacer{flex:1}
+  .live{
+    display:flex;align-items:center;gap:7px;
+    font-family:var(--mono);font-size:11.5px;color:var(--dim);
+    letter-spacing:.06em;text-transform:uppercase;
+  }
+  .live .dot{
+    width:7px;height:7px;border-radius:50%;
+    background:var(--ok);
+    box-shadow:0 0 0 0 rgba(143,191,164,.5);
+    animation:pulse 2.4s infinite;
+  }
+  .live.paused .dot{background:var(--faint);animation:none;box-shadow:none}
+  @keyframes pulse{
+    0%{box-shadow:0 0 0 0 rgba(143,191,164,.45)}
+    70%{box-shadow:0 0 0 9px rgba(143,191,164,0)}
+    100%{box-shadow:0 0 0 0 rgba(143,191,164,0)}
+  }
+  .iconbtn{
+    display:flex;align-items:center;gap:7px;
+    padding:7px 12px;border-radius:8px;
+    border:1px solid var(--line);color:var(--dim);
+    font-family:var(--mono);font-size:11.5px;letter-spacing:.05em;text-transform:uppercase;
+    transition:border-color .15s,color .15s;
+  }
+  .iconbtn:hover{border-color:var(--dim);color:var(--paper)}
+
+  /* ── Stats strip ─────────────────────────────────────── */
+  .stats{
+    display:flex;gap:0;
+    border-bottom:1px solid var(--line-soft);
+    background:var(--ink);
+    overflow-x:auto;
+  }
+  .stat{
+    display:flex;align-items:baseline;gap:8px;
+    padding:11px 22px;
+    border-right:1px solid var(--line-soft);
+    white-space:nowrap;
+  }
+  .stat b{
+    font-family:var(--mono);font-weight:600;font-size:15px;
+    font-variant-numeric:tabular-nums;color:var(--paper);
+  }
+  .stat span{
+    font-family:var(--mono);font-size:10.5px;color:var(--faint);
+    letter-spacing:.08em;text-transform:uppercase;
+  }
+  .stat.urgent b{color:var(--slip)}
+
+  /* ── Layout ──────────────────────────────────────────── */
+  .main{
+    display:grid;
+    grid-template-columns:minmax(320px,410px) 1fr;
+    height:calc(100vh - 106px);
+  }
+
+  /* ── List pane ───────────────────────────────────────── */
+  .listpane{
+    border-right:1px solid var(--line-soft);
+    display:flex;flex-direction:column;min-width:0;
+  }
+  .controls{padding:14px 16px 10px}
+  .search{
+    width:100%;
+    background:var(--ink-2);
+    border:1px solid var(--line);
+    border-radius:8px;
+    padding:9px 12px;
+    font-size:14px;color:var(--paper);
+    outline:none;
+    transition:border-color .15s;
+  }
+  .search::placeholder{color:var(--faint)}
+  .search:focus{border-color:var(--dim)}
+  .chips{display:flex;gap:6px;flex-wrap:wrap;padding:0 16px 12px}
+  .chip{
+    font-family:var(--mono);font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;
+    padding:5px 10px;border-radius:99px;
+    border:1px solid var(--line);color:var(--dim);
+    transition:all .15s;
+  }
+  .chip:hover{color:var(--paper);border-color:var(--dim)}
+  .chip.on{background:var(--paper);color:var(--ink);border-color:var(--paper);font-weight:600}
+  .chip.on.urgentchip{background:var(--slip);border-color:var(--slip)}
+
+  .list{flex:1;overflow-y:auto;padding:2px 10px 20px}
+  .row{
+    width:100%;text-align:left;
+    display:grid;grid-template-columns:1fr auto;gap:2px 12px;
+    padding:13px 12px;border-radius:var(--r);
+    border:1px solid transparent;
+    transition:background .12s,border-color .12s;
+    animation:rowin .35s ease both;
+  }
+  @keyframes rowin{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+  .row:hover{background:var(--ink-2)}
+  .row.sel{background:var(--panel);border-color:var(--line)}
+  .row .name{
+    font-weight:600;font-size:15px;color:var(--paper);
+    display:flex;align-items:center;gap:8px;min-width:0;
+  }
+  .row .name em{
+    font-style:normal;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  }
+  .flame{color:var(--slip);font-size:12px;flex:none}
+  .row .when{
+    font-family:var(--mono);font-size:11px;color:var(--faint);
+    font-variant-numeric:tabular-nums;text-align:right;align-self:center;
+  }
+  .row .meta{
+    grid-column:1/-1;
+    display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+    font-size:12.5px;color:var(--dim);
+  }
+  .pill{
+    font-family:var(--mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;
+    padding:2.5px 8px;border-radius:99px;border:1px solid var(--line);color:var(--dim);
+  }
+  .pill.ready{color:var(--ok);border-color:rgba(143,191,164,.35)}
+  .pill.partial{color:var(--amber);border-color:rgba(217,179,107,.35)}
+  .pill.progress{color:var(--dim)}
+  .pill.contacted{color:var(--faint);border-color:var(--line-soft)}
+  .row .dur{font-family:var(--mono);font-size:11px;color:var(--faint);font-variant-numeric:tabular-nums}
+  .row .q{font-family:var(--mono);font-size:11px;color:var(--faint)}
+  .row .q b{color:var(--paper-dim);font-weight:600}
+
+  /* ── Slip pane (the signature) ───────────────────────── */
+  .slippane{overflow-y:auto;padding:26px 30px 60px;min-width:0}
+  .slipwrap{max-width:720px;margin:0 auto;animation:slipin .4s cubic-bezier(.2,.8,.25,1) both}
+  @keyframes slipin{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+
+  .perf{
+    height:14px;
+    background-image:radial-gradient(circle at 8px 0px,transparent 5px,var(--panel) 5.5px);
+    background-size:16px 14px;background-repeat:repeat-x;background-position:0 8px;
+  }
+  .slip{
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-top:none;
+    border-radius:0 0 14px 14px;
+    box-shadow:0 24px 60px -30px rgba(0,0,0,.55);
+    overflow:hidden;
+  }
+  .sliphead{
+    display:flex;align-items:center;justify-content:space-between;gap:14px;
+    padding:16px 24px 14px;
+    border-bottom:1px dashed var(--line);
+  }
+  .sliphead .eyebrow{
+    font-family:var(--mono);font-weight:600;font-size:11px;
+    letter-spacing:.22em;text-transform:uppercase;color:var(--slip);
+  }
+  .sliphead .taken{
+    font-family:var(--mono);font-size:11px;color:var(--faint);
+    font-variant-numeric:tabular-nums;text-align:right;
+  }
+  .stamp{
+    font-family:var(--mono);font-weight:600;font-size:11px;letter-spacing:.14em;text-transform:uppercase;
+    padding:6px 12px;border:1.5px solid currentColor;border-radius:5px;
+    transform:rotate(-2.5deg);
+    flex:none;
+  }
+  .stamp.ready{color:var(--ok)}
+  .stamp.partial{color:var(--amber)}
+  .stamp.progress{color:var(--dim)}
+  .stamp.contacted{color:var(--faint)}
+
+  .slipbody{padding:20px 24px 26px}
+  .caller{
+    font-family:var(--disp);font-weight:700;font-size:29px;letter-spacing:-.02em;
+    line-height:1.15;
+    display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+  }
+  .caller .flame{font-size:17px}
+  .fields{
+    display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));
+    gap:14px 22px;margin:18px 0 6px;
+  }
+  .field label{
+    display:block;
+    font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;
+    color:var(--faint);margin-bottom:3px;
+  }
+  .field .v{font-family:var(--mono);font-size:13.5px;color:var(--paper);font-variant-numeric:tabular-nums}
+  .field .v.dim{color:var(--dim)}
+
+  .sec{margin-top:22px}
+  .sec>h3{
+    font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--faint);
+    display:flex;align-items:center;gap:10px;margin-bottom:10px;
+  }
+  .sec>h3::after{content:"";flex:1;height:1px;background:var(--line-soft)}
+  .summary{
+    font-size:16px;line-height:1.65;color:var(--paper);
+  }
+  .summary.empty{color:var(--faint);font-style:italic}
+
+  .qgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px}
+  .qcell .lab{
+    display:flex;justify-content:space-between;
+    font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;
+    color:var(--dim);margin-bottom:6px;
+  }
+  .qcell .lab b{color:var(--paper);font-variant-numeric:tabular-nums}
+  .qbar{height:4px;border-radius:99px;background:var(--line-soft);overflow:hidden}
+  .qbar i{display:block;height:100%;border-radius:99px;background:var(--paper-dim);transition:width .5s ease}
+  .flags{display:flex;gap:6px;flex-wrap:wrap;margin-top:12px}
+  .flag{
+    font-size:12px;color:var(--amber);
+    border:1px solid rgba(217,179,107,.3);border-radius:7px;
+    padding:4px 10px;background:rgba(217,179,107,.06);
+  }
+
+  audio{width:100%;margin-top:4px;filter:invert(.88) hue-rotate(180deg);border-radius:8px}
+
+  details.tsec{border:1px solid var(--line-soft);border-radius:var(--r);overflow:hidden}
+  details.tsec>summary{
+    list-style:none;cursor:pointer;
+    padding:12px 16px;
+    font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);
+    display:flex;align-items:center;gap:8px;
+    transition:color .15s;
+  }
+  details.tsec>summary::-webkit-details-marker{display:none}
+  details.tsec>summary::before{content:"▸";color:var(--faint);transition:transform .15s}
+  details.tsec[open]>summary::before{transform:rotate(90deg)}
+  details.tsec>summary:hover{color:var(--paper)}
+  .bubbles{padding:6px 16px 18px;display:flex;flex-direction:column;gap:8px}
+  .bub{max-width:86%;padding:9px 13px;border-radius:12px;font-size:13.5px;line-height:1.55}
+  .bub.ava{align-self:flex-start;background:var(--panel-2);border:1px solid var(--line-soft);border-bottom-left-radius:4px}
+  .bub.caller{align-self:flex-end;background:var(--ink-2);border:1px solid var(--line);border-bottom-right-radius:4px;color:var(--paper)}
+  .bub .who{
+    display:block;font-family:var(--mono);font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;
+    color:var(--faint);margin-bottom:3px;
+  }
+  .tl{padding:4px 16px 16px;display:flex;flex-direction:column;gap:6px}
+  .tl div{font-family:var(--mono);font-size:12px;color:var(--dim)}
+
+  /* ── States ──────────────────────────────────────────── */
+  .center{
+    height:100%;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;gap:14px;
+    text-align:center;padding:40px;
+  }
+  .center h2{font-family:var(--disp);font-weight:700;font-size:22px;letter-spacing:-.01em}
+  .center p{color:var(--dim);max-width:380px;font-size:14px}
+  .keyform{display:flex;gap:8px;width:100%;max-width:360px}
+  .keyform input{
+    flex:1;background:var(--ink-2);border:1px solid var(--line);border-radius:8px;
+    padding:10px 13px;font-family:var(--mono);font-size:13px;outline:none;
+  }
+  .keyform input:focus{border-color:var(--dim)}
+  .btn{
+    background:var(--paper);color:var(--ink);font-weight:600;
+    padding:10px 18px;border-radius:8px;font-size:14px;
+    transition:opacity .15s;
+  }
+  .btn:hover{opacity:.88}
+  .banner{
+    margin:0;padding:9px 22px;
+    background:rgba(231,153,143,.08);
+    border-bottom:1px solid rgba(231,153,143,.25);
+    color:var(--slip);
+    font-family:var(--mono);font-size:11.5px;letter-spacing:.04em;
+    display:none;
+  }
+  .banner.show{display:block}
+  .ghost{color:var(--faint);font-family:var(--mono);font-size:12px}
+
+  /* ── Mobile ──────────────────────────────────────────── */
+  .back{display:none}
+  @media (max-width:860px){
+    .main{grid-template-columns:1fr;height:auto}
+    .listpane{border-right:none}
+    body.viewing .listpane{display:none}
+    body:not(.viewing) .slippane{display:none}
+    .slippane{padding:18px 14px 60px}
+    .back{
+      display:inline-flex;align-items:center;gap:6px;
+      margin-bottom:14px;
+      font-family:var(--mono);font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;
+      color:var(--dim);
+    }
+    .back:hover{color:var(--paper)}
+    .bar .sub{display:none}
+    .main{height:calc(100vh - 106px)}
+    .listpane,.slippane{height:100%;overflow-y:auto}
+  }
+  @media (prefers-reduced-motion:reduce){
+    *,*::before,*::after{animation:none!important;transition:none!important}
+  }
+  :focus-visible{outline:2px solid var(--slip);outline-offset:2px;border-radius:6px}
+</style>
+</head>
+<body>
+
+<header class="bar">
+  <div class="wordmark">Ava<i>.</i></div>
+  <div class="sub" id="firmLabel">Front desk</div>
+  <div class="spacer"></div>
+  <div class="live" id="liveBadge"><span class="dot"></span><span id="liveText">Live</span></div>
+  <button class="iconbtn" id="refreshBtn" title="Refresh now">⟳ Refresh</button>
+</header>
+
+<div class="banner" id="banner"></div>
+
+<div class="stats" id="stats" hidden>
+  <div class="stat"><b id="stToday">0</b><span>calls today</span></div>
+  <div class="stat"><b id="stWeek">0</b><span>leads this week</span></div>
+  <div class="stat urgent"><b id="stUrgent">0</b><span>urgent open</span></div>
+  <div class="stat"><b id="stQuality">—</b><span>avg quality</span></div>
+  <div class="stat"><b id="stDur">—</b><span>avg call</span></div>
+</div>
+
+<div class="main" id="app" hidden>
+  <aside class="listpane">
+    <div class="controls">
+      <input class="search" id="search" type="search" placeholder="Search name, phone, or summary…" autocomplete="off">
+    </div>
+    <div class="chips" id="chips">
+      <button class="chip on" data-f="all">All</button>
+      <button class="chip" data-f="ready_for_review">Ready</button>
+      <button class="chip" data-f="partial">Partial</button>
+      <button class="chip" data-f="in_progress">In progress</button>
+      <button class="chip urgentchip" data-f="urgent">Urgent</button>
+    </div>
+    <div class="list" id="list"></div>
+  </aside>
+  <section class="slippane" id="slippane"></section>
+</div>
+
+<div class="center" id="gate" hidden>
+  <h2>Front desk is locked</h2>
+  <p>Enter the admin key to open the dashboard. It stays for this tab only.</p>
+  <form class="keyform" id="keyform">
+    <input type="password" id="keyInput" placeholder="Admin key" autocomplete="current-password">
+    <button class="btn" type="submit">Open</button>
+  </form>
+  <p class="ghost" id="gateErr"></p>
+</div>
+
+<div class="center" id="loading"><p class="ghost">Opening the front desk…</p></div>
+
+<script>
+(() => {
+  const API = '/api/dashboard-leads';
+  const POLL_MS = 30000;
+  const $ = id => document.getElementById(id);
+  const state = { leads: [], sel: null, filter: 'all', q: '', demo: false, timer: null };
+
+  /* ── Sample data: lets the design be seen before the API is wired ── */
+  const SAMPLE = [
+    {id:'lead_demo1', full_name:'Maria Delgado', fromPhone:'+17045550188', callback_number:'+17045550188',
+     practice_area:'Personal Injury', status:'ready_for_review', caller_type:'new', is_urgent:1,
+     call_duration_seconds:221, quality_score:JSON.stringify({completeness:8,efficiency:7,overall:8,flags:['confirmed callback number']}),
+     call_summary:'Maria was rear-ended on I-485 two days ago and is experiencing neck pain. The other driver was cited. She has photos of both vehicles and a police report number, and wants a consultation this week. Best reached after 3 PM.',
+     case_summary:'Rear-end collision on I-485, neck injury, other driver cited.',
+     transcript:JSON.stringify([{role:'assistant',text:"Thanks for calling — this is Ava. Can I get your name?"},{role:'caller',text:'Maria Delgado.'},{role:'assistant',text:'Thanks, Maria. Briefly, what happened?'},{role:'caller',text:'I was rear-ended on I-485 on Tuesday. My neck has been hurting since.'},{role:'assistant',text:"I'm sorry that happened — what's the best number to reach you?"},{role:'caller',text:'This one is fine, after 3 PM.'}]),
+     recording_url:'', createdAt:new Date(Date.now()-42*60000).toISOString(), updatedAt:new Date(Date.now()-38*60000).toISOString()},
+    {id:'lead_demo2', full_name:'John Smith', fromPhone:'+17045910644', callback_number:'+17045551234',
+     practice_area:'Personal Injury', status:'ready_for_review', caller_type:'returning', is_urgent:0,
+     call_duration_seconds:187, quality_score:JSON.stringify({completeness:5,efficiency:6,overall:6,flags:['missed urgency cue','closed without timing']}),
+     call_summary:'Returning caller John Smith followed up about his car accident case. He confirmed the callback number on file ending in 1234 and asked when someone would be in touch. No new facts; wants a status update.',
+     case_summary:'Follow-up on existing car accident matter.',
+     transcript:JSON.stringify([{role:'assistant',text:'Welcome back, John. What can I help with today?'},{role:'caller',text:'Just checking on my case.'},{role:'assistant',text:'I have a number ending in 1234 on file — is that still the best way to reach you?'},{role:'caller',text:'Yes, same number.'}]),
+     recording_url:'', createdAt:new Date(Date.now()-3*3600000).toISOString(), updatedAt:new Date(Date.now()-3*3600000+240000).toISOString()},
+    {id:'lead_demo3', full_name:'Unknown caller', fromPhone:'+19175550042', callback_number:'',
+     practice_area:'', status:'partial', caller_type:'new', is_urgent:0,
+     call_duration_seconds:34, quality_score:'', call_summary:'',
+     case_summary:'Caller hung up before intake completed.',
+     transcript:JSON.stringify([{role:'assistant',text:'Thanks for calling — this is Ava. Can I get your name?'}]),
+     recording_url:'', createdAt:new Date(Date.now()-26*3600000).toISOString(), updatedAt:new Date(Date.now()-26*3600000+40000).toISOString()}
+  ];
+
+  /* ── Helpers ── */
+  const parse = (v, fb) => { if(v==null||v==='') return fb; if(typeof v==='object') return v; try{return JSON.parse(v)}catch{return fb} };
+  const esc = s => String(s??'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const fmtPhone = p => { const d=String(p||'').replace(/\D/g,'').replace(/^1/,''); return d.length===10?`(${d.slice(0,3)}) ${d.slice(3,6)}-${d.slice(6)}`:(p||'—') };
+  const fmtDur = s => { s=Number(s)||0; if(!s) return '—'; return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}` };
+  const ago = iso => {
+    const t=new Date(iso).getTime(); if(!t) return '—';
+    const m=Math.floor((Date.now()-t)/60000);
+    if(m<1) return 'just now'; if(m<60) return m+'m ago';
+    const h=Math.floor(m/60); if(h<24) return h+'h ago';
+    const d=Math.floor(h/24); if(d<7) return d+'d ago';
+    return new Date(iso).toLocaleDateString(undefined,{month:'short',day:'numeric'});
+  };
+  const fmtTaken = iso => { const d=new Date(iso); return isNaN(d)?'':d.toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) };
+  const STATUS = {
+    ready_for_review:{label:'Ready for review',cls:'ready'},
+    partial:{label:'Partial',cls:'partial'},
+    in_progress:{label:'In progress',cls:'progress'},
+    intake_complete:{label:'Ready for review',cls:'ready'},
+    contacted:{label:'Contacted',cls:'contacted'},
+  };
+  const stat = s => STATUS[s] || {label:(s||'—').replace(/_/g,' '),cls:'progress'};
+
+  /* ── Auth ── */
+  const getKey = () => sessionStorage.getItem('ava_admin_key') || '';
+  const setKey = k => sessionStorage.setItem('ava_admin_key', k);
+
+  /* ── Fetch ── */
+  async function load(manual){
+    if(state.demo){ hydrate(SAMPLE); return; }
+    const key = getKey();
+    if(!key){ show('gate'); return; }
+    try{
+      const r = await fetch(`${API}?firmId=firm_default`, {headers:{'x-admin-key':key}});
+      if(r.status===401){ sessionStorage.removeItem('ava_admin_key'); show('gate'); $('gateErr').textContent='That key was not accepted. Check it and try again.'; return; }
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      const data = await r.json();
+      hydrate(data.leads || []);
+    }catch(e){
+      if(!state.leads.length){
+        state.demo = true;
+        banner('API not reachable — showing sample data so you can preview the design. Wire /api/dashboard-leads to go live.');
+        hydrate(SAMPLE);
+      }else if(manual){
+        banner('Refresh failed — showing last loaded data.');
+      }
+    }
+  }
+
+  function banner(msg){ const b=$('banner'); b.textContent=msg; b.classList.add('show'); }
+
+  /* ── Hydrate + render ── */
+  function hydrate(leads){
+    leads.sort((a,b)=> new Date(b.updatedAt||b.createdAt) - new Date(a.updatedAt||a.createdAt));
+    state.leads = leads;
+    if(state.sel && !leads.find(l=>l.id===state.sel)) state.sel = null;
+    if(!state.sel && leads.length) state.sel = leads[0].id;
+    show('app'); renderStats(); renderList(); renderSlip();
+  }
+
+  function show(which){
+    for(const id of ['app','gate','loading']) $(id).hidden = id!==which;
+    $('stats').hidden = which!=='app';
+    if(which==='gate') $('keyInput').focus();
+  }
+
+  function renderStats(){
+    const now=Date.now(), day=86400000;
+    const today = state.leads.filter(l=> now - new Date(l.updatedAt||l.createdAt) < day).length;
+    const week  = state.leads.filter(l=> now - new Date(l.updatedAt||l.createdAt) < 7*day).length;
+    const urgent= state.leads.filter(l=> Number(l.is_urgent) && (l.status!=='contacted')).length;
+    const qs = state.leads.map(l=>parse(l.quality_score,null)?.overall).filter(v=>typeof v==='number');
+    const ds = state.leads.map(l=>Number(l.call_duration_seconds)||0).filter(Boolean);
+    $('stToday').textContent = today;
+    $('stWeek').textContent = week;
+    $('stUrgent').textContent = urgent;
+    $('stQuality').textContent = qs.length ? (qs.reduce((a,b)=>a+b,0)/qs.length).toFixed(1)+'/10' : '—';
+    $('stDur').textContent = ds.length ? fmtDur(Math.round(ds.reduce((a,b)=>a+b,0)/ds.length)) : '—';
+  }
+
+  function visible(){
+    const q = state.q.toLowerCase();
+    return state.leads.filter(l=>{
+      if(state.filter==='urgent'){ if(!Number(l.is_urgent)) return false; }
+      else if(state.filter!=='all'){
+        const s = l.status==='intake_complete' ? 'ready_for_review' : l.status;
+        if(s!==state.filter) return false;
+      }
+      if(!q) return true;
+      return [l.full_name,l.fromPhone,l.callback_number,l.call_summary,l.case_summary,l.practice_area]
+        .some(v=>String(v||'').toLowerCase().includes(q));
+    });
+  }
+
+  function renderList(){
+    const rows = visible();
+    const el = $('list');
+    if(!rows.length){
+      el.innerHTML = `<div class="center" style="height:auto;padding:50px 20px"><p class="ghost">${state.leads.length?'Nothing matches that filter.':"No calls yet — Ava's on the line."}</p></div>`;
+      return;
+    }
+    el.innerHTML = rows.map((l,i)=>{
+      const s = stat(l.status);
+      const q = parse(l.quality_score,null);
+      return `<button class="row ${l.id===state.sel?'sel':''}" data-id="${esc(l.id)}" style="animation-delay:${Math.min(i*30,300)}ms">
+        <div class="name">${Number(l.is_urgent)?'<span class="flame" title="Urgent">▲</span>':''}<em>${esc(l.full_name||'Unknown caller')}</em></div>
+        <div class="when">${ago(l.updatedAt||l.createdAt)}</div>
+        <div class="meta">
+          <span class="pill ${s.cls}">${esc(s.label)}</span>
+          ${l.practice_area?`<span>${esc(l.practice_area)}</span>`:''}
+          <span class="dur">${fmtDur(l.call_duration_seconds)}</span>
+          ${q&&typeof q.overall==='number'?`<span class="q">quality <b>${q.overall}</b>/10</span>`:''}
+        </div>
+      </button>`;
+    }).join('');
+  }
+
+  function renderSlip(){
+    const pane = $('slippane');
+    const l = state.leads.find(x=>x.id===state.sel);
+    if(!l){ pane.innerHTML = `<div class="center"><p class="ghost">Select a call to open its slip.</p></div>`; return; }
+    const s = stat(l.status);
+    const q = parse(l.quality_score,null);
+    const transcript = parse(l.transcript,[]);
+    const timeline = parse(l.timeline,[]);
+    const needsAttention = s.cls==='ready' || s.cls==='partial' || Number(l.is_urgent);
+
+    pane.innerHTML = `<div class="slipwrap">
+      <button class="back" id="backBtn">← All calls</button>
+      <div class="perf"></div>
+      <article class="slip">
+        <div class="sliphead">
+          <span class="eyebrow">${needsAttention?'While you were out':'Call record'}</span>
+          <span class="taken">${esc(fmtTaken(l.createdAt))}${l.caller_type?` · ${esc(l.caller_type)} caller`:''}</span>
+          <span class="stamp ${s.cls}">${esc(s.label)}</span>
+        </div>
+        <div class="slipbody">
+          <h1 class="caller">${Number(l.is_urgent)?'<span class="flame" title="Urgent">▲</span>':''}${esc(l.full_name||'Unknown caller')}</h1>
+
+          <div class="fields">
+            <div class="field"><label>Callback</label><div class="v ${l.callback_number?'':'dim'}">${esc(fmtPhone(l.callback_number)) || '—'}</div></div>
+            <div class="field"><label>Called from</label><div class="v dim">${esc(fmtPhone(l.fromPhone))}</div></div>
+            <div class="field"><label>Matter</label><div class="v ${l.practice_area?'':'dim'}">${esc(l.practice_area||'—')}</div></div>
+            <div class="field"><label>Duration</label><div class="v">${fmtDur(l.call_duration_seconds)}</div></div>
+          </div>
+
+          <div class="sec">
+            <h3>Summary</h3>
+            ${l.call_summary
+              ? `<p class="summary">${esc(l.call_summary)}</p>`
+              : (l.case_summary
+                  ? `<p class="summary">${esc(l.case_summary)}</p>`
+                  : `<p class="summary empty">No summary yet — this call ended before intake completed.</p>`)}
+          </div>
+
+          ${q ? `<div class="sec"><h3>Call quality</h3>
+            <div class="qgrid">
+              ${['completeness','efficiency','overall'].map(k=> typeof q[k]==='number' ? `
+                <div class="qcell">
+                  <div class="lab"><span>${k}</span><b>${q[k]}/10</b></div>
+                  <div class="qbar"><i style="width:${Math.max(4,Math.min(100,q[k]*10))}%"></i></div>
+                </div>`:'').join('')}
+            </div>
+            ${Array.isArray(q.flags)&&q.flags.length?`<div class="flags">${q.flags.map(f=>`<span class="flag">${esc(f)}</span>`).join('')}</div>`:''}
+          </div>`:''}
+
+          ${l.recording_url ? `<div class="sec"><h3>Recording</h3>
+            <audio controls preload="none" src="${esc(l.recording_url)}"></audio></div>`:''}
+
+          ${Array.isArray(transcript)&&transcript.length ? `<div class="sec">
+            <details class="tsec"><summary>Transcript · ${transcript.length} turns</summary>
+              <div class="bubbles">${transcript.map(t=>{
+                const role = String(t.role||t.speaker||'').toLowerCase();
+                const isAva = role.includes('assistant')||role.includes('ava')||role.includes('agent');
+                return `<div class="bub ${isAva?'ava':'caller'}"><span class="who">${isAva?'Ava':'Caller'}</span>${esc(t.text||t.content||'')}</div>`;
+              }).join('')}</div>
+            </details></div>`:''}
+
+          ${Array.isArray(timeline)&&timeline.length ? `<div class="sec">
+            <details class="tsec"><summary>Timeline · ${timeline.length} events</summary>
+              <div class="tl">${timeline.map(e=>`<div>${esc(typeof e==='string'?e:JSON.stringify(e))}</div>`).join('')}</div>
+            </details></div>`:''}
+        </div>
+      </article>
+    </div>`;
+
+    const back = $('backBtn');
+    if(back) back.onclick = () => { document.body.classList.remove('viewing'); };
+  }
+
+  /* ── Events ── */
+  $('list').addEventListener('click', e=>{
+    const row = e.target.closest('.row'); if(!row) return;
+    state.sel = row.dataset.id;
+    document.body.classList.add('viewing');
+    renderList(); renderSlip();
+    $('slippane').scrollTop = 0;
+  });
+  $('search').addEventListener('input', e=>{ state.q = e.target.value; renderList(); });
+  $('chips').addEventListener('click', e=>{
+    const c = e.target.closest('.chip'); if(!c) return;
+    state.filter = c.dataset.f;
+    document.querySelectorAll('.chip').forEach(x=>x.classList.toggle('on', x===c));
+    renderList();
+  });
+  $('refreshBtn').addEventListener('click', ()=>load(true));
+  $('keyform').addEventListener('submit', e=>{
+    e.preventDefault();
+    const k = $('keyInput').value.trim();
+    if(!k){ $('gateErr').textContent='Enter the admin key to continue.'; return; }
+    setKey(k); $('gateErr').textContent=''; show('loading'); load();
+  });
+
+  /* ── Polling: pause when tab hidden ── */
+  function startPoll(){
+    clearInterval(state.timer);
+    state.timer = setInterval(()=>{ if(!document.hidden) load(); }, POLL_MS);
+  }
+  document.addEventListener('visibilitychange', ()=>{
+    const b=$('liveBadge');
+    b.classList.toggle('paused', document.hidden);
+    $('liveText').textContent = document.hidden ? 'Paused' : 'Live';
+    if(!document.hidden) load();
+  });
+
+  /* ── Boot ── */
+  if(location.protocol==='file:'){
+    state.demo = true;
+    banner('Preview mode — sample data. Deploy and wire /api/dashboard-leads to see real calls.');
+    hydrate(SAMPLE);
+  }else if(getKey()){
+    load();
+  }else{
+    show('gate');
+  }
+  startPoll();
+})();
+</script>
+</body>
+</html>

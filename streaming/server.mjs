@@ -23,6 +23,7 @@ import {
   persistSessionArtifactsUnlocked,
   patchLead,
   getLeadById,
+  listLeadsForDashboard,
   createWebhookLog,
   getWebhookLogs,
   withCallLock,
@@ -2574,6 +2575,32 @@ app.patch('/api/leads/:id', async (req, reply) => {
   if (!Object.keys(updates).length) return reply.code(400).send({ error: 'No valid fields to update' });
   await patchLead(id, updates);
   return { ok: true };
+});
+
+// Key-guarded lead feed for the front-desk dashboard. Returns PII (names, phone
+// numbers, transcripts): admin key required on every request. Single-admin
+// until the Cluster F auth layer lands.
+app.get('/api/dashboard-leads', async (req, reply) => {
+  if (!ADMIN_API_KEY) {
+    app.log.warn('dashboard-leads: ADMIN_API_KEY not configured — refusing to serve PII');
+    return reply.code(503).send({ error: 'admin key not configured' });
+  }
+  const provided = req.headers?.['x-admin-key'] || '';
+  if (provided !== ADMIN_API_KEY) {
+    return reply.code(401).send({ error: 'unauthorized' });
+  }
+  const firmId = String(req.query?.firmId || 'firm_default').trim() || 'firm_default';
+  const leads = await listLeadsForDashboard(firmId, 100);
+  reply.header('Cache-Control', 'no-store, must-revalidate');
+  return reply.send({ firmId, leads });
+});
+
+// GET /dashboard — serves the static front-desk page. The page is inert without
+// the admin key (the data endpoint above is what's guarded), so no auth here.
+app.get('/dashboard', async (req, reply) => {
+  const html = await fs.readFile(path.join(__dirname, 'dashboard.html'), 'utf8');
+  reply.header('Content-Type', 'text/html; charset=utf-8');
+  return reply.send(html);
 });
 
 app.post('/api/next-step', async (req, reply) => {
