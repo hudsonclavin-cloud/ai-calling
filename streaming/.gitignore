@@ -4,3 +4,6 @@ data/ava.db-shm
 data/ava.db-wal
 data/*.backup
 data/tts_audio/
+
+# simulation run outputs (generated; never committed)
+simulation/results/

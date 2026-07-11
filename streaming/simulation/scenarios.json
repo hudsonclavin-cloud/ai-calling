@@ -1,0 +1,410 @@
+{
+  "version": "1.0.0",
+  "firmId": "firm_default",
+  "notes": "40 synthetic Ava intake scenarios: 20 families x 2 variants. All names/numbers/incidents are fictional. Phone numbers use the reserved 555-01xx fictional range. whenQuestionId matches the controller's question ids (full_name, callback_number, practice_area, case_summary, final_clarify, __caller_type__, __phone_retry__).",
+  "scenarios": [
+    {
+      "id": "normal-intake-a", "family": "normal-intake", "variant": "a",
+      "description": "Clean personal-injury intake, cooperative caller",
+      "persona": { "tone": "calm", "verbosity": "normal" },
+      "facts": { "full_name": "Jordan Lee", "callback_number": "+17045550128", "practice_area": "Personal Injury", "case_summary": "Rear-ended at a stoplight on Tuesday, neck is sore" },
+      "opening_statement": "I was in a car accident and I think I need a lawyer",
+      "events": [],
+      "expected": { "completed": true, "fields": { "full_name": "Jordan Lee", "callback_number": "+17045550128", "practice_area": "Personal Injury" }, "summary_must_include": ["rear", "tuesday"], "urgent": false, "early_exit": false, "caller_question": false }
+    },
+    {
+      "id": "normal-intake-b", "family": "normal-intake", "variant": "b",
+      "description": "Clean employment intake, cooperative caller",
+      "persona": { "tone": "calm", "verbosity": "normal" },
+      "facts": { "full_name": "Priya Nair", "callback_number": "+17045550143", "practice_area": "Employment", "case_summary": "Fired last week after reporting unpaid overtime" },
+      "opening_statement": "I think I was wrongfully terminated from my job",
+      "events": [],
+      "expected": { "completed": true, "fields": { "full_name": "Priya Nair", "callback_number": "+17045550143", "practice_area": "Employment" }, "summary_must_include": ["overtime", "fired"], "urgent": false, "early_exit": false, "caller_question": false }
+    },
+    {
+      "id": "one-token-name-a", "family": "one-token-name", "variant": "a",
+      "description": "Caller gives only a single-token name",
+      "persona": { "tone": "brief", "verbosity": "brief" },
+      "facts": { "full_name": "Marcus", "callback_number": "+17045550117", "practice_area": "Family Law", "case_summary": "Filing for divorce, want to understand custody options" },
+      "opening_statement": "I need help with a divorce",
+      "events": [ { "whenQuestionId": "full_name", "occurrence": 1, "callerText": "Marcus", "speechConfidence": 0.94 } ],
+      "expected": { "completed": true, "fields": { "full_name": "Marcus", "callback_number": "+17045550117", "practice_area": "Family Law" }, "summary_must_include": ["divorce", "custody"], "urgent": false, "early_exit": false, "caller_question": false }
+    },
+    {
+      "id": "one-token-name-b", "family": "one-token-name", "variant": "b",
+      "description": "Caller gives a single-token first name only, PI",
+      "persona": { "tone": "brief", "verbosity": "brief" },
+      "facts": { "full_name": "Rosa", "callback_number": "+17045550190", "practice_area": "Personal Injury", "case_summary": "Slipped on ice outside a store last Friday" },
+      "opening_statement": "I slipped and fell and hurt my wrist",
+      "events": [ { "whenQuestionId": "full_name", "occurrence": 1, "callerText": "Rosa", "speechConfidence": 0.95 } ],
+      "expected": { "completed": true, "fields": { "full_name": "Rosa", "callback_number": "+17045550190", "practice_area": "Personal Injury" }, "summary_must_include": ["slip", "friday"], "urgent": false, "early_exit": false, "caller_question": false }
+    },
+    {
+      "id": "apostrophe-name-a", "family": "apostrophe-name", "variant": "a",
+      "description": "Apostrophe surname (O'Brien)",
+      "persona": { "tone": "calm", "verbosity": "normal" },
+      "facts": { "full_name": "Sean O'Brien", "callback_number": "+17045550164", "practice_area": "Personal Injury", "case_summary": "Motorcycle accident on the highway two days ago" },
+      "opening_statement": "I got hit on my motorcycle and I'm banged up",
+      "events": [ { "whenQuestionId": "full_name", "occurrence": 1, "callerText": "Sean O'Brien", "speechConfidence": 0.9 } ],
+      "expected": { "completed": true, "fields": { "full_name": "Sean O'Brien", "callback_number": "+17045550164", "practice_area": "Personal Injury" }, "summary_must_include": ["motorcycle"], "urgent": false, "early_exit": false, "caller_question": false }
+    },
+    {
+      "id": "apostrophe-name-b", "family": "apostrophe-name", "variant": "b",
+      "description": "Hyphenated given name (Anne-Marie)",
+      "persona": { "tone": "calm", "verbosity": "normal" },
+      "facts": { "full_name": "Anne-Marie Whitfield", "callback_number": "+17045550172", "practice_area": "Family Law", "case_summary": "Need a custody modification, ex moved out of state" },
+      "opening_statement": "I need to change a custody arrangement",
+      "events": [ { "whenQuestionId": "full_name", "occurrence": 1, "callerText": "Anne-Marie Whitfield", "speechConfidence": 0.91 } ],
+      "expected": { "completed": true, "fields": { "full_name": "Anne-Marie Whitfield", "callback_number": "+17045550172", "practice_area": "Family Law" }, "summary_must_include": ["custody"], "urgent": false, "early_exit": false, "caller_question": false }
+    },
+    {
+      "id": "low-confidence-name-a", "family": "low-confidence-name", "variant": "a",
+      "description": "Low-confidence name recognition then clean retry",
+      "persona": { "tone": "nervous", "verbosity": "brief" },
+      "facts": { "full_name": "Thomas Ferraro", "callback_number": "+17045550109", "practice_area": "Personal Injury", "case_summary": "Dog bite at a neighbor's house on Sunday" },
+      "opening_statement": "A dog bit me and it's pretty bad",
+      "events": [
+        { "whenQuestionId": "full_name", "occurrence": 1, "callerText": "Thomas Ferraro", "speechConfidence": 0.34 },
+        { "whenQuestionId": "full_name", "occurrence": 2, "callerText": "Thomas Ferraro, T-H-O-M-A-S", "speechConfidence": 0.96 }
+      ],
+      "expected": { "completed": true, "fields": { "full_name": "Thomas Ferraro", "callback_number": "+17045550109", "practice_area": "Personal Injury" }, "summary_must_include": ["dog", "sunday"], "urgent": false, "early_exit": false, "caller_question": false }
+    },
+    {
+      "id": "low-confidence-name-b", "family": "low-confidence-name", "variant": "b",
+      "description": "Low-confidence name then spelled-out retry",
+      "persona": { "tone": "nervous", "verbosity": "brief" },
+      "facts": { "full_name": "Nguyen Pham", "callback_number": "+17045550155", "practice_area": "Employment", "case_summary": "Denied a promotion after a discrimination complaint" },
+      "opening_statement": "I have a workplace discrimination issue",
+      "events": [
+        { "whenQuestionId": "full_name", "occurrence": 1, "callerText": "Nguyen Pham", "speechConfidence": 0.31 },
+        { "whenQuestionId": "full_name", "occurrence": 2, "callerText": "Nguyen Pham, N-G-U-Y-E-N", "speechConfidence": 0.97 }
+      ],
+      "expected": { "completed": true, "fields": { "full_name": "Nguyen Pham", "callback_number": "+17045550155", "practice_area": "Employment" }, "summary_must_include": ["discrimination"], "urgent": false, "early_exit": false, "caller_question": false }
+    },
+    {
+      "id": "low-confidence-phone-a", "family": "low-confidence-phone", "variant": "a",
+      "description": "Low-confidence callback number followed by clean retry",
+      "persona": { "tone": "nervous", "verbosity": "brief" },
+      "facts": { "full_name": "Deborah Klein", "callback_number": "+17045550128", "practice_area": "Personal Injury", "case_summary": "Rear-ended on Tuesday" },
+      "opening_statement": "I was rear-ended and need to talk to someone",
+      "events": [
+        { "whenQuestionId": "callback_number", "occurrence": 1, "callerText": "seven zero four, five five five", "speechConfidence": 0.39 },
+        { "whenQuestionId": "callback_number", "occurrence": 2, "callerText": "seven zero four, five five five, zero one two eight", "speechConfidence": 0.97 }
+      ],
+      "expected": { "completed": true, "fields": { "full_name": "Deborah Klein", "callback_number": "+17045550128", "practice_area": "Personal Injury" }, "summary_must_include": ["rear", "tuesday"], "urgent": false, "early_exit": false, "caller_question": false }
+    },
+    {
+      "id": "low-confidence-phone-b", "family": "low-confidence-phone", "variant": "b",
+      "description": "Low-confidence number retry, different digits",
+      "persona": { "tone": "nervous", "verbosity": "brief" },
+      "facts": { "full_name": "Owen Cassidy", "callback_number": "+17045550181", "practice_area": "Family Law", "case_summary": "Contested divorce, worried about assets" },
+      "opening_statement": "I'm going through a divorce and it's getting messy",
+      "events": [
+        { "whenQuestionId": "callback_number", "occurrence": 1, "callerText": "seven zero four, five five five, oh one", "speechConfidence": 0.36 },
+        { "whenQuestionId": "callback_number", "occurrence": 2, "callerText": "seven zero four, five five five, zero one eight one", "speechConfidence": 0.98 }
+      ],
+      "expected": { "completed": true, "fields": { "full_name": "Owen Cassidy", "callback_number": "+17045550181", "practice_area": "Family Law" }, "summary_must_include": ["divorce"], "urgent": false, "early_exit": false, "caller_question": false }
+    },
+    {
+      "id": "partial-callback-a", "family": "partial-callback", "variant": "a",
+      "description": "Partial (7-digit) callback triggering legacy retry, then full number",
+      "persona": { "tone": "calm", "verbosity": "brief" },
+      "facts": { "full_name": "Gloria Mendes", "callback_number": "+17045550133", "practice_area": "Personal Injury", "case_summary": "Slip and fall at a grocery store on Monday" },
+      "opening_statement": "I fell at a store and hurt my back",
+      "events": [
+        { "whenQuestionId": "callback_number", "occurrence": 1, "callerText": "five five five, zero one three three", "speechConfidence": 0.9 },
+        { "whenQuestionId": "callback_number", "occurrence": 2, "callerText": "seven zero four, five five five, zero one three three", "speechConfidence": 0.96 }
+      ],
+      "expected": { "completed": true, "fields": { "full_name": "Gloria Mendes", "callback_number": "+17045550133", "practice_area": "Personal Injury" }, "summary_must_include": ["slip", "monday"], "urgent": false, "early_exit": false, "caller_question": false }
+    },
+    {
+      "id": "partial-callback-b", "family": "partial-callback", "variant": "b",
+      "description": "Area code omitted first, supplied on retry",
+      "persona": { "tone": "calm", "verbosity": "brief" },
+      "facts": { "full_name": "Victor Alvarez", "callback_number": "+17045550166", "practice_area": "Employment", "case_summary": "Not paid final paycheck after quitting" },
+      "opening_statement": "My old employer won't pay my last check",
+      "events": [
+        { "whenQuestionId": "callback_number", "occurrence": 1, "callerText": "five five five, zero one six six", "speechConfidence": 0.92 },
+        { "whenQuestionId": "callback_number", "occurrence": 2, "callerText": "area code seven zero four, five five five, zero one six six", "speechConfidence": 0.97 }
+      ],
+      "expected": { "completed": true, "fields": { "full_name": "Victor Alvarez", "callback_number": "+17045550166", "practice_area": "Employment" }, "summary_must_include": ["paycheck"], "urgent": false, "early_exit": false, "caller_question": false }
+    },
+    {
+      "id": "correction-callback-a", "family": "correction-callback", "variant": "a",
+      "description": "Caller gives a number then corrects it to a different one",
+      "persona": { "tone": "calm", "verbosity": "normal" },
+      "facts": { "full_name": "Harriet Bloom", "callback_number": "+17045550188", "practice_area": "Personal Injury", "case_summary": "Bicycle vs car collision last weekend" },
+      "opening_statement": "I got hit while riding my bike",
+      "events": [
+        { "whenQuestionId": "callback_number", "occurrence": 1, "callerText": "seven zero four, five five five, zero one two two", "speechConfidence": 0.95 },
+        { "whenQuestionId": "callback_number", "occurrence": 2, "callerText": "sorry, that's wrong, it's seven zero four, five five five, zero one eight eight", "speechConfidence": 0.97 }
+      ],
+      "expected": { "completed": true, "fields": { "full_name": "Harriet Bloom", "callback_number": "+17045550188", "practice_area": "Personal Injury" }, "summary_must_include": ["bicycle", "bike"], "urgent": false, "early_exit": false, "caller_question": false, "correction": { "field": "callback_number", "from": "+17045550122", "to": "+17045550188" } }
+    },
+    {
+      "id": "correction-callback-b", "family": "correction-callback", "variant": "b",
+      "description": "Caller transposes digits then fixes them",
+      "persona": { "tone": "calm", "verbosity": "normal" },
+      "facts": { "full_name": "Desmond Yu", "callback_number": "+17045550147", "practice_area": "Family Law", "case_summary": "Child support enforcement question" },
+      "opening_statement": "I need help getting child support paid",
+      "events": [
+        { "whenQuestionId": "callback_number", "occurrence": 1, "callerText": "seven zero four, five five five, zero one seven four", "speechConfidence": 0.95 },
+        { "whenQuestionId": "callback_number", "occurrence": 2, "callerText": "actually I mixed that up, it's zero one four seven, seven zero four five five five zero one four seven", "speechConfidence": 0.97 }
+      ],
+      "expected": { "completed": true, "fields": { "full_name": "Desmond Yu", "callback_number": "+17045550147", "practice_area": "Family Law" }, "summary_must_include": ["child support"], "urgent": false, "early_exit": false, "caller_question": false, "correction": { "field": "callback_number", "from": "+17045550174", "to": "+17045550147" } }
+    },
+    {
+      "id": "returning-confirm-a", "family": "returning-confirm", "variant": "a",
+      "description": "Returning caller confirms the stored number on file",
+      "persona": { "tone": "calm", "verbosity": "brief" },
+      "prior_lead": { "full_name": "Angela Foster", "callback_number": "+17045550151", "practice_area": "Personal Injury", "case_summary": "Prior car accident intake" },
+      "facts": { "full_name": "Angela Foster", "callback_number": "+17045550151", "practice_area": "Personal Injury", "case_summary": "Following up, new pain in shoulder since the accident" },
+      "opening_statement": "Hi, I called before about my car accident, just following up",
+      "events": [ { "whenQuestionId": "callback_number", "occurrence": 1, "callerText": "yes that number is fine", "speechConfidence": 0.96 } ],
+      "expected": { "completed": true, "fields": { "callback_number": "+17045550151" }, "summary_must_include": ["shoulder"], "urgent": false, "early_exit": false, "caller_question": false, "returning": true }
+    },
+    {
+      "id": "returning-confirm-b", "family": "returning-confirm", "variant": "b",
+      "description": "Returning caller confirms stored number, employment matter",
+      "persona": { "tone": "calm", "verbosity": "brief" },
+      "prior_lead": { "full_name": "Raymond Osei", "callback_number": "+17045550139", "practice_area": "Employment", "case_summary": "Prior wrongful termination intake" },
+      "facts": { "full_name": "Raymond Osei", "callback_number": "+17045550139", "practice_area": "Employment", "case_summary": "Following up, employer offered a settlement" },
+      "opening_statement": "I spoke with you before about my termination case",
+      "events": [ { "whenQuestionId": "callback_number", "occurrence": 1, "callerText": "yep, same number, that works", "speechConfidence": 0.95 } ],
+      "expected": { "completed": true, "fields": { "callback_number": "+17045550139" }, "summary_must_include": ["settlement"], "urgent": false, "early_exit": false, "caller_question": false, "returning": true }
+    },
+    {
+      "id": "returning-change-a", "family": "returning-change", "variant": "a",
+      "description": "Returning caller changes the stored number to a new one",
+      "persona": { "tone": "calm", "verbosity": "normal" },
+      "prior_lead": { "full_name": "Bianca Rossi", "callback_number": "+17045550151", "practice_area": "Family Law", "case_summary": "Prior divorce intake" },
+      "facts": { "full_name": "Bianca Rossi", "callback_number": "+17045550199", "practice_area": "Family Law", "case_summary": "Following up on divorce, have new documents" },
+      "opening_statement": "I called before about my divorce, I have an update",
+      "events": [ { "whenQuestionId": "callback_number", "occurrence": 1, "callerText": "actually use a different number, seven zero four, five five five, zero one nine nine", "speechConfidence": 0.97 } ],
+      "expected": { "completed": true, "fields": { "callback_number": "+17045550199" }, "summary_must_include": ["divorce"], "urgent": false, "early_exit": false, "caller_question": false, "returning": true, "correction": { "field": "callback_number", "from": "+17045550151", "to": "+17045550199" } }
+    },
+    {
+      "id": "returning-change-b", "family": "returning-change", "variant": "b",
+      "description": "Returning caller replaces stored number, PI matter",
+      "persona": { "tone": "calm", "verbosity": "normal" },
+      "prior_lead": { "full_name": "Curtis Dunn", "callback_number": "+17045550139", "practice_area": "Personal Injury", "case_summary": "Prior slip and fall intake" },
+      "facts": { "full_name": "Curtis Dunn", "callback_number": "+17045550102", "practice_area": "Personal Injury", "case_summary": "Following up, MRI showed a herniated disc" },
+      "opening_statement": "Following up on my fall case, I got test results",
+      "events": [ { "whenQuestionId": "callback_number", "occurrence": 1, "callerText": "change my number please, it's now seven zero four five five five zero one zero two", "speechConfidence": 0.97 } ],
+      "expected": { "completed": true, "fields": { "callback_number": "+17045550102" }, "summary_must_include": ["herniated", "disc"], "urgent": false, "early_exit": false, "caller_question": false, "returning": true, "correction": { "field": "callback_number", "from": "+17045550139", "to": "+17045550102" } }
+    },
+    {
+      "id": "concise-summary-a", "family": "concise-summary", "variant": "a",
+      "description": "Very brief case summary",
+      "persona": { "tone": "brief", "verbosity": "brief" },
+      "facts": { "full_name": "Kenji Watanabe", "callback_number": "+17045550118", "practice_area": "Personal Injury", "case_summary": "Car crash" },
+      "opening_statement": "Car crash",
+      "events": [ { "whenQuestionId": "case_summary", "occurrence": 1, "callerText": "car crash, other driver ran a red", "speechConfidence": 0.95 } ],
+      "expected": { "completed": true, "fields": { "full_name": "Kenji Watanabe", "callback_number": "+17045550118", "practice_area": "Personal Injury" }, "summary_must_include": ["car", "red"], "urgent": false, "early_exit": false, "caller_question": false }
+    },
+    {
+      "id": "concise-summary-b", "family": "concise-summary", "variant": "b",
+      "description": "Terse employment summary",
+      "persona": { "tone": "brief", "verbosity": "brief" },
+      "facts": { "full_name": "Lena Brooks", "callback_number": "+17045550176", "practice_area": "Employment", "case_summary": "Fired for being pregnant" },
+      "opening_statement": "Fired for being pregnant",
+      "events": [ { "whenQuestionId": "case_summary", "occurrence": 1, "callerText": "they fired me right after I told them I was pregnant", "speechConfidence": 0.95 } ],
+      "expected": { "completed": true, "fields": { "full_name": "Lena Brooks", "callback_number": "+17045550176", "practice_area": "Employment" }, "summary_must_include": ["pregnant", "fired"], "urgent": false, "early_exit": false, "caller_question": false }
+    },
+    {
+      "id": "rambling-narrative-a", "family": "rambling-narrative", "variant": "a",
+      "description": "Long rambling narrative burying the key facts",
+      "persona": { "tone": "talkative", "verbosity": "high" },
+      "facts": { "full_name": "Walter Prichard", "callback_number": "+17045550125", "practice_area": "Personal Injury", "case_summary": "T-boned at an intersection on Elm Street last Thursday, went to the ER with a concussion" },
+      "opening_statement": "Okay so this is kind of a long story, I was driving home from my sister's place, we'd had dinner, and I was going through the intersection at Elm Street last Thursday and out of nowhere this truck just T-bones me, and I ended up at the ER with a concussion, and now the insurance people keep calling me",
+      "events": [],
+      "expected": { "completed": true, "fields": { "full_name": "Walter Prichard", "callback_number": "+17045550125", "practice_area": "Personal Injury" }, "summary_must_include": ["intersection", "thursday"], "urgent": false, "early_exit": false, "caller_question": false }
+    },
+    {
+      "id": "rambling-narrative-b", "family": "rambling-narrative", "variant": "b",
+      "description": "Rambling family-law narrative",
+      "persona": { "tone": "talkative", "verbosity": "high" },
+      "facts": { "full_name": "Estelle Monroe", "callback_number": "+17045550187", "practice_area": "Family Law", "case_summary": "Divorce after 12 years, disputes over the house and the kids' school" },
+      "opening_statement": "So my husband and I have been married twelve years, and things have been rough for a while, and now we're splitting up, and honestly the big issues are the house, which is in both our names, and where the kids go to school because he wants to move them, and I just don't know where to start",
+      "events": [],
+      "expected": { "completed": true, "fields": { "full_name": "Estelle Monroe", "callback_number": "+17045550187", "practice_area": "Family Law" }, "summary_must_include": ["divorce", "house"], "urgent": false, "early_exit": false, "caller_question": false }
+    },
+    {
+      "id": "fee-question-a", "family": "fee-question", "variant": "a",
+      "description": "Caller asks about fees mid-intake; must be answered/deflected warmly, not ignored",
+      "persona": { "tone": "cautious", "verbosity": "normal" },
+      "facts": { "full_name": "Sofia Reyes", "callback_number": "+17045550111", "practice_area": "Personal Injury", "case_summary": "Rear-ended in a parking lot on Wednesday" },
+      "opening_statement": "Before I get into it, how much do you charge?",
+      "events": [ { "whenQuestionId": "__caller_question__", "occurrence": 1, "callerText": "wait, how much does this cost? do you charge upfront?", "speechConfidence": 0.95, "injectAt": "first" } ],
+      "expected": { "completed": true, "fields": { "full_name": "Sofia Reyes", "callback_number": "+17045550111", "practice_area": "Personal Injury" }, "summary_must_include": ["rear", "wednesday"], "urgent": false, "early_exit": false, "caller_question": true }
+    },
+    {
+      "id": "fee-question-b", "family": "fee-question", "variant": "b",
+      "description": "Caller asks about cost after giving name",
+      "persona": { "tone": "cautious", "verbosity": "normal" },
+      "facts": { "full_name": "Gerald Simmons", "callback_number": "+17045550159", "practice_area": "Employment", "case_summary": "Unpaid commissions after leaving a sales job" },
+      "opening_statement": "I have a pay dispute with my old job",
+      "events": [ { "whenQuestionId": "case_summary", "occurrence": 1, "callerText": "and by the way, is there a consultation fee for this?", "speechConfidence": 0.94 } ],
+      "expected": { "completed": true, "fields": { "full_name": "Gerald Simmons", "callback_number": "+17045550159", "practice_area": "Employment" }, "summary_must_include": ["commission"], "urgent": false, "early_exit": false, "caller_question": true }
+    },
+    {
+      "id": "is-ai-question-a", "family": "is-ai-question", "variant": "a",
+      "description": "Caller asks whether Ava is a real person / AI; must be handled honestly, not ignored",
+      "persona": { "tone": "curious", "verbosity": "normal" },
+      "facts": { "full_name": "Hannah Cole", "callback_number": "+17045550193", "practice_area": "Personal Injury", "case_summary": "Dog bite while jogging on Saturday" },
+      "opening_statement": "Wait, are you a real person or a robot?",
+      "events": [ { "whenQuestionId": "__caller_question__", "occurrence": 1, "callerText": "hold on, am I talking to a real person or is this an AI?", "speechConfidence": 0.96, "injectAt": "first" } ],
+      "expected": { "completed": true, "fields": { "full_name": "Hannah Cole", "callback_number": "+17045550193", "practice_area": "Personal Injury" }, "summary_must_include": ["dog", "saturday"], "urgent": false, "early_exit": false, "caller_question": true }
+    },
+    {
+      "id": "is-ai-question-b", "family": "is-ai-question", "variant": "b",
+      "description": "Caller asks if this is a recording mid-call",
+      "persona": { "tone": "curious", "verbosity": "normal" },
+      "facts": { "full_name": "Isaac Berman", "callback_number": "+17045550104", "practice_area": "Family Law", "case_summary": "Prenuptial agreement review before a wedding" },
+      "opening_statement": "I need help reviewing a prenup",
+      "events": [ { "whenQuestionId": "callback_number", "occurrence": 1, "callerText": "is this a recording or a real assistant?", "speechConfidence": 0.95 } ],
+      "expected": { "completed": true, "fields": { "full_name": "Isaac Berman", "callback_number": "+17045550104", "practice_area": "Family Law" }, "summary_must_include": ["prenup"], "urgent": false, "early_exit": false, "caller_question": true }
+    },
+    {
+      "id": "distress-dv-a", "family": "distress-dv", "variant": "a",
+      "description": "Explicit distressed domestic-violence caller; empathy required, no glib acknowledgment",
+      "persona": { "tone": "distressed", "verbosity": "brief" },
+      "facts": { "full_name": "Maria Santos", "callback_number": "+17045550166", "practice_area": "Family Law", "case_summary": "Needs an emergency protective order, partner has been violent" },
+      "opening_statement": "I'm scared, my partner hit me and I don't feel safe at home",
+      "events": [],
+      "expected": { "completed": true, "fields": { "full_name": "Maria Santos", "callback_number": "+17045550166", "practice_area": "Family Law" }, "summary_must_include": ["protective order", "safe"], "urgent": true, "early_exit": false, "caller_question": false, "distress": true }
+    },
+    {
+      "id": "distress-dv-b", "family": "distress-dv", "variant": "b",
+      "description": "Distressed caller, threats and fear",
+      "persona": { "tone": "distressed", "verbosity": "brief" },
+      "facts": { "full_name": "Karen Whitlock", "callback_number": "+17045550121", "practice_area": "Family Law", "case_summary": "Ex-husband is threatening her and violating a custody order" },
+      "opening_statement": "My ex is threatening me and I'm really frightened",
+      "events": [],
+      "expected": { "completed": true, "fields": { "full_name": "Karen Whitlock", "callback_number": "+17045550121", "practice_area": "Family Law" }, "summary_must_include": ["threat"], "urgent": true, "early_exit": false, "caller_question": false, "distress": true }
+    },
+    {
+      "id": "implied-danger-a", "family": "implied-danger", "variant": "a",
+      "description": "Danger implied without obvious keywords; should still be treated with care",
+      "persona": { "tone": "shaky", "verbosity": "brief" },
+      "facts": { "full_name": "Yvonne Adler", "callback_number": "+17045550137", "practice_area": "Family Law", "case_summary": "Wants to leave the house tonight with the kids, needs to know her options" },
+      "opening_statement": "I need to get the kids and me out of the house tonight and I don't know what I'm allowed to do",
+      "events": [],
+      "expected": { "completed": true, "fields": { "full_name": "Yvonne Adler", "callback_number": "+17045550137", "practice_area": "Family Law" }, "summary_must_include": ["tonight"], "urgent": true, "early_exit": false, "caller_question": false, "distress": true }
+    },
+    {
+      "id": "implied-danger-b", "family": "implied-danger", "variant": "b",
+      "description": "Implied danger, no explicit violence keyword",
+      "persona": { "tone": "shaky", "verbosity": "brief" },
+      "facts": { "full_name": "Patrick Nolan", "callback_number": "+17045550183", "practice_area": "Family Law", "case_summary": "Worried about his kids' safety at the other parent's home" },
+      "opening_statement": "I don't think my kids are safe when they're with their mom and I need to do something fast",
+      "events": [],
+      "expected": { "completed": true, "fields": { "full_name": "Patrick Nolan", "callback_number": "+17045550183", "practice_area": "Family Law" }, "summary_must_include": ["safe"], "urgent": true, "early_exit": false, "caller_question": false, "distress": true }
+    },
+    {
+      "id": "arrest-jail-a", "family": "arrest-jail", "variant": "a",
+      "description": "Arrest/jail urgency (out of PI/family/employment scope but urgent)",
+      "persona": { "tone": "urgent", "verbosity": "brief" },
+      "facts": { "full_name": "Tyrone Baxter", "callback_number": "+17045550148", "practice_area": "Criminal", "case_summary": "Brother was just arrested and is in county jail" },
+      "opening_statement": "My brother just got arrested, he's in jail right now, I need help immediately",
+      "events": [],
+      "expected": { "completed": true, "fields": { "full_name": "Tyrone Baxter", "callback_number": "+17045550148" }, "summary_must_include": ["arrest", "jail"], "urgent": true, "early_exit": false, "caller_question": false, "out_of_scope": true }
+    },
+    {
+      "id": "arrest-jail-b", "family": "arrest-jail", "variant": "b",
+      "description": "Caller themselves was just released and has a court date tomorrow",
+      "persona": { "tone": "urgent", "verbosity": "brief" },
+      "facts": { "full_name": "Denise Pryor", "callback_number": "+17045550115", "practice_area": "Criminal", "case_summary": "Arrested last night, has a court date tomorrow morning" },
+      "opening_statement": "I got arrested last night and I have court tomorrow morning, I need a lawyer now",
+      "events": [],
+      "expected": { "completed": true, "fields": { "full_name": "Denise Pryor", "callback_number": "+17045550115" }, "summary_must_include": ["court", "tomorrow"], "urgent": true, "early_exit": false, "caller_question": false, "out_of_scope": true }
+    },
+    {
+      "id": "outside-practice-a", "family": "outside-practice", "variant": "a",
+      "description": "Caller needs a practice area the firm does not handle (patent)",
+      "persona": { "tone": "calm", "verbosity": "normal" },
+      "facts": { "full_name": "Ingrid Halvorsen", "callback_number": "+17045550129", "practice_area": "Patent", "case_summary": "Wants to patent a kitchen gadget invention" },
+      "opening_statement": "I invented something and I want to patent it",
+      "events": [],
+      "expected": { "completed": true, "fields": { "full_name": "Ingrid Halvorsen", "callback_number": "+17045550129" }, "summary_must_include": ["patent"], "urgent": false, "early_exit": false, "caller_question": false, "out_of_scope": true }
+    },
+    {
+      "id": "outside-practice-b", "family": "outside-practice", "variant": "b",
+      "description": "Tax matter, outside firm's areas",
+      "persona": { "tone": "calm", "verbosity": "normal" },
+      "facts": { "full_name": "Malik Rahman", "callback_number": "+17045550162", "practice_area": "Tax", "case_summary": "Getting audited by the IRS and needs representation" },
+      "opening_statement": "The IRS is auditing me and I need a tax attorney",
+      "events": [],
+      "expected": { "completed": true, "fields": { "full_name": "Malik Rahman", "callback_number": "+17045550162" }, "summary_must_include": ["irs", "audit"], "urgent": false, "early_exit": false, "caller_question": false, "out_of_scope": true }
+    },
+    {
+      "id": "refuse-callback-a", "family": "refuse-callback", "variant": "a",
+      "description": "Caller refuses to give a callback number",
+      "persona": { "tone": "guarded", "verbosity": "brief" },
+      "facts": { "full_name": "Bruce Callahan", "callback_number": "", "practice_area": "Personal Injury", "case_summary": "Injured on a construction site, wary about sharing info" },
+      "opening_statement": "I got hurt at a job site but I'd rather not give out my number",
+      "events": [
+        { "whenQuestionId": "callback_number", "occurrence": 1, "callerText": "I'd rather not give my number, can you just take my info", "speechConfidence": 0.95 },
+        { "whenQuestionId": "callback_number", "occurrence": 2, "callerText": "no, I really don't want to share a phone number", "speechConfidence": 0.95 }
+      ],
+      "expected": { "completed": false, "fields": { "full_name": "Bruce Callahan", "practice_area": "Personal Injury" }, "summary_must_include": ["construction", "site"], "urgent": false, "early_exit": false, "caller_question": false, "refuses_callback": true }
+    },
+    {
+      "id": "refuse-callback-b", "family": "refuse-callback", "variant": "b",
+      "description": "Caller declines number, offers email instead (firm needs phone)",
+      "persona": { "tone": "guarded", "verbosity": "brief" },
+      "facts": { "full_name": "Nadia Farr", "callback_number": "", "practice_area": "Employment", "case_summary": "Harassment complaint, prefers not to be called" },
+      "opening_statement": "I have a harassment issue at work but please don't call me",
+      "events": [
+        { "whenQuestionId": "callback_number", "occurrence": 1, "callerText": "I don't want to give a phone number, email me instead", "speechConfidence": 0.95 },
+        { "whenQuestionId": "callback_number", "occurrence": 2, "callerText": "no phone, sorry", "speechConfidence": 0.95 }
+      ],
+      "expected": { "completed": false, "fields": { "full_name": "Nadia Farr", "practice_area": "Employment" }, "summary_must_include": ["harassment"], "urgent": false, "early_exit": false, "caller_question": false, "refuses_callback": true }
+    },
+    {
+      "id": "correct-earlier-fact-a", "family": "correct-earlier-fact", "variant": "a",
+      "description": "Caller corrects a previously given fact (practice area was misheard)",
+      "persona": { "tone": "calm", "verbosity": "normal" },
+      "facts": { "full_name": "Colette Ambrose", "callback_number": "+17045550170", "practice_area": "Employment", "case_summary": "Actually an employment matter, not a personal injury one" },
+      "opening_statement": "I have a work problem, my manager retaliated against me",
+      "events": [
+        { "whenQuestionId": "case_summary", "occurrence": 1, "callerText": "actually wait, I said injury earlier but this is really an employment thing, retaliation at work", "speechConfidence": 0.95 }
+      ],
+      "expected": { "completed": true, "fields": { "full_name": "Colette Ambrose", "callback_number": "+17045550170", "practice_area": "Employment" }, "summary_must_include": ["retaliat"], "urgent": false, "early_exit": false, "caller_question": false, "correction": { "field": "practice_area", "to": "Employment" } }
+    },
+    {
+      "id": "correct-earlier-fact-b", "family": "correct-earlier-fact", "variant": "b",
+      "description": "Caller corrects their own name after giving it",
+      "persona": { "tone": "calm", "verbosity": "normal" },
+      "facts": { "full_name": "Gregory Tan", "callback_number": "+17045550135", "practice_area": "Personal Injury", "case_summary": "Rear-ended on the freeway on Monday" },
+      "opening_statement": "I was rear-ended and need a lawyer",
+      "events": [
+        { "whenQuestionId": "full_name", "occurrence": 1, "callerText": "Greg Tam", "speechConfidence": 0.92 },
+        { "whenQuestionId": "case_summary", "occurrence": 1, "callerText": "oh and I mis-said my name earlier, it's Gregory Tan, T-A-N, and it was a rear-end crash on the freeway Monday", "speechConfidence": 0.95 }
+      ],
+      "expected": { "completed": true, "fields": { "full_name": "Gregory Tan", "callback_number": "+17045550135", "practice_area": "Personal Injury" }, "summary_must_include": ["rear", "monday"], "urgent": false, "early_exit": false, "caller_question": false, "correction": { "field": "full_name", "from": "Greg Tam", "to": "Gregory Tan" } }
+    },
+    {
+      "id": "early-exit-a", "family": "early-exit", "variant": "a",
+      "description": "Caller decides to hang up early / never mind",
+      "persona": { "tone": "hesitant", "verbosity": "brief" },
+      "facts": { "full_name": "Simon Petrov", "callback_number": "+17045550150", "practice_area": "Personal Injury", "case_summary": "Was going to ask about a fender bender" },
+      "opening_statement": "I had a small fender bender, I wanted to ask about it",
+      "events": [
+        { "whenQuestionId": "full_name", "occurrence": 1, "callerText": "you know what, never mind, I'll call back later", "speechConfidence": 0.95 }
+      ],
+      "expected": { "completed": false, "fields": {}, "summary_must_include": [], "urgent": false, "early_exit": true, "caller_question": false }
+    },
+    {
+      "id": "early-exit-b", "family": "early-exit", "variant": "b",
+      "description": "Caller exits mid-intake, changed their mind",
+      "persona": { "tone": "hesitant", "verbosity": "brief" },
+      "facts": { "full_name": "Delia Fontaine", "callback_number": "+17045550194", "practice_area": "Family Law", "case_summary": "Was going to ask about separation" },
+      "opening_statement": "I wanted to ask about a legal separation",
+      "events": [
+        { "whenQuestionId": "callback_number", "occurrence": 1, "callerText": "actually I have to go, I'll deal with this another time, thanks", "speechConfidence": 0.95 }
+      ],
+      "expected": { "completed": false, "fields": { "full_name": "Delia Fontaine" }, "summary_must_include": [], "urgent": false, "early_exit": true, "caller_question": false }
+    }
+  ]
+}
