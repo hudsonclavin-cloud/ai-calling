@@ -57,18 +57,20 @@ export function createSimulatedCaller(scenario) {
     return n;
   }
 
-  function findEvent(kind, questionId, occ) {
+  function findEvent(kind, occ) {
+    // Match events by the SPOKEN kind only. Matching by the tracked questionId
+    // would re-introduce the controller's lastQuestionId desync (e.g. fire a
+    // callback event on a spoken name question), so it is deliberately excluded.
     return events.find((e) => {
       if (e.injectAt) return false; // first-inject events handled separately
       const when = String(e.whenQuestionId || '').toLowerCase();
-      const matchId = when === String(questionId || '').toLowerCase();
       const matchKind = when === kind
         || (kind === 'callback' && (when === 'callback_number' || when === '__phone_retry__'))
         || (kind === 'phone_retry' && when === '__phone_retry__')
         || (kind === 'name' && when === 'full_name')
         || (kind === 'practice' && when === 'practice_area')
         || (kind === 'summary' && when === 'case_summary');
-      return (matchId || matchKind) && Number(e.occurrence || 1) === occ;
+      return matchKind && Number(e.occurrence || 1) === occ;
     });
   }
 
@@ -115,7 +117,7 @@ export function createSimulatedCaller(scenario) {
 
       // 2. Scheduled event for this field + occurrence.
       const occ = nextOccurrence(kind === 'unknown' ? String(ask.questionId || 'unknown') : kind);
-      const ev = findEvent(kind, ask.questionId, occ);
+      const ev = findEvent(kind, occ);
       if (ev) {
         return { text: ev.callerText, confidence: ev.speechConfidence ?? 0.95, kind, source: `event:${ev.whenQuestionId}#${occ}` };
       }
