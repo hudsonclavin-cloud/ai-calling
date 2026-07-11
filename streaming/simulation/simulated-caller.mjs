@@ -13,8 +13,23 @@ export function phoneToSpoken(e164) {
   return `${say(digits.slice(0, 3))}, ${say(digits.slice(3, 6))}, ${say(digits.slice(6, 10))}`;
 }
 
-/** Classify the field Ava is asking for from its id (preferred) or its text. */
+/**
+ * Classify the field Ava is asking for. Prefer what Ava actually SAID (the
+ * spoken question text) — a real caller answers what they hear, not an internal
+ * question id. The tracked questionId is only a fallback, because the controller
+ * can (and in this build does) leave lastQuestionId desynced from the spoken
+ * question; answering the spoken question is the faithful caller behavior.
+ */
 export function classifyQuestion(questionId, questionText) {
+  const t = String(questionText || '').toLowerCase();
+  if (t) {
+    if (/\bnames?\b|your name|spell (your|that)|who am i speaking|who's calling/.test(t)) return 'name';
+    if (/number|phone|reach you|call you (back|at)|best way to reach|callback|digits/.test(t)) return 'callback';
+    if (/type of (legal )?(matter|case)|practice area|what kind of (case|matter)|area of law|what.*legal matter/.test(t)) return 'practice';
+    if (/new or (an )?existing|worked with us|called (us )?before|returning client|existing client/.test(t)) return 'caller_type';
+    if (/anything else|is there anything|one last thing|before i let you go|else the attorney/.test(t)) return 'final';
+    if (/what happened|tell me|briefly|what.?s going on|situation|help you with|reason for your call|going on today/.test(t)) return 'summary';
+  }
   const id = String(questionId || '').toLowerCase();
   if (id === 'full_name') return 'name';
   if (id === 'callback_number') return 'callback';
@@ -23,14 +38,6 @@ export function classifyQuestion(questionId, questionText) {
   if (id === '__caller_type__') return 'caller_type';
   if (id === '__phone_retry__') return 'phone_retry';
   if (id === 'final_clarify') return 'final';
-
-  const t = String(questionText || '').toLowerCase();
-  if (/\bname\b/.test(t)) return 'name';
-  if (/number|phone|reach you|call you (back|at)|best way to reach/.test(t)) return 'callback';
-  if (/type of (legal )?(matter|case)|practice area|what kind of (case|matter)/.test(t)) return 'practice';
-  if (/new or (an )?existing|worked with us|called (us )?before|returning/.test(t)) return 'caller_type';
-  if (/anything else|is there anything|one last thing/.test(t)) return 'final';
-  if (/what happened|tell me|briefly|what.?s going on|situation|help you with/.test(t)) return 'summary';
   return 'unknown';
 }
 

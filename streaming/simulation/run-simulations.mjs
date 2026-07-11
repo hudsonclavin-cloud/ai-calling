@@ -140,6 +140,24 @@ export function parseTwiml(xml) {
   return { kind: 'unknown', raw: s.slice(0, 200) };
 }
 
+// Extract the text Ava actually SPOKE from a TwiML response — either a <Say>
+// body or the `text=` param of a /tts-live <Play> URL (TTS is disabled in the
+// sim, so those are the only two forms). SSML tags are stripped. This is what a
+// real caller hears, and what the simulated caller answers.
+export function spokenFromTwiml(xml) {
+  const s = String(xml || '');
+  const say = s.match(/<Say[^>]*>([\s\S]*?)<\/Say>/);
+  if (say) return stripSsml(xmlUnescape(say[1]));
+  const play = s.match(/<Play>([^<]*)<\/Play>/);
+  if (play) {
+    const url = xmlUnescape(play[1]);
+    const m = url.match(/[?&]text=([^&]+)/);
+    if (m) { try { return stripSsml(decodeURIComponent(m[1])); } catch { return stripSsml(m[1]); } }
+  }
+  return '';
+}
+function stripSsml(t) { return String(t || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(); }
+
 // ── HTTP-ish helpers over app.inject ────────────────────────────────────────────
 function form(obj) { return new URLSearchParams(obj).toString(); }
 async function postForm(app, url, body, headers = {}) {
@@ -205,7 +223,8 @@ async function driveCall({ app, db, scenario, callSid, fromPhone, firmId, client
 
   try {
     // Inbound webhook (no SpeechResult) -> Ava's opening.
-    let { parsed } = await advance('', '');
+    let { parsed, body } = await advance('', '');
+    let spoken = spokenFromTwiml(body); // what Ava actually said (the caller answers THIS)
     let sess = await readSession();
     if (!sess) { return { status: 'infra-failure', failureReason: 'no session after inbound webhook', turns, transcript: [], finalSession: null }; }
     if (parsed.kind === 'done') { status = 'completed'; }
@@ -214,17 +233,21 @@ async function driveCall({ app, db, scenario, callSid, fromPhone, firmId, client
       if (parsed.kind !== 'ava_turn') { status = 'malformed'; failureReason = `unexpected TwiML kind=${parsed.kind}`; break; }
       if (callerTurns >= MAX_CALLER_TURNS) { status = 'loop'; failureReason = 'reached max caller turns without completion'; break; }
 
-      const questionId = sess?.lastQuestionId || '';
-      const questionText = sess?.lastQuestionText || '';
-      const r = caller.respond({ questionId, questionText });
+      const trackedQuestionId = sess?.lastQuestionId || '';
+      // Answer the SPOKEN question. Pass the spoken text as questionText so the
+      // caller classifies from what it heard; keep trackedQuestionId only as a
+      // fallback signal (it is often desynced from the spoken question).
+      const r = caller.respond({ questionId: trackedQuestionId, questionText: spoken });
       callerTurns++;
 
       const adv = await advance(r.text, String(r.confidence));
       const after = await readSession();
       turns.push({
         index: callerTurns,
-        questionId,
-        questionText,
+        questionId: trackedQuestionId,           // controller's tracked id (may be desynced)
+        spokenQuestion: spoken,                   // what Ava actually said this turn
+        trackedQuestionText: sess?.lastQuestionText || '',
+        classifiedKind: r.kind,
         callerText: r.text,
         confidence: r.confidence,
         source: r.source,
@@ -238,6 +261,7 @@ async function driveCall({ app, db, scenario, callSid, fromPhone, firmId, client
         done: !!after?.done,
       });
       parsed = adv.parsed;
+      spoken = spokenFromTwiml(adv.body);
       sess = after;
       if (parsed.kind === 'done') { status = 'completed'; break; }
     }

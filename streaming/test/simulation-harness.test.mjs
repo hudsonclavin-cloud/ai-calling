@@ -6,7 +6,7 @@ import fsp from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
 import {
-  parseTwiml, xmlUnescape, callSidFor, fromPhoneFor, clientIpFor, firmIdFor,
+  parseTwiml, xmlUnescape, spokenFromTwiml, callSidFor, fromPhoneFor, clientIpFor, firmIdFor,
   isAllowedHost, isolateEnv, MAX_CALLER_TURNS, BLANKED_ENV,
 } from '../simulation/run-simulations.mjs';
 import { createSimulatedCaller, phoneToSpoken, classifyQuestion } from '../simulation/simulated-caller.mjs';
@@ -140,6 +140,24 @@ test('simulated caller adapts to the requested field and applies events', async 
   assert.ok(p1.confidence < 0.5, 'first callback attempt should be low confidence per the event');
   const p2 = caller.respond({ questionId: 'callback_number', questionText: 'best number?' });
   assert.ok(p2.confidence > 0.9, 'second callback attempt should be clean');
+});
+
+test('caller answers the SPOKEN question even when lastQuestionId is desynced', async () => {
+  const s = await loadScenarios();
+  const scen = s.find((x) => x.id === 'normal-intake-a');
+  const caller = createSimulatedCaller(scen);
+  caller.respond({ questionId: 'full_name', questionText: 'What can I help you with today?' }); // opening
+  // Ava SPEAKS a name question but the controller's tracked id is (wrongly) callback_number.
+  const r = caller.respond({ questionId: 'callback_number', questionText: 'can I have your name, please?' });
+  assert.equal(r.kind, 'name', 'must answer the spoken name question, not the desynced id');
+  assert.equal(r.text, scen.facts.full_name);
+});
+
+test('spokenFromTwiml extracts <Say> text and /tts-live text', () => {
+  assert.match(spokenFromTwiml('<Response><Gather><Say>can I have your name?</Say></Gather></Response>'), /name/);
+  const live = '<Response><Gather><Play>http://x/tts-live?text=' + encodeURIComponent('the best number to reach you') + '&amp;firmId=f</Play></Gather></Response>';
+  assert.match(spokenFromTwiml(live), /best number/);
+  assert.equal(spokenFromTwiml('<Response><Hangup/></Response>'), '');
 });
 
 test('parseTwiml classifies gather / filler / done', () => {
