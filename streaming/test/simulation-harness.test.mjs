@@ -6,7 +6,7 @@ import fsp from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
 import {
-  parseTwiml, xmlUnescape, callSidFor, fromPhoneFor, isAllowedHost, isolateEnv, MAX_CALLER_TURNS,
+  parseTwiml, xmlUnescape, callSidFor, fromPhoneFor, isAllowedHost, isolateEnv, MAX_CALLER_TURNS, BLANKED_ENV,
 } from '../simulation/run-simulations.mjs';
 import { createSimulatedCaller, phoneToSpoken, classifyQuestion } from '../simulation/simulated-caller.mjs';
 import { evaluateCall, evaluateRun, prohibitedAckHits } from '../simulation/evaluate-results.mjs';
@@ -52,24 +52,46 @@ test('turn cap is 12', () => {
   assert.equal(MAX_CALLER_TURNS, 12);
 });
 
-test('external non-OpenAI services are disabled by the fetch guard', () => {
+test('fetch guard blocks every non-OpenAI host, including railway/prod URLs and datastores', () => {
   assert.equal(isAllowedHost('api.openai.com'), true);
-  for (const h of ['api.elevenlabs.io', 'api.resend.com', 'api.twilio.com', 'api.stripe.com', 'example.com']) {
-    assert.equal(isAllowedHost(h), false, `${h} must be blocked`);
-  }
+  for (const h of [
+    'api.elevenlabs.io', 'api.resend.com', 'api.twilio.com', 'api.stripe.com',
+    'ai-calling-production-421b.up.railway.app', 'adorable-imagination-production-fb96.up.railway.app',
+    'example.com', 'localhost:5432',
+  ]) assert.equal(isAllowedHost(h), false, `${h} must be blocked`);
 });
 
-test('isolateEnv uses a temporary DATA_DIR and zeroes external keys', async () => {
-  const prev = { ...process.env };
-  const { tmp } = await isolateEnv();
-  assert.ok(tmp.startsWith(os.tmpdir()), 'DATA_DIR should be under the OS temp dir');
+test('isolateEnv: temp DATA_DIR overrides /railway-data, deletes prod env, preserves OpenAI, localhost URLs', async () => {
+  // Simulate Railway production injection.
+  process.env.DATA_DIR = '/railway-data';
+  process.env.OPENAI_API_KEY = 'sk-test-PRESERVE-do-not-print';
+  process.env.OPENAI_MODEL = 'gpt-4o-mini';
+  for (const k of BLANKED_ENV) process.env[k] = 'INJECTED';
+  process.env.PUBLIC_BASE_URL = 'https://ai-calling-production-421b.up.railway.app';
+  process.env.NEXT_PUBLIC_API_BASE = 'https://ai-calling-production-421b.up.railway.app';
+  process.env.WEB_BASE_URL = 'https://adorable-imagination-production-fb96.up.railway.app';
+  process.env.TWILIO_WEBHOOK_BASE_URL = 'https://ai-calling-production-421b.up.railway.app/twiml?firmId=firm_default';
+
+  const { tmp, hasOpenAI } = await isolateEnv();
+
+  assert.ok(tmp.startsWith(os.tmpdir()), 'DATA_DIR under OS temp dir');
   assert.equal(process.env.DATA_DIR, tmp);
-  assert.equal(process.env.SKIP_TWILIO_SIGNATURE_VALIDATION, 'true');
-  for (const k of ['ELEVENLABS_API_KEY', 'RESEND_API_KEY', 'TWILIO_ACCOUNT_SID', 'STRIPE_SECRET_KEY', 'NOTIFICATION_EMAIL']) {
-    assert.equal(process.env[k], '', `${k} must be emptied`);
+  assert.notEqual(process.env.DATA_DIR, '/railway-data');
+  assert.equal(hasOpenAI, true);
+  assert.equal(process.env.OPENAI_API_KEY, 'sk-test-PRESERVE-do-not-print', 'OpenAI key preserved');
+  assert.equal(process.env.OPENAI_MODEL, 'gpt-4o-mini', 'OpenAI model preserved');
+  for (const k of BLANKED_ENV) assert.equal(process.env[k], undefined, `${k} must be deleted`);
+  for (const u of ['PUBLIC_BASE_URL', 'NEXT_PUBLIC_API_BASE', 'WEB_BASE_URL', 'TWILIO_WEBHOOK_BASE_URL']) {
+    assert.match(process.env[u], /127\.0\.0\.1:3000/, `${u} must be localhost`);
+    assert.doesNotMatch(process.env[u], /railway\.app/, `${u} must not point at railway`);
   }
-  // restore anything we care about
-  process.env.DATA_DIR = prev.DATA_DIR || '';
+  assert.equal(process.env.SKIP_TWILIO_SIGNATURE_VALIDATION, 'true');
+  delete process.env.OPENAI_API_KEY; delete process.env.OPENAI_MODEL;
+});
+
+test('results directory is gitignored', async () => {
+  const gi = await fsp.readFile(path.join(__dirname, '..', '.gitignore'), 'utf8');
+  assert.match(gi, /simulation\/results\//);
 });
 
 test('phoneToSpoken and classifyQuestion behave', () => {

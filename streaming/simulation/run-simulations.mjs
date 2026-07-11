@@ -47,21 +47,37 @@ export async function isolateEnv() {
     dotenv.config({ path: path.join(STREAMING_DIR, '.env') });
   } catch { /* dotenv optional; OPENAI_API_KEY may already be in the shell */ }
 
-  // Force-disable every non-OpenAI external integration.
-  for (const k of [
-    'ELEVENLABS_API_KEY', 'RESEND_API_KEY',
-    'TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM_NUMBER',
-    'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET', 'NOTIFICATION_EMAIL',
-  ]) process.env[k] = '';
+  // Preserve ONLY OpenAI (OPENAI_API_KEY, OPENAI_MODEL). Delete every other
+  // production integration Railway may have injected — API keys, auth secrets,
+  // and any datastore URL (the app uses a file: SQLite under DATA_DIR only, but
+  // we delete DB/Postgres/Supabase/Redis vars anyway so no client can auto-connect).
+  for (const k of BLANKED_ENV) delete process.env[k];
 
   const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'ava-sim-'));
-  process.env.DATA_DIR = tmp;
+  process.env.DATA_DIR = tmp;                          // override Railway's /railway-data
   process.env.PUBLIC_BASE_URL = 'http://127.0.0.1:3000';
+  process.env.NEXT_PUBLIC_API_BASE = 'http://127.0.0.1:3000';
+  process.env.WEB_BASE_URL = 'http://127.0.0.1:3000';
+  process.env.TWILIO_WEBHOOK_BASE_URL = 'http://127.0.0.1:3000/twiml?firmId=firm_default';
   process.env.SKIP_TWILIO_SIGNATURE_VALIDATION = 'true';
 
   const hasOpenAI = !!(process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY.trim());
   return { tmp, hasOpenAI, openAiKeyLen: (process.env.OPENAI_API_KEY || '').trim().length };
 }
+
+// Production integrations deleted before any application module is imported.
+// (OPENAI_API_KEY and OPENAI_MODEL are deliberately absent — they are preserved.)
+export const BLANKED_ENV = [
+  'ADMIN_API_KEY', 'ADMIN_GITHUB_USERNAME', 'AUTH_GITHUB_ID', 'AUTH_GITHUB_SECRET', 'AUTH_SECRET',
+  'ELEVENLABS_API_KEY', 'ELEVENLABS_MODEL_ID', 'ELEVENLABS_VOICE_ID',
+  'ELEVEN_SIMILARITY', 'ELEVEN_SPEAKER_BOOST', 'ELEVEN_SPEED', 'ELEVEN_STABILITY', 'ELEVEN_STYLE',
+  'RESEND_API_KEY', 'RESEND_FROM_EMAIL', 'NOTIFICATION_EMAIL',
+  'STRIPE_PRICE_ID', 'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET',
+  'TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM_NUMBER',
+  'DATABASE_URL', 'POSTGRES_URL', 'POSTGRES_HOST', 'POSTGRES_PORT', 'POSTGRES_USER', 'POSTGRES_PASSWORD',
+  'PGHOST', 'PGPORT', 'PGUSER', 'PGPASSWORD', 'PGDATABASE', 'REDIS_URL',
+  'SUPABASE_URL', 'SUPABASE_ANON_KEY', 'SUPABASE_SERVICE_ROLE_KEY',
+];
 
 // ── fetch guard: allow only OpenAI; block/record everything else ───────────────
 const blockedRequests = [];
