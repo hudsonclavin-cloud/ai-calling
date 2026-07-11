@@ -533,6 +533,54 @@ function normalizePhone(raw) {
   return txt || 'unknown';
 }
 
+// ── Deterministic phone extraction (callback integrity) ───────────────────────
+// Spoken number-words → digits. 'oh'/'o' map to zero. Nothing else is a digit.
+const SPOKEN_DIGITS = {
+  zero: '0', oh: '0', o: '0', one: '1', two: '2', three: '3', four: '4',
+  five: '5', six: '6', seven: '7', eight: '8', nine: '9',
+};
+
+// Convert a caller utterance into an ordered digit string, mapping spoken digit
+// words to digits and preserving literal digit runs. Separators/filler words are
+// ignored. Returns { digits, sawWord, sawDigit } for provenance.
+function spokenToDigits(text) {
+  const tokens = String(text || '').toLowerCase().replace(/[+(),.\-]/g, ' ').split(/\s+/).filter(Boolean);
+  let digits = '', sawWord = false, sawDigit = false;
+  for (const tok of tokens) {
+    if (/^\d+$/.test(tok)) { digits += tok; sawDigit = true; }
+    else if (Object.prototype.hasOwnProperty.call(SPOKEN_DIGITS, tok)) { digits += SPOKEN_DIGITS[tok]; sawWord = true; }
+  }
+  return { digits, sawWord, sawDigit };
+}
+
+// Deterministic phone parse (Invariants 1-3): direct digits, spoken digit-words,
+// and mixed forms. Returns { normalized, provenance } for a COMPLETE 10- or 11-digit
+// US number, or null for absent / partial / ambiguous input — it never guesses or
+// expands an incomplete number.
+function extractPhoneCandidate(text) {
+  const { digits, sawWord, sawDigit } = spokenToDigits(text);
+  let normalized = null;
+  if (digits.length === 10) normalized = `+1${digits}`;
+  else if (digits.length === 11 && digits[0] === '1') normalized = `+${digits}`;
+  if (!normalized) return null;
+  const provenance = (sawWord && sawDigit) ? 'digits_mixed' : sawWord ? 'digits_spoken_words' : 'digits_direct';
+  return { normalized, provenance };
+}
+
+// Explicit callback-correction intent (Invariant 4) — utterance-driven, independent
+// of lastQuestionId. Pair with a valid extractPhoneCandidate at the call site.
+function detectPhoneCorrectionIntent(text) {
+  const t = String(text || '').toLowerCase().trim();
+  if (/^(no|nope)\b/.test(t) && /\b(number|it'?s|its|the|actually|zero|oh|one|two|three|four|five|six|seven|eight|nine)\b|\d/.test(t)) return true;
+  if (/\bthat'?s (wrong|not right|incorrect)\b/.test(t)) return true;
+  if (/\bwrong number\b/.test(t)) return true;
+  if (/\b(the )?(correct|right) number is\b/.test(t)) return true;
+  if (/\bi (said|meant)\b/.test(t)) return true;
+  if (/\bactually\b/.test(t) && /\b(use|number|it'?s|reach me at)\b/.test(t)) return true;
+  if (/\b(change|update|different)\b.*\bnumber\b/.test(t)) return true;
+  return false;
+}
+
 // ── Business hours ────────────────────────────────────────────────────────────
 
 const DAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
@@ -603,6 +651,7 @@ function createSession({ callSid, firmId, fromPhone, firmConfig }) {
     urgencySpoken: false,      // true after urgency acknowledgment has been spoken
     phoneRetryPending: false,  // true when caller gave digits but extraction failed
     phoneRetryUsed: false,     // ensures only one phone retry per session
+    callbackProvenance: '',    // extraction source of callback_number (debug/provenance, in-memory only)
     askedQuestionIds: [],
     collected,
     lastQuestionId: '',
@@ -669,7 +718,9 @@ function extractStructuredDeterministic(userText, expectedField = '') {
   else if (lower.includes('criminal') || lower.includes('arrested') || lower.includes('charged')) extracted.practice_area = 'Criminal Defense';
 
   const words = text.split(/\s+/).filter(Boolean);
-  if (!nameMatch && !phoneMatch && isLikelySummary(text, expectedField)) extracted.case_summary = text;
+  // Callback integrity: a spoken phone number (word/mixed form escapes the digit
+  // regex above) must not leak into case_summary just because it reads like a phrase.
+  if (!nameMatch && !phoneMatch && !extractPhoneCandidate(text) && isLikelySummary(text, expectedField)) extracted.case_summary = text;
   return extracted;
 }
 
@@ -2126,6 +2177,48 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
     extracted[k] = v;
   }
   const expectedField = session.lastQuestionId;
+
+  // ── Deterministic callback authority (Invariants 1,2,6) ──────────────────────
+  // A phone number the caller actually spoke — direct, spoken-word, or mixed — is
+  // parsed deterministically and OVERRIDES the non-deterministic LLM callback value.
+  // Scope: an explicit correction, no callback collected yet, or a callback/retry
+  // turn. This prevents the LLM from corrupting a valid number and prevents grabbing
+  // stray numbers from unrelated turns. Precedence: correction > deterministic >
+  // (carried, handled below) > validated LLM fallback > empty.
+  const phoneCandidate = extractPhoneCandidate(callerText);
+  const phoneCorrection = !!(phoneCandidate && callerText && detectPhoneCorrectionIntent(callerText));
+  const hadCallback = !!String(session.collected.callback_number || '').trim();
+  if (phoneCandidate && (phoneCorrection || !hadCallback || expectedField === 'callback_number' || expectedField === '__phone_retry__')) {
+    extracted.callback_number = phoneCandidate.normalized;
+    session.callbackProvenance = phoneCorrection ? 'explicit_correction' : phoneCandidate.provenance;
+  } else if (hadCallback && !phoneCorrection) {
+    // A callback is already collected and the caller did NOT speak a new number
+    // (or a correction) this turn — the LLM must never re-invent/mutate an
+    // established callback from conversational context. Drop any LLM candidate so
+    // mergeExtracted leaves the collected number untouched.
+    delete extracted.callback_number;
+  } else if (session.carriedCallback && callerText && isAffirmative(callerText)) {
+    // Returning caller affirming the on-file number — the carried-number confirmation
+    // path below is authoritative; the LLM must not inject a different number here.
+    delete extracted.callback_number;
+  } else if (!hadCallback && String(extracted.callback_number || '').trim()) {
+    // "validated-LLM" tier. By this point phoneCandidate is null — any number
+    // the deterministic parser could read would have been taken above — so the
+    // LLM has proposed a callback the parser did NOT find. Only trust it when the
+    // caller's utterance actually carries those digits; otherwise it is a
+    // hallucination (on a pure affirmation like "yes, that number is fine" the
+    // model copies the E.164 example straight out of its own extraction prompt).
+    // Dropping an uncorroborated number keeps the callback gate asking rather
+    // than saving one the caller never spoke.
+    const utteranceDigits = String(spokenToDigits(callerText).digits || '');
+    const llmDigits = String(extracted.callback_number).replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+    if (utteranceDigits && llmDigits && utteranceDigits.includes(llmDigits) && isLikelyPhone(extracted.callback_number)) {
+      session.callbackProvenance = 'llm_fallback';
+    } else {
+      delete extracted.callback_number;
+    }
+  }
+
   const lowConfidence = isLowSpeechConfidence(speechConfidence);
   const lowConfidenceExactField = lowConfidence && ['full_name', 'callback_number'].includes(expectedField)
     ? expectedField
@@ -2141,6 +2234,17 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
   }, 'stt-confidence');
   const fieldUpdates = mergeExtracted(session, extracted, callerText, firmConfig);
   let callbackCollectedThisTurn = !!fieldUpdates.callback_number;
+
+  // Explicit correction is authoritative even when Ava's current question concerns
+  // another field (Invariant 4): replace the stored number and clear retry state.
+  if (phoneCorrection) {
+    session.collected.callback_number = phoneCandidate.normalized;
+    session.phoneRetryPending = false;
+    callbackCollectedThisTurn = true;
+  }
+  if (callbackCollectedThisTurn) {
+    app.log.info({ callSid, callbackProvenance: session.callbackProvenance || 'unknown' }, 'callback-collected');
+  }
 
   // ── Urgency detection ──────────────────────────────────────────────────────
   if (!session.isUrgent && callerText && detectUrgency(callerText)) {
@@ -2208,6 +2312,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
       && !fieldUpdates.callback_number
       && isAffirmative(callerText)) {
     session.collected.callback_number = session.carriedCallback;
+    session.callbackProvenance = 'carried_number';
     callbackCollectedThisTurn = true;
   }
 
@@ -3756,4 +3861,4 @@ if (isMain) {
   }
 }
 
-export { app };
+export { app, extractPhoneCandidate, detectPhoneCorrectionIntent, spokenToDigits };

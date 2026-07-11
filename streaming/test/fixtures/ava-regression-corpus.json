@@ -1,0 +1,1497 @@
+{
+  "version": 1,
+  "mode": "controller-replay",
+  "description": "Stable Ava regression corpus for the IntakeWorkflow refactor scoreboard.",
+  "scenarios": [
+    {
+      "id": "direct-two-token-name",
+      "category": "extraction",
+      "description": "Direct two-token answer to the name question is stored as full_name.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 1,
+        "lastQuestionId": "full_name",
+        "askedQuestionIds": [
+          "full_name"
+        ],
+        "collected": {
+          "practice_area": "Personal Injury"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "Hudson Clavin",
+          "speechConfidence": 0.95
+        }
+      ],
+      "expect": {
+        "collected": {
+          "full_name": "Hudson Clavin"
+        },
+        "notCollected": [],
+        "nextQuestionId": "callback_number",
+        "done": false,
+        "retryState": {
+          "phoneRetryPending": false,
+          "phoneRetryUsed": false
+        }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "direct-one-token-name",
+      "category": "extraction",
+      "description": "Direct one-token answer to the name question is accepted.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 1,
+        "lastQuestionId": "full_name",
+        "askedQuestionIds": [
+          "full_name"
+        ],
+        "collected": {
+          "practice_area": "Personal Injury"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "Hudson",
+          "speechConfidence": 0.94
+        }
+      ],
+      "expect": {
+        "collected": {
+          "full_name": "Hudson"
+        },
+        "notCollected": [],
+        "nextQuestionId": "callback_number",
+        "done": false,
+        "retryState": {
+          "phoneRetryPending": false,
+          "phoneRetryUsed": false
+        }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "apostrophe-name",
+      "category": "extraction",
+      "description": "Apostrophe name answer is accepted as a plausible caller name.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 1,
+        "lastQuestionId": "full_name",
+        "askedQuestionIds": [
+          "full_name"
+        ],
+        "collected": {
+          "practice_area": "Personal Injury"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "O'Connor",
+          "speechConfidence": 0.94
+        }
+      ],
+      "expect": {
+        "collected": {
+          "full_name": "O'Connor"
+        },
+        "notCollected": [],
+        "nextQuestionId": "callback_number",
+        "done": false,
+        "retryState": {
+          "phoneRetryPending": false,
+          "phoneRetryUsed": false
+        }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "hyphenated-name",
+      "category": "extraction",
+      "description": "Hyphenated first name with a surname is accepted.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 1,
+        "lastQuestionId": "full_name",
+        "askedQuestionIds": [
+          "full_name"
+        ],
+        "collected": {
+          "practice_area": "Personal Injury"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "Jean-Luc Picard",
+          "speechConfidence": 0.96
+        }
+      ],
+      "expect": {
+        "collected": {
+          "full_name": "Jean-Luc Picard"
+        },
+        "notCollected": [],
+        "nextQuestionId": "callback_number",
+        "done": false,
+        "retryState": {
+          "phoneRetryPending": false,
+          "phoneRetryUsed": false
+        }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "initials-name",
+      "category": "extraction",
+      "description": "Initials given as the name answer are accepted.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 1,
+        "lastQuestionId": "full_name",
+        "askedQuestionIds": [
+          "full_name"
+        ],
+        "collected": {
+          "practice_area": "Personal Injury"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "A.J.",
+          "speechConfidence": 0.93
+        }
+      ],
+      "expect": {
+        "collected": {
+          "full_name": "A.J."
+        },
+        "notCollected": [],
+        "nextQuestionId": "callback_number",
+        "done": false,
+        "retryState": {
+          "phoneRetryPending": false,
+          "phoneRetryUsed": false
+        }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "natural-prefix-name",
+      "category": "extraction",
+      "description": "Natural language name prefix is stripped before storing full_name.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 1,
+        "lastQuestionId": "full_name",
+        "askedQuestionIds": [
+          "full_name"
+        ],
+        "collected": {
+          "practice_area": "Personal Injury"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "I'm Hudson Clavin",
+          "speechConfidence": 0.95
+        }
+      ],
+      "expect": {
+        "collected": {
+          "full_name": "Hudson Clavin"
+        },
+        "notCollected": [],
+        "nextQuestionId": "callback_number",
+        "done": false,
+        "retryState": {
+          "phoneRetryPending": false,
+          "phoneRetryUsed": false
+        }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "reject-weekday-as-name",
+      "category": "extraction",
+      "description": "A weekday answer to the name question is not stored as full_name.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 1,
+        "lastQuestionId": "full_name",
+        "askedQuestionIds": [
+          "full_name"
+        ],
+        "collected": {
+          "callback_number": "+17045551212",
+          "practice_area": "Personal Injury"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "Tuesday",
+          "speechConfidence": 0.95
+        }
+      ],
+      "expect": {
+        "collected": {},
+        "notCollected": [
+          "full_name"
+        ],
+        "nextQuestionId": "case_summary",
+        "done": false,
+        "retryState": {
+          "phoneRetryPending": false,
+          "phoneRetryUsed": false
+        }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "reject-filler-as-name",
+      "category": "extraction",
+      "description": "A bare filler answer to the name question is not stored as full_name.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 1,
+        "lastQuestionId": "full_name",
+        "askedQuestionIds": [
+          "full_name"
+        ],
+        "collected": {
+          "callback_number": "+17045551212",
+          "practice_area": "Personal Injury"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "okay",
+          "speechConfidence": 0.95
+        }
+      ],
+      "expect": {
+        "collected": {},
+        "notCollected": [
+          "full_name"
+        ],
+        "nextQuestionId": "case_summary",
+        "done": false,
+        "retryState": {
+          "phoneRetryPending": false,
+          "phoneRetryUsed": false
+        }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "reject-digits-as-name",
+      "category": "extraction",
+      "description": "Digits spoken during the name question are not stored as full_name.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 1,
+        "lastQuestionId": "full_name",
+        "askedQuestionIds": [
+          "full_name"
+        ],
+        "collected": {
+          "callback_number": "+17045551212",
+          "practice_area": "Personal Injury"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "7045551212",
+          "speechConfidence": 0.95
+        }
+      ],
+      "expect": {
+        "collected": {
+          "callback_number": "+17045551212"
+        },
+        "notCollected": [
+          "full_name"
+        ],
+        "nextQuestionId": "case_summary",
+        "done": false,
+        "retryState": {
+          "phoneRetryPending": false,
+          "phoneRetryUsed": false
+        }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "high-confidence-callback",
+      "category": "callback",
+      "description": "High-confidence ten-digit callback number is normalized and stored.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 2,
+        "lastQuestionId": "callback_number",
+        "askedQuestionIds": [
+          "full_name",
+          "callback_number"
+        ],
+        "collected": {
+          "full_name": "Hudson Clavin",
+          "practice_area": "Personal Injury"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "7045551212",
+          "speechConfidence": 0.96
+        }
+      ],
+      "expect": {
+        "collected": {
+          "callback_number": "+17045551212"
+        },
+        "notCollected": [],
+        "nextQuestionId": "case_summary",
+        "done": false,
+        "retryState": {
+          "phoneRetryPending": false,
+          "phoneRetryUsed": false
+        }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "punctuated-spoken-callback",
+      "category": "callback",
+      "description": "Callback number with punctuation and spacing is normalized.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 2,
+        "lastQuestionId": "callback_number",
+        "askedQuestionIds": [
+          "full_name",
+          "callback_number"
+        ],
+        "collected": {
+          "full_name": "Riley Morgan",
+          "practice_area": "Personal Injury"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "(704) 555-3434",
+          "speechConfidence": 0.97
+        }
+      ],
+      "expect": {
+        "collected": {
+          "callback_number": "+17045553434"
+        },
+        "notCollected": [],
+        "nextQuestionId": "case_summary",
+        "done": false,
+        "retryState": {
+          "phoneRetryPending": false,
+          "phoneRetryUsed": false
+        }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "low-confidence-callback-then-retry",
+      "category": "callback",
+      "description": "Low-confidence callback is not stored, then high-confidence retry is stored.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 2,
+        "lastQuestionId": "callback_number",
+        "askedQuestionIds": [
+          "full_name",
+          "callback_number"
+        ],
+        "collected": {
+          "full_name": "Avery Stone",
+          "practice_area": "Personal Injury"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "704 555 1111",
+          "speechConfidence": 0.32
+        },
+        {
+          "callerText": "704 555 1111",
+          "speechConfidence": 0.91
+        }
+      ],
+      "expect": {
+        "collected": {
+          "callback_number": "+17045551111"
+        },
+        "notCollected": [],
+        "nextQuestionId": "case_summary",
+        "done": false,
+        "retryState": {
+          "phoneRetryPending": false,
+          "phoneRetryUsed": false
+        }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "low-confidence-name-then-retry",
+      "category": "callback",
+      "description": "Low-confidence name answer is clarified, then the high-confidence retry is stored.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 1,
+        "lastQuestionId": "full_name",
+        "askedQuestionIds": [
+          "full_name"
+        ],
+        "collected": {
+          "practice_area": "Personal Injury"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "Hudson Clavin",
+          "speechConfidence": 0.31
+        },
+        {
+          "callerText": "Hudson Clavin",
+          "speechConfidence": 0.93
+        }
+      ],
+      "expect": {
+        "collected": {
+          "full_name": "Hudson Clavin"
+        },
+        "notCollected": [],
+        "nextQuestionId": "callback_number",
+        "done": false,
+        "retryState": {
+          "phoneRetryPending": false,
+          "phoneRetryUsed": false
+        }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "missing-confidence-callback",
+      "category": "callback",
+      "description": "Missing speech confidence is not treated as low confidence.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 2,
+        "lastQuestionId": "callback_number",
+        "askedQuestionIds": [
+          "full_name",
+          "callback_number"
+        ],
+        "collected": {
+          "full_name": "Jordan Lee",
+          "practice_area": "Personal Injury"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "7045552323",
+          "speechConfidence": null
+        }
+      ],
+      "expect": {
+        "collected": {
+          "callback_number": "+17045552323"
+        },
+        "notCollected": [],
+        "nextQuestionId": "case_summary",
+        "done": false,
+        "retryState": {
+          "phoneRetryPending": false,
+          "phoneRetryUsed": false
+        }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "partial-number-legacy-retry",
+      "category": "callback",
+      "description": "Seven spoken digits on the callback turn activate the legacy phone retry gate.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 2,
+        "lastQuestionId": "callback_number",
+        "askedQuestionIds": [
+          "full_name",
+          "callback_number"
+        ],
+        "collected": {
+          "full_name": "Morgan Patel",
+          "practice_area": "Personal Injury"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "555-1212",
+          "speechConfidence": 0.94
+        }
+      ],
+      "expect": {
+        "collected": {},
+        "notCollected": [
+          "callback_number"
+        ],
+        "nextQuestionId": "__phone_retry__",
+        "done": false,
+        "retryState": {
+          "phoneRetryPending": true,
+          "phoneRetryUsed": false
+        }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "successful-phone-retry-clears-pending",
+      "category": "callback",
+      "description": "A successful callback retry stores the number and clears pending retry state.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 3,
+        "lastQuestionId": "__phone_retry__",
+        "askedQuestionIds": [
+          "full_name",
+          "callback_number",
+          "__phone_retry__"
+        ],
+        "phoneRetryPending": true,
+        "phoneRetryUsed": false,
+        "collected": {
+          "full_name": "Casey Nguyen",
+          "practice_area": "Personal Injury"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "704 555 2222",
+          "speechConfidence": 0.96
+        }
+      ],
+      "expect": {
+        "collected": {
+          "callback_number": "+17045552222"
+        },
+        "notCollected": [],
+        "nextQuestionId": "case_summary",
+        "done": false,
+        "retryState": {
+          "phoneRetryPending": false,
+          "phoneRetryUsed": true
+        }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "returning-confirms-stored-number",
+      "category": "callback",
+      "description": "Returning caller affirmative confirmation promotes the carried callback number.",
+      "startingState": {
+        "callerType": "returning",
+        "knownName": "Hudson Clavin",
+        "carriedCallback": "+17045550000",
+        "disclaimerShown": true,
+        "turnCount": 2,
+        "lastQuestionId": "callback_number",
+        "askedQuestionIds": [
+          "callback_number"
+        ],
+        "collected": {
+          "full_name": "Hudson Clavin",
+          "practice_area": "Personal Injury"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "yes, same number",
+          "speechConfidence": 0.94
+        }
+      ],
+      "expect": {
+        "collected": {
+          "callback_number": "+17045550000"
+        },
+        "notCollected": [],
+        "nextQuestionId": "case_summary",
+        "done": false,
+        "retryState": {
+          "phoneRetryPending": false,
+          "phoneRetryUsed": false
+        }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "returning-replaces-stored-number",
+      "category": "callback",
+      "description": "Returning caller rejection plus a new number stores the new callback number.",
+      "startingState": {
+        "callerType": "returning",
+        "knownName": "Hudson Clavin",
+        "carriedCallback": "+17045550000",
+        "disclaimerShown": true,
+        "turnCount": 2,
+        "lastQuestionId": "callback_number",
+        "askedQuestionIds": [
+          "callback_number"
+        ],
+        "collected": {
+          "full_name": "Hudson Clavin",
+          "practice_area": "Personal Injury"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "No, use 704 555 9999",
+          "speechConfidence": 0.94
+        }
+      ],
+      "expect": {
+        "collected": {
+          "callback_number": "+17045559999"
+        },
+        "notCollected": [],
+        "nextQuestionId": "case_summary",
+        "done": false,
+        "retryState": {
+          "phoneRetryPending": false,
+          "phoneRetryUsed": false
+        }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "concise-summary-rear-ended",
+      "category": "case_summary",
+      "description": "Concise personal injury summary is stored and completes the intake.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 3,
+        "lastQuestionId": "case_summary",
+        "askedQuestionIds": [
+          "full_name",
+          "callback_number",
+          "practice_area",
+          "case_summary"
+        ],
+        "collected": {
+          "full_name": "Taylor Reed",
+          "callback_number": "+17045554321",
+          "practice_area": "Personal Injury"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "Rear-ended on Tuesday",
+          "speechConfidence": 0.96
+        }
+      ],
+      "expect": {
+        "collected": {
+          "case_summary": "Rear-ended on Tuesday"
+        },
+        "notCollected": [],
+        "done": true,
+        "retryState": {
+          "phoneRetryPending": false,
+          "phoneRetryUsed": false
+        }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "concise-summary-evicted",
+      "category": "case_summary",
+      "description": "Concise housing-related summary is stored and completes the intake.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 3,
+        "lastQuestionId": "case_summary",
+        "askedQuestionIds": [
+          "full_name",
+          "callback_number",
+          "practice_area",
+          "case_summary"
+        ],
+        "collected": {
+          "full_name": "Parker Smith",
+          "callback_number": "+17045554322",
+          "practice_area": "Family Law"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "Evicted this morning",
+          "speechConfidence": 0.95
+        }
+      ],
+      "expect": {
+        "collected": {
+          "case_summary": "Evicted this morning"
+        },
+        "notCollected": [],
+        "done": true,
+        "retryState": {
+          "phoneRetryPending": false,
+          "phoneRetryUsed": false
+        }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "concise-summary-arrested-son",
+      "category": "case_summary",
+      "description": "Concise criminal defense family-call summary is stored and flagged urgent.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 3,
+        "lastQuestionId": "case_summary",
+        "askedQuestionIds": [
+          "full_name",
+          "callback_number",
+          "practice_area",
+          "case_summary"
+        ],
+        "collected": {
+          "full_name": "Robin Ellis",
+          "callback_number": "+17045554323",
+          "practice_area": "Criminal Defense"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "My son was arrested last night",
+          "speechConfidence": 0.95
+        }
+      ],
+      "expect": {
+        "collected": {
+          "case_summary": "My son was arrested last night",
+          "practice_area": "Criminal Defense"
+        },
+        "notCollected": [],
+        "done": true,
+        "flags": {
+          "isUrgent": true,
+          "urgencySpoken": true
+        },
+        "retryState": {
+          "phoneRetryPending": false,
+          "phoneRetryUsed": false
+        }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "rambling-narrative-useful-facts",
+      "category": "case_summary",
+      "description": "Longer rambling narrative preserves useful facts as the case summary.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 3,
+        "lastQuestionId": "case_summary",
+        "askedQuestionIds": [
+          "full_name",
+          "callback_number",
+          "practice_area",
+          "case_summary"
+        ],
+        "collected": {
+          "full_name": "Jamie Brooks",
+          "callback_number": "+17045554324",
+          "practice_area": "Personal Injury"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "I was stopped at a red light near a grocery store last Friday when another driver hit the back of my car. I went to urgent care that evening because my neck and shoulder were hurting. The other driver gave me insurance information, but their adjuster keeps calling and asking for a recorded statement. I have photos of the damage, the police report number, and the clinic paperwork. I am mostly trying to find out whether someone can review the accident and help me understand what to do next before I answer the insurance company. The repair shop gave me a written estimate, a passenger saw the crash, and my shoulder still hurts when I lift things at work, so I want the attorney to know those details too.",
+          "speechConfidence": 0.97
+        }
+      ],
+      "expect": {
+        "collected": {
+          "case_summary": "I was stopped at a red light near a grocery store last Friday when another driver hit the back of my car. I went to urgent care that evening because my neck and shoulder were hurting. The other driver gave me insurance information, but their adjuster keeps calling and asking for a recorded statement. I have photos of the damage, the police report number, and the clinic paperwork. I am mostly trying to find out whether someone can review the accident and help me understand what to do next before I answer the insurance company. The repair shop gave me a written estimate, a passenger saw the crash, and my shoulder still hurts when I lift things at work, so I want the attorney to know those details too."
+        },
+        "notCollected": [],
+        "done": true,
+        "retryState": {
+          "phoneRetryPending": false,
+          "phoneRetryUsed": false
+        }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "reject-acknowledgment-summary",
+      "category": "case_summary",
+      "description": "Bare acknowledgment is not stored as case_summary.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 3,
+        "lastQuestionId": "case_summary",
+        "askedQuestionIds": [
+          "full_name",
+          "callback_number",
+          "practice_area",
+          "case_summary"
+        ],
+        "collected": {
+          "full_name": "Kai Foster",
+          "callback_number": "+17045554325",
+          "practice_area": "Personal Injury"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "okay",
+          "speechConfidence": 0.95
+        }
+      ],
+      "expect": {
+        "collected": {},
+        "notCollected": [
+          "case_summary"
+        ],
+        "nextQuestionId": "final_clarify",
+        "done": false,
+        "retryState": {
+          "phoneRetryPending": false,
+          "phoneRetryUsed": false
+        }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "reject-phone-summary",
+      "category": "case_summary",
+      "description": "Bare phone number on a summary turn is not stored as case_summary.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 3,
+        "lastQuestionId": "case_summary",
+        "askedQuestionIds": [
+          "full_name",
+          "callback_number",
+          "practice_area",
+          "case_summary"
+        ],
+        "collected": {
+          "full_name": "Drew Hall",
+          "callback_number": "+17045551212",
+          "practice_area": "Personal Injury"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "7045551212",
+          "speechConfidence": 0.96
+        }
+      ],
+      "expect": {
+        "collected": {
+          "callback_number": "+17045551212"
+        },
+        "notCollected": [
+          "case_summary"
+        ],
+        "nextQuestionId": "final_clarify",
+        "done": false,
+        "retryState": {
+          "phoneRetryPending": false,
+          "phoneRetryUsed": false
+        }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "reject-name-like-summary",
+      "category": "case_summary",
+      "description": "Name-like text on a summary turn is not stored as case_summary.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 3,
+        "lastQuestionId": "case_summary",
+        "askedQuestionIds": [
+          "full_name",
+          "callback_number",
+          "practice_area",
+          "case_summary"
+        ],
+        "collected": {
+          "full_name": "Sam Rivera",
+          "callback_number": "+17045554326",
+          "practice_area": "Personal Injury"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "Hudson Clavin",
+          "speechConfidence": 0.96
+        }
+      ],
+      "expect": {
+        "collected": {},
+        "notCollected": [
+          "case_summary"
+        ],
+        "nextQuestionId": "final_clarify",
+        "done": false,
+        "retryState": {
+          "phoneRetryPending": false,
+          "phoneRetryUsed": false
+        }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "distress-no-generic-ack-after-urgency",
+      "category": "emotional_context",
+      "description": "Distress is handled without a generic deterministic acknowledgment when urgency was already spoken.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 3,
+        "lastQuestionId": "case_summary",
+        "askedQuestionIds": [
+          "full_name",
+          "practice_area",
+          "case_summary"
+        ],
+        "isUrgent": true,
+        "urgencySpoken": true,
+        "collected": {
+          "full_name": "Riley Morgan",
+          "practice_area": "Family Law"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "My husband hit me and I'm scared",
+          "speechConfidence": 0.97
+        }
+      ],
+      "expect": {
+        "collected": {
+          "full_name": "Riley Morgan",
+          "case_summary": "My husband hit me and I'm scared"
+        },
+        "notCollected": [
+          "callback_number"
+        ],
+        "nextQuestionId": "callback_number",
+        "done": false,
+        "flags": {
+          "urgencySpoken": true
+        },
+        "retryState": {
+          "phoneRetryPending": false,
+          "phoneRetryUsed": false
+        },
+        "mustNotStartWithSpeech": [
+          "Right.",
+          "Mm-hm.",
+          "Okay.",
+          "Alright.",
+          "Of course.",
+          "Sure.",
+          "Perfect."
+        ]
+      },
+      "prohibitedSpeechFragments": [
+        "Right.",
+        "Mm-hm.",
+        "Okay.",
+        "Alright.",
+        "Of course.",
+        "Sure.",
+        "Perfect."
+      ]
+    },
+    {
+      "id": "implied-safety-no-unsafe-prefix",
+      "category": "emotional_context",
+      "description": "Implied safety concern does not receive an unsafe standalone prefix.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 3,
+        "lastQuestionId": "case_summary",
+        "askedQuestionIds": [
+          "full_name",
+          "practice_area",
+          "case_summary"
+        ],
+        "collected": {
+          "full_name": "Marin Wells",
+          "practice_area": "Family Law"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "I don't feel safe going home",
+          "speechConfidence": 0.96
+        }
+      ],
+      "expect": {
+        "collected": {
+          "case_summary": "I don't feel safe going home"
+        },
+        "notCollected": [
+          "callback_number"
+        ],
+        "nextQuestionId": "callback_number",
+        "done": false,
+        "retryState": {
+          "phoneRetryPending": false,
+          "phoneRetryUsed": false
+        },
+        "mustNotStartWithSpeech": [
+          "Right.",
+          "Mm-hm.",
+          "Okay.",
+          "Alright.",
+          "Of course.",
+          "Sure.",
+          "Perfect."
+        ]
+      },
+      "prohibitedSpeechFragments": [
+        "Right.",
+        "Mm-hm.",
+        "Okay.",
+        "Alright.",
+        "Of course.",
+        "Sure.",
+        "Perfect."
+      ]
+    },
+    {
+      "id": "correction-approved-ack-only",
+      "category": "emotional_context",
+      "description": "Correction context allows only the approved correction acknowledgment or no acknowledgment.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 3,
+        "lastQuestionId": "callback_number",
+        "askedQuestionIds": [
+          "full_name",
+          "callback_number"
+        ],
+        "collected": {
+          "full_name": "Nico James",
+          "practice_area": "Personal Injury",
+          "case_summary": "Rear-ended while stopped"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "No, that's the wrong number",
+          "speechConfidence": 0.95
+        }
+      ],
+      "expect": {
+        "collected": {},
+        "notCollected": [
+          "callback_number"
+        ],
+        "nextQuestionId": "final_clarify",
+        "done": false,
+        "retryState": {
+          "phoneRetryPending": false,
+          "phoneRetryUsed": false
+        },
+        "speechStartsWithAny": [
+          "Ah, got it",
+          "One last thing"
+        ],
+        "mustNotStartWithSpeech": [
+          "Right.",
+          "Mm-hm.",
+          "Okay.",
+          "Alright.",
+          "Of course.",
+          "Sure.",
+          "Perfect."
+        ]
+      },
+      "prohibitedSpeechFragments": [
+        "Right.",
+        "Mm-hm.",
+        "Okay.",
+        "Alright.",
+        "Of course.",
+        "Sure.",
+        "Perfect."
+      ]
+    },
+    {
+      "id": "caller-question-no-generic-ack",
+      "category": "emotional_context",
+      "description": "Caller question context does not begin with a generic standalone prefix.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 1,
+        "lastQuestionId": "full_name",
+        "askedQuestionIds": [
+          "full_name"
+        ],
+        "collected": {
+          "practice_area": "Personal Injury"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "Do you charge for consultations?",
+          "speechConfidence": 0.96
+        }
+      ],
+      "expect": {
+        "collected": {},
+        "notCollected": [
+          "full_name"
+        ],
+        "nextQuestionId": "callback_number",
+        "done": false,
+        "retryState": {
+          "phoneRetryPending": false,
+          "phoneRetryUsed": false
+        },
+        "mustNotStartWithSpeech": [
+          "Right.",
+          "Mm-hm.",
+          "Okay.",
+          "Alright.",
+          "Of course.",
+          "Sure.",
+          "Perfect."
+        ]
+      },
+      "prohibitedSpeechFragments": [
+        "Right.",
+        "Mm-hm.",
+        "Okay.",
+        "Alright.",
+        "Of course.",
+        "Sure.",
+        "Perfect."
+      ]
+    },
+    {
+      "id": "early-exit-call-back",
+      "category": "emotional_context",
+      "description": "Explicit early exit ends the call without continuing intake.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 3,
+        "lastQuestionId": "case_summary",
+        "askedQuestionIds": [
+          "full_name",
+          "callback_number",
+          "practice_area",
+          "case_summary"
+        ],
+        "collected": {
+          "full_name": "Quinn Davis",
+          "callback_number": "+17045554327",
+          "practice_area": "Personal Injury"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "Actually, never mind - I'll call back",
+          "speechConfidence": 0.96
+        }
+      ],
+      "expect": {
+        "collected": {},
+        "notCollected": [
+          "case_summary"
+        ],
+        "done": true,
+        "retryState": {
+          "phoneRetryPending": false,
+          "phoneRetryUsed": false
+        }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "callback-e164-direct",
+      "category": "callback-integrity",
+      "description": "E.164 spoken callback is stored deterministically.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 3,
+        "lastQuestionId": "callback_number",
+        "askedQuestionIds": [
+          "full_name",
+          "practice_area",
+          "callback_number"
+        ],
+        "collected": {
+          "full_name": "Dana Rowe",
+          "practice_area": "Personal Injury"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "+1 704 555 0128",
+          "speechConfidence": 0.95
+        }
+      ],
+      "expect": {
+        "collected": {
+          "callback_number": "+17045550128"
+        },
+        "notCollected": [
+          "case_summary"
+        ],
+        "done": false,
+        "retryState": {
+          "phoneRetryPending": false
+        }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "callback-word-form",
+      "category": "callback-integrity",
+      "description": "Word-form spoken digits are parsed deterministically to E.164.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 3,
+        "lastQuestionId": "callback_number",
+        "askedQuestionIds": [
+          "full_name",
+          "practice_area",
+          "callback_number"
+        ],
+        "collected": {
+          "full_name": "Dana Rowe",
+          "practice_area": "Personal Injury"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "seven zero four five five five zero one two eight",
+          "speechConfidence": 0.95
+        }
+      ],
+      "expect": {
+        "collected": {
+          "callback_number": "+17045550128"
+        },
+        "notCollected": [
+          "case_summary"
+        ],
+        "done": false,
+        "retryState": {
+          "phoneRetryPending": false
+        }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "callback-mixed-form",
+      "category": "callback-integrity",
+      "description": "Mixed digit/word callback is parsed deterministically.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 3,
+        "lastQuestionId": "callback_number",
+        "askedQuestionIds": [
+          "full_name",
+          "practice_area",
+          "callback_number"
+        ],
+        "collected": {
+          "full_name": "Dana Rowe",
+          "practice_area": "Personal Injury"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "704 five five five 0128",
+          "speechConfidence": 0.95
+        }
+      ],
+      "expect": {
+        "collected": {
+          "callback_number": "+17045550128"
+        },
+        "notCollected": [
+          "case_summary"
+        ],
+        "done": false,
+        "retryState": {
+          "phoneRetryPending": false
+        }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "callback-low-confidence-then-high",
+      "category": "callback-integrity",
+      "description": "Low-confidence callback is blocked, then stored on clean high-confidence retry.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 3,
+        "lastQuestionId": "callback_number",
+        "askedQuestionIds": [
+          "full_name",
+          "practice_area",
+          "callback_number"
+        ],
+        "collected": {
+          "full_name": "Dana Rowe",
+          "practice_area": "Personal Injury"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "7045550128",
+          "speechConfidence": 0.35
+        },
+        {
+          "callerText": "7045550128",
+          "speechConfidence": 0.96
+        }
+      ],
+      "expect": {
+        "collected": {
+          "callback_number": "+17045550128"
+        },
+        "notCollected": [
+          "case_summary"
+        ],
+        "done": false,
+        "retryState": {
+          "phoneRetryPending": false
+        }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "callback-partial-then-complete",
+      "category": "callback-integrity",
+      "description": "Partial six digits are not guessed; the complete number stores on the next turn.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 3,
+        "lastQuestionId": "callback_number",
+        "askedQuestionIds": [
+          "full_name",
+          "practice_area",
+          "callback_number"
+        ],
+        "collected": {
+          "full_name": "Dana Rowe",
+          "practice_area": "Personal Injury"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "704555",
+          "speechConfidence": 0.9
+        },
+        {
+          "callerText": "7045550128",
+          "speechConfidence": 0.95
+        }
+      ],
+      "expect": {
+        "collected": {
+          "callback_number": "+17045550128"
+        },
+        "notCollected": [
+          "case_summary"
+        ],
+        "done": false,
+        "retryState": {
+          "phoneRetryPending": false
+        }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "callback-correction-midfield",
+      "category": "callback-integrity",
+      "description": "Unsolicited correction replaces the stored number even while Ava asks another field.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 3,
+        "lastQuestionId": "case_summary",
+        "askedQuestionIds": [
+          "full_name",
+          "practice_area",
+          "case_summary"
+        ],
+        "collected": {
+          "full_name": "Dana Rowe",
+          "practice_area": "Personal Injury",
+          "callback_number": "+17045550199"
+        }
+      },
+      "turns": [
+        {
+          "callerText": "No, the number is 7045550128",
+          "speechConfidence": 0.97
+        }
+      ],
+      "expect": {
+        "collected": {
+          "callback_number": "+17045550128"
+        },
+        "notCollected": [
+          "case_summary"
+        ],
+        "done": false,
+        "retryState": {
+          "phoneRetryPending": false
+        }
+      },
+      "prohibitedSpeechFragments": []
+    }
+  ]
+}
