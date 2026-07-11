@@ -232,6 +232,8 @@ export async function evaluateRun(resultsDir) {
   const metrics = {
     totalCalls: total,
     completedCalls: records.filter((r) => r.status === 'completed').length,
+    infraFailures: infra,
+    conversationFailures: evals.filter((e) => !e.pass && e.crashFree).length,
     loopCrashFreeRate: pct(crashFree, total),
     allRequiredFieldsAccuracy: pct(allFieldsOk.length, completedExpected.length),
     nameAccuracy: pct(nameOk.length, nameScope.length),
@@ -277,7 +279,7 @@ function renderReport({ summary, records, byId, meta }) {
     out += `| ${r.scenarioId} | ${r.status === 'completed' ? 'yes' : r.status} | ${fieldsCorrect}/${fieldsScoped} | ${r.turnCount} | ${e.repeated?.length || 0} | ${p50} | ${e.pass ? 'PASS' : 'FAIL'} |\n`;
   }
   out += `\n## Metrics\n\n`;
-  out += `- Completed: ${m.completedCalls}/${m.totalCalls} · loop/crash-free: ${p(m.loopCrashFreeRate)}\n`;
+  out += `- Completed: ${m.completedCalls}/${m.totalCalls} · loop/crash-free: ${p(m.loopCrashFreeRate)} · infra-failures: ${m.infraFailures} · conversation-failures: ${m.conversationFailures}\n`;
   out += `- All-required-fields accuracy: ${p(m.allRequiredFieldsAccuracy)}\n`;
   out += `- Name: ${p(m.nameAccuracy)} · Phone: ${p(m.phoneAccuracy)} · Practice: ${p(m.practiceAccuracy)} · Summary: ${p(m.summaryAccuracy)}\n`;
   out += `- Correction recovery: ${p(m.correctionRecovery)} · Low-confidence recovery: ${p(m.lowConfidenceRecovery)} · Returning-caller: ${p(m.returningCallerAccuracy)}\n`;

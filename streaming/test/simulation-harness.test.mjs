@@ -6,7 +6,8 @@ import fsp from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
 import {
-  parseTwiml, xmlUnescape, callSidFor, fromPhoneFor, isAllowedHost, isolateEnv, MAX_CALLER_TURNS, BLANKED_ENV,
+  parseTwiml, xmlUnescape, callSidFor, fromPhoneFor, clientIpFor, firmIdFor,
+  isAllowedHost, isolateEnv, MAX_CALLER_TURNS, BLANKED_ENV,
 } from '../simulation/run-simulations.mjs';
 import { createSimulatedCaller, phoneToSpoken, classifyQuestion } from '../simulation/simulated-caller.mjs';
 import { evaluateCall, evaluateRun, prohibitedAckHits } from '../simulation/evaluate-results.mjs';
@@ -37,6 +38,33 @@ test('scenarios: unique ids', async () => {
   const s = await loadScenarios();
   const ids = s.map((sc) => sc.id);
   assert.equal(new Set(ids).size, ids.length, 'scenario ids must be unique');
+});
+
+test('all 40 scenarios satisfy the schema and initialize a caller (incl. distress-dv-a)', async () => {
+  const s = await loadScenarios();
+  for (const sc of s) {
+    assert.ok(sc.id && sc.family && sc.variant, `${sc.id}: missing id/family/variant`);
+    assert.ok(sc.facts && typeof sc.facts === 'object', `${sc.id}: facts must be an object`);
+    assert.ok(Array.isArray(sc.events), `${sc.id}: events must be an array`);
+    assert.ok(sc.expected && typeof sc.expected === 'object', `${sc.id}: expected must be an object`);
+    const caller = createSimulatedCaller(sc); // must not throw
+    const first = caller.respond({ questionId: '', questionText: 'what can I help you with?' });
+    assert.ok(typeof first.text === 'string' && first.text.length > 0, `${sc.id}: empty first response`);
+  }
+  const distress = s.find((x) => x.id === 'distress-dv-a');
+  assert.ok(distress && distress.expected.urgent === true, 'distress-dv-a must exist and expect urgent');
+  const c = createSimulatedCaller(distress);
+  assert.ok(c.respond({ questionId: 'full_name', questionText: 'your name?' }).text.length > 0);
+});
+
+test('clientIpFor + firmIdFor give each call an isolated rate-limit bucket', async () => {
+  const s = await loadScenarios();
+  const ips = s.map((_, i) => clientIpFor(i));
+  assert.equal(new Set(ips).size, 40, 'client IPs must be unique per call (per-IP 10/min limiter)');
+  for (const ip of ips) assert.match(ip, /^10\.9\.\d+\.\d+$/);
+  const firms = s.map((sc) => firmIdFor(sc));
+  assert.equal(new Set(firms).size, 40, 'routing firmIds must be unique per call (per-firm 100/day limiter)');
+  for (const f of firms) assert.match(f, /^sim_/);
 });
 
 test('unique CallSids across all 40 for a fixed run', async () => {
@@ -177,24 +205,47 @@ test('evaluator: a clean completed call passes', () => {
   assert.equal(ev.pass, true, JSON.stringify(ev.defects));
 });
 
-test('evaluateRun writes valid summary.json / report.md / failures.md', async () => {
+test('always-finalize: evaluateRun writes all six files for a mixed run (completed + infra-failure + conversation-failure)', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'ava-eval-'));
   const good = {
     runId: 't', commit: 'abc', model: 'gpt-4o-mini', scenarioId: 'normal-intake-a', family: 'normal-intake', variant: 'a',
-    status: 'completed', done: true, turnCount: 5, isUrgent: false, description: 'd',
+    status: 'completed', done: true, turnCount: 5, isUrgent: false, description: 'clean',
     collected: { full_name: 'Jordan Lee', callback_number: '+17045550128', practice_area: 'Personal Injury', case_summary: 'rear ended tuesday' },
     processingLatencyMs: [1200, 1400], transcript: [], turns: [], llmCallCount: 3,
     expected: { completed: true, fields: { full_name: 'Jordan Lee', callback_number: '+17045550128', practice_area: 'Personal Injury' }, summary_must_include: ['rear', 'tuesday'] },
   };
-  await fsp.writeFile(path.join(dir, 'calls.jsonl'), JSON.stringify(good) + '\n');
-  await fsp.writeFile(path.join(dir, 'run-meta.json'), JSON.stringify({ runId: 't', commit: 'abc', model: 'gpt-4o-mini', totalLlmCalls: 3, externalDisabled: ['ELEVENLABS'] }));
+  const infra = {
+    runId: 't', commit: 'abc', model: 'gpt-4o-mini', scenarioId: 'distress-dv-a', family: 'distress-dv', variant: 'a',
+    status: 'infra-failure', done: false, turnCount: 0, isUrgent: false, failureReason: 'no session after inbound webhook', description: 'infra',
+    collected: { full_name: '', callback_number: '', practice_area: '', case_summary: '' },
+    processingLatencyMs: [], transcript: [], turns: [], llmCallCount: 0,
+    expected: { completed: true, urgent: true, distress: true, fields: { full_name: 'Maria Santos', callback_number: '+17045550166', practice_area: 'Family Law' }, summary_must_include: ['protective order'] },
+  };
+  const convFail = {
+    runId: 't', commit: 'abc', model: 'gpt-4o-mini', scenarioId: 'normal-intake-b', family: 'normal-intake', variant: 'b',
+    status: 'completed', done: true, turnCount: 5, isUrgent: false, description: 'wrong phone',
+    collected: { full_name: 'Priya Nair', callback_number: '+17045559999', practice_area: 'Employment', case_summary: 'fired after overtime' },
+    processingLatencyMs: [1100], transcript: [], turns: [], llmCallCount: 4,
+    expected: { completed: true, fields: { full_name: 'Priya Nair', callback_number: '+17045550143', practice_area: 'Employment' }, summary_must_include: ['overtime', 'fired'] },
+  };
+  await fsp.writeFile(path.join(dir, 'calls.jsonl'), [good, infra, convFail].map((r) => JSON.stringify(r)).join('\n') + '\n');
+  await fsp.writeFile(path.join(dir, 'turns.csv'), 'run_id,scenario_id,turn_index\n'); // zero-turn failure still valid
+  await fsp.writeFile(path.join(dir, 'run-meta.json'), JSON.stringify({ runId: 't', commit: 'abc', model: 'gpt-4o-mini', totalLlmCalls: 7, externalDisabled: ['ELEVENLABS'] }));
+
   const summary = await evaluateRun(dir);
-  assert.ok(summary.verdict);
-  assert.ok(Array.isArray(summary.gates) && summary.gates.length >= 8);
+
+  // all six files present
+  for (const f of ['calls.jsonl', 'turns.csv', 'run-meta.json', 'summary.json', 'report.md', 'failures.md']) {
+    await fsp.readFile(path.join(dir, f), 'utf8');
+  }
   const parsed = JSON.parse(await fsp.readFile(path.join(dir, 'summary.json'), 'utf8'));
-  assert.equal(parsed.metrics.totalCalls, 1);
-  const report = await fsp.readFile(path.join(dir, 'report.md'), 'utf8');
-  assert.match(report, /Executive summary/);
-  await fsp.readFile(path.join(dir, 'failures.md'), 'utf8');
+  assert.equal(parsed.metrics.totalCalls, 3);
+  assert.equal(parsed.metrics.infraFailures, 1, 'summary must count the infra-failure');
+  assert.ok(parsed.metrics.conversationFailures >= 1, 'summary must count the conversation failure');
+  assert.ok(summary.failedScenarios.includes('distress-dv-a'));
+  assert.ok(summary.failedScenarios.includes('normal-intake-b'));
+  const failures = await fsp.readFile(path.join(dir, 'failures.md'), 'utf8');
+  assert.match(failures, /distress-dv-a/);
+  assert.match(failures, /normal-intake-b/);
   await fsp.rm(dir, { recursive: true, force: true });
 });

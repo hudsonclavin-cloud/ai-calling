@@ -142,10 +142,10 @@ export function parseTwiml(xml) {
 
 // ── HTTP-ish helpers over app.inject ────────────────────────────────────────────
 function form(obj) { return new URLSearchParams(obj).toString(); }
-async function postForm(app, url, body) {
+async function postForm(app, url, body, headers = {}) {
   const res = await app.inject({
     method: 'POST', url,
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    headers: { 'content-type': 'application/x-www-form-urlencoded', ...headers },
     payload: form(body),
   });
   return { statusCode: res.statusCode, body: res.body };
@@ -159,10 +159,23 @@ export function callSidFor(runId, scenarioId) {
 export function fromPhoneFor(index) {
   return `+1980555${String(1000 + index).slice(-4)}`;
 }
+// Unique client IP per call so the production per-IP rate limiter (10/min) never
+// throttles the batch — each simulated call presents a distinct caller IP.
+export function clientIpFor(index) {
+  return `10.9.${Math.floor(index / 254) % 254}.${(index % 254) + 1}`;
+}
+// Unique routing firmId per call so the production per-firm daily limiter
+// (100/day) never throttles the batch. An unknown firmId resolves via
+// loadFirmConfig's fallback to the seeded firm_default config, so conversation
+// behavior is byte-identical to running under firm_default — this is a routing/
+// rate-isolation measure only, not a config change.
+export function firmIdFor(scenario) {
+  return `sim_${scenario.id}`;
+}
 
 // ── driving one call ────────────────────────────────────────────────────────────
 
-async function driveCall({ app, db, scenario, callSid, fromPhone, firmId }) {
+async function driveCall({ app, db, scenario, callSid, fromPhone, firmId, clientIp }) {
   const { createSimulatedCaller } = await import('./simulated-caller.mjs');
   const caller = createSimulatedCaller(scenario);
   const turns = [];
@@ -171,6 +184,7 @@ async function driveCall({ app, db, scenario, callSid, fromPhone, firmId }) {
   let callerTurns = 0;
 
   const readSession = async () => (await db.loadSessions())[callSid] || null;
+  const hdr = { 'x-forwarded-for': clientIp || '10.9.0.1' };
 
   // advance() posts a caller utterance to /twiml and follows any filler redirect
   // to /twiml-result, returning the final parsed reply + total wall-clock ms.
@@ -178,11 +192,11 @@ async function driveCall({ app, db, scenario, callSid, fromPhone, firmId }) {
     const t0 = Date.now();
     let r = await postForm(app, `/twiml?firmId=${encodeURIComponent(firmId)}`, {
       CallSid: callSid, From: fromPhone, SpeechResult: speechResult ?? '', Confidence: confidence ?? '',
-    });
+    }, hdr);
     let parsed = parseTwiml(r.body);
     let hops = 0;
     while (parsed.kind === 'filler' && hops < 6) {
-      r = await postForm(app, parsed.redirectPath, { CallSid: callSid });
+      r = await postForm(app, parsed.redirectPath, { CallSid: callSid }, hdr);
       parsed = parseTwiml(r.body);
       hops++;
     }
@@ -315,12 +329,19 @@ async function main() {
   const runOne = async (scenario, index) => {
     const callSid = callSidFor(runId, scenario.id);
     const fromPhone = fromPhoneFor(index);
-
-    if (scenario.prior_lead) await seedPriorLead(db, firmId, fromPhone, scenario.prior_lead);
+    const callFirmId = firmIdFor(scenario);
+    const clientIp = clientIpFor(index);
 
     const startedAt = new Date().toISOString();
     const t0 = Date.now();
-    const result = await driveCall({ app, db, scenario, callSid, fromPhone, firmId });
+    let result;
+    try {
+      if (scenario.prior_lead) await seedPriorLead(db, callFirmId, fromPhone, scenario.prior_lead);
+      result = await driveCall({ app, db, scenario, callSid, fromPhone, firmId: callFirmId, clientIp });
+    } catch (err) {
+      // Per-call failure isolation: a throw becomes an infra-failure record so the run continues.
+      result = { status: 'infra-failure', failureReason: `runOne exception: ${String(err?.message || err)}`, turns: [], transcript: [], finalSession: null, callerTurns: 0 };
+    }
     const wallMs = Date.now() - t0;
 
     const traces = latencyTraces.filter((t) => t.callSid === callSid);
@@ -328,7 +349,7 @@ async function main() {
 
     const collected = result.finalSession?.collected || {};
     const record = {
-      runId, commit, model, scenarioId: scenario.id, family: scenario.family, variant: scenario.variant,
+      runId, commit, model, scenarioId: scenario.id, family: scenario.family, variant: scenario.variant, routedFirmId: callFirmId,
       startedAt, endedAt: new Date().toISOString(), wallMs,
       status: result.status, failureReason: result.failureReason || '',
       turnCount: result.callerTurns ?? result.turns.length,
@@ -364,27 +385,41 @@ async function main() {
   say(`\nRUN ${runId}  commit=${commit.slice(0, 7)}  model=${model}  calls=${scenarios.length}  concurrency=${args.concurrency}`);
   say(`DATA_DIR=${env.tmp}  (external services disabled; OpenAI only)\n`);
 
+  // Evaluator loaded up-front so finalization can always run, even if the loop throws.
+  const evalMod = await import(pathToFileURL(path.join(__dirname, 'evaluate-results.mjs')).href);
   const records = [];
   const conc = Math.max(1, Math.min(2, args.concurrency));
-  for (let i = 0; i < scenarios.length; i += conc) {
-    const batch = scenarios.slice(i, i + conc);
-    const done = await Promise.all(batch.map((s, j) => runOne(s, i + j)));
-    records.push(...done);
+  let summary = null;
+
+  try {
+    for (let i = 0; i < scenarios.length; i += conc) {
+      const batch = scenarios.slice(i, i + conc);
+      const done = await Promise.all(batch.map((s, j) => runOne(s, i + j)));
+      records.push(...done);
+    }
+  } finally {
+    // ALWAYS finalize the result package — even if a scenario or the loop threw.
+    // Race-free stream close: end(cb) fires cb once the stream is fully flushed.
+    await new Promise((res) => callsStream.end(res));
+    await new Promise((res) => turnsStream.end(res));
+
+    meta.finishedAt = new Date().toISOString();
+    meta.blockedExternalRequests = blockedRequests;
+    meta.totalLlmCalls = records.reduce((a, r) => a + (r?.llmCallCount || 0), 0);
+    meta.avgSystemPromptChars = llmIns.length ? Math.round(llmIns.reduce((a, l) => a + (l.systemPromptChars || 0), 0) / llmIns.length) : 0;
+    await fsp.writeFile(path.join(resultsDir, 'run-meta.json'), JSON.stringify(meta, null, 2)).catch((e) => say('run-meta write failed: ' + String(e)));
+
+    try {
+      summary = await evalMod.evaluateRun(resultsDir);
+    } catch (e) {
+      // Never let an evaluator error swallow the whole report package.
+      say('evaluateRun failed: ' + String(e?.stack || e));
+      const stub = { verdict: 'INCONCLUSIVE — HARNESS OR ENVIRONMENT FAILURE', evaluatorError: String(e?.message || e), runId, commit, model };
+      await fsp.writeFile(path.join(resultsDir, 'summary.json'), JSON.stringify(stub, null, 2)).catch(() => {});
+      await fsp.writeFile(path.join(resultsDir, 'report.md'), `# Ava simulation report\n\n**INCONCLUSIVE — evaluator failed:** ${String(e?.message || e)}\n`).catch(() => {});
+      await fsp.writeFile(path.join(resultsDir, 'failures.md'), `# Failure analysis\n\nEvaluator failed before per-call analysis: ${String(e?.message || e)}\n`).catch(() => {});
+    }
   }
-
-  callsStream.end(); turnsStream.end();
-  await new Promise((r) => callsStream.on('finish', r));
-  await new Promise((r) => turnsStream.on('finish', r));
-
-  meta.finishedAt = new Date().toISOString();
-  meta.blockedExternalRequests = blockedRequests;
-  meta.totalLlmCalls = records.reduce((a, r) => a + r.llmCallCount, 0);
-  meta.avgSystemPromptChars = llmIns.length ? Math.round(llmIns.reduce((a, l) => a + (l.systemPromptChars || 0), 0) / llmIns.length) : 0;
-  await fsp.writeFile(path.join(resultsDir, 'run-meta.json'), JSON.stringify(meta, null, 2));
-
-  // Evaluate + write reports.
-  const evalMod = await import(pathToFileURL(path.join(__dirname, 'evaluate-results.mjs')).href);
-  const summary = await evalMod.evaluateRun(resultsDir);
 
   // OpenAI usage estimate (chars/4 heuristic).
   const estInputTokens = meta.totalLlmCalls * Math.ceil((meta.avgSystemPromptChars || 4000) / 4);
@@ -395,7 +430,7 @@ async function main() {
   say(`  est output tokens: ~${estOutputTokens.toLocaleString()}`);
   say(`  (blocked external requests: ${blockedRequests.length})`);
   say(`\nResults: ${resultsDir}`);
-  say(`Verdict: ${summary.verdict}`);
+  say(`Verdict: ${summary ? summary.verdict : 'INCONCLUSIVE — see evaluator error above'}`);
 
   process.exit(0);
 }
