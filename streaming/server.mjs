@@ -202,6 +202,10 @@ app.log.info({
   ADMIN_API_KEY:      !!ADMIN_API_KEY,
   DEMO_PHONE_NUMBER: process.env.DEMO_PHONE_NUMBER || '(not set)',
 }, 'BOOT env check');
+{
+  const settings = getVoiceSettings();
+  app.log.info({ settings, settingsHash: sha1(JSON.stringify(settings)).slice(0, 8) }, 'voice-settings-resolved');
+}
 if (RESEND_FROM_EMAIL.endsWith('@resend.dev')) {
   app.log.warn({ RESEND_FROM_EMAIL }, 'EMAIL WARNING: RESEND_FROM_EMAIL uses Resend sandbox domain — emails can only be delivered to the Resend account owner\'s address. Set RESEND_FROM_EMAIL to a verified sender domain for production.');
 }
@@ -377,6 +381,20 @@ function nowIso() { return new Date().toISOString(); }
 
 function sha1(value) {
   return crypto.createHash('sha1').update(String(value)).digest('hex');
+}
+
+function getVoiceSettings(env = process.env) {
+  return {
+    stability: Number(env.ELEVEN_STABILITY ?? 0.55),
+    similarity_boost: Number(env.ELEVEN_SIMILARITY ?? 0.75),
+    style: Number(env.ELEVEN_STYLE ?? 0.10),
+    use_speaker_boost: env.ELEVEN_SPEAKER_BOOST !== 'false',
+    speed: Number(env.ELEVEN_SPEED ?? 1.00),
+  };
+}
+
+function makeTtsCacheKey({ voiceId, modelId, settings, text }) {
+  return sha1(JSON.stringify({ v: 2, voiceId, modelId, settings, text }));
 }
 
 async function readJson(filePath, fallback) {
@@ -1270,8 +1288,8 @@ async function synthesizeToDisk(text) {
   const safeText = truncateForSpeech(text, MAX_TTS_CHARS);
   if (!safeText || !ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) return null;
 
-  const voiceSettingsKey = `${process.env.ELEVEN_STABILITY ?? '0.40'}|${process.env.ELEVEN_SIMILARITY ?? '0.75'}|${process.env.ELEVEN_STYLE ?? '0.35'}|${process.env.ELEVEN_SPEAKER_BOOST ?? 'true'}|${process.env.ELEVEN_SPEED ?? '1.00'}`;
-  const key = sha1(`${ELEVENLABS_VOICE_ID}|${ELEVENLABS_MODEL_ID}|${voiceSettingsKey}|${safeText}`);
+  const voiceSettings = getVoiceSettings();
+  const key = makeTtsCacheKey({ voiceId: ELEVENLABS_VOICE_ID, modelId: ELEVENLABS_MODEL_ID, settings: voiceSettings, text: safeText });
   const filePath = path.join(AUDIO_DIR, `${key}.mp3`);
   const already = await fs.readFile(filePath).catch(() => null);
   if (already) return key;
@@ -1290,13 +1308,7 @@ async function synthesizeToDisk(text) {
           text: safeText,
           model_id: ELEVENLABS_MODEL_ID,
           enable_ssml_parsing: true,
-          voice_settings: {
-            stability:        Number(process.env.ELEVEN_STABILITY      ?? 0.55),
-            similarity_boost: Number(process.env.ELEVEN_SIMILARITY     ?? 0.75),
-            style:            parseFloat(process.env.ELEVEN_STYLE) || 0.10,
-            use_speaker_boost: process.env.ELEVEN_SPEAKER_BOOST !== 'false',
-            speed:            Number(process.env.ELEVEN_SPEED          ?? 1.00),
-          },
+          voice_settings: voiceSettings,
         }),
         signal: controller.signal,
       }
@@ -2671,8 +2683,8 @@ app.get('/tts-live', async (req, reply) => {
   if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) return reply.code(503).send('TTS unavailable');
 
   const safeText = truncateForSpeech(text, MAX_TTS_CHARS);
-  const voiceSettingsKey = `${process.env.ELEVEN_STABILITY ?? '0.40'}|${process.env.ELEVEN_SIMILARITY ?? '0.75'}|${process.env.ELEVEN_STYLE ?? '0.35'}|${process.env.ELEVEN_SPEAKER_BOOST ?? 'true'}|${process.env.ELEVEN_SPEED ?? '1.00'}`;
-  const key = sha1(`${ELEVENLABS_VOICE_ID}|${ELEVENLABS_MODEL_ID}|${voiceSettingsKey}|${safeText}`);
+  const voiceSettings = getVoiceSettings();
+  const key = makeTtsCacheKey({ voiceId: ELEVENLABS_VOICE_ID, modelId: ELEVENLABS_MODEL_ID, settings: voiceSettings, text: safeText });
   const filePath = path.join(AUDIO_DIR, `${key}.mp3`);
 
   // Cache hit — serve from disk immediately
@@ -2701,13 +2713,7 @@ app.get('/tts-live', async (req, reply) => {
           text: safeText,
           model_id: ELEVENLABS_MODEL_ID,
           enable_ssml_parsing: true,
-          voice_settings: {
-            stability:        Number(process.env.ELEVEN_STABILITY      ?? 0.55),
-            similarity_boost: Number(process.env.ELEVEN_SIMILARITY     ?? 0.75),
-            style:            parseFloat(process.env.ELEVEN_STYLE) || 0.10,
-            use_speaker_boost: process.env.ELEVEN_SPEAKER_BOOST !== 'false',
-            speed:            Number(process.env.ELEVEN_SPEED          ?? 1.00),
-          },
+          voice_settings: voiceSettings,
         }),
         signal: controller.signal,
       }
