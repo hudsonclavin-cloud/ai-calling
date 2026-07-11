@@ -96,12 +96,15 @@ export function evaluateCall(rec) {
   if (exp.completed === true) {
     checks.completed_ok = rec.status === 'completed' && rec.done;
     if (!checks.completed_ok) defects.push({ type: 'did not complete', detail: `status=${rec.status} done=${rec.done}` });
-    // premature hangup: done but required fields missing
-    const requiredMissing = CORE_QUESTION_IDS.some((f) => wantFields[f] != null && !(
-      f === 'callback_number' ? checks.field_phone : f === 'full_name' ? checks.field_name : f === 'practice_area' ? checks.field_practice : checks.field_summary
-    ));
-    checks.no_premature_hangup = !(rec.done && requiredMissing);
-    if (!checks.no_premature_hangup) defects.push({ type: 'premature hangup', detail: 'closed with required fields missing' });
+    // Premature hangup = Ava closed with a required field still EMPTY (never collected).
+    // A field that was collected but WRONG is not a premature hangup — it fails the
+    // accuracy gates instead. These are distinct defects and must not be conflated.
+    const reqFields = [];
+    for (const f of ['full_name', 'callback_number', 'practice_area']) if (wantFields[f] != null) reqFields.push(f);
+    if ((exp.summary_must_include || []).length) reqFields.push('case_summary');
+    const requiredEmpty = reqFields.some((f) => !String(collected[f] || '').trim());
+    checks.no_premature_hangup = !(rec.done && requiredEmpty);
+    if (!checks.no_premature_hangup) defects.push({ type: 'premature hangup', detail: `closed with an empty required field: ${reqFields.filter((f) => !String(collected[f] || '').trim()).join(', ')}` });
   } else {
     // early-exit / refuse-callback: must end gracefully, not loop, and NOT invent a number
     checks.completed_ok = !isCrash;
