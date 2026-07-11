@@ -397,6 +397,10 @@ function makeTtsCacheKey({ voiceId, modelId, settings, text }) {
   return sha1(JSON.stringify({ v: 2, voiceId, modelId, settings, text }));
 }
 
+function normalizeInternalClarifyingNote(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+}
+
 async function readJson(filePath, fallback) {
   try {
     const raw = await fs.readFile(filePath, 'utf8');
@@ -574,6 +578,7 @@ function createSession({ callSid, firmId, fromPhone, firmConfig }) {
     collected,
     lastQuestionId: '',
     lastQuestionText: '',
+    internalClarifyingNote: '',
     transcript: [],
     disclaimerShown: false,
     done: false,
@@ -840,6 +845,7 @@ function callOpenAiForNextStep({ firmConfig, session, userText }) {
 
   const prompt = {
     conversation_so_far: recentTranscript || null,
+    prior_internal_note: normalizeInternalClarifyingNote(session.internalClarifyingNote) || null,
     previous_exchange: {
       ava_asked: session.lastQuestionText || null,
       caller_said: userText,
@@ -2029,6 +2035,9 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
 
   const llmRaw = llmPromise ? await llmPromise : null;
   const llm = validateLlmResponse(llmRaw, session, app);
+  if (llmPromise) {
+    session.internalClarifyingNote = normalizeInternalClarifyingNote(llm?.clarifying_note);
+  }
   const tAfterOpenAi = Date.now();
   if (llmPromise) app.log.info({ callSid, elapsedMs: tAfterOpenAi - tOpenAiStart }, 'openai-returned');
   // Merge: LLM values win, but only if non-empty — never let an LLM empty string
@@ -2206,15 +2215,6 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
     // Fall back to deterministic question only if LLM didn't return one.
     const llmQuestionText = String(llm?.next_question_text || '').trim();
     let questionBody = llmQuestionText || nextDecision.nextQuestionText;
-
-    // Apply clarifying note only on the deterministic fallback path
-    if (!llmQuestionText) {
-      const clarifyNote = String(llm?.clarifying_note || '').trim();
-      if (clarifyNote) {
-        const capped = clarifyNote.split(/\s+/).filter(Boolean).slice(0, 20).join(' ');
-        questionBody = `${capped} ${questionBody}`;
-      }
-    }
 
     // If the LLM didn't return a separate acknowledgment but baked one into next_question_text
     // (as the system prompt allows), treat it as having an ack to prevent composeSpeakText
