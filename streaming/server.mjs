@@ -129,21 +129,15 @@ let holdKey = null; // set at boot before prewarm
 
 // Thinking filler phrases — played immediately when caller finishes speaking, before OpenAI responds
 const FILLER_PHRASES = [
-  'Mm-hm.',
-  'Okay —',
-  'Right.',
-  'One sec.',
-  'Sure — one moment.',
-  'Mm-hm, okay.',
-  'Alright —',
-  'Let me note that.',
-  'Okay, one moment.',
-  'Just a second.',
+  'Got it — one sec.',
+  'Okay — let me note that.',
 ];
-const QUESTION_FILLER = 'Good question — one sec.';
-const FILLER_PREWARM_PHRASES = [...FILLER_PHRASES, QUESTION_FILLER];
+const QUESTION_FILLER = 'Good question — let me check.';
+const CORRECTION_FILLER = 'Ah, got it — one sec.';
+const FILLER_PREWARM_PHRASES = [...FILLER_PHRASES, QUESTION_FILLER, CORRECTION_FILLER];
 let fillerKeys = []; // populated at boot via synthesizeToDisk
 let questionFillerKey = null;
+let correctionFillerKey = null;
 
 // Per-session last filler index (avoids consecutive repeated filler within a call)
 const fillerLastIdxMap = new Map();
@@ -669,6 +663,28 @@ function detectCallerType(text) {
 function detectUrgency(text) {
   const lower = String(text || '').toLowerCase();
   return /\b(arrested|in jail|emergency|evicted today|court tomorrow|restraining order|accident just happened|just had an accident|just was in an accident|in (a bad|a terrible|a serious) accident|injured right now|going to jail|being evicted|just got hurt|seriously hurt|car accident|hit by a car|i'?m scared|really scared|at the hospital right now|in the hospital right now)\b/.test(lower);
+}
+
+function classifyFillerContext(userText) {
+  const text = String(userText || '').trim();
+  const lower = text.toLowerCase();
+  if (detectUrgency(text) || /\b(hit me|domestic violence|protective order|restraining order|afraid|scared|terrified|hospital|serious accident|bad accident|severe injury|badly hurt|arrested|in jail)\b/.test(lower)) {
+    return 'urgent_or_distressed';
+  }
+  if (/^(no[,.\s]+(?:that'?s|its|it's|the|my)|actually\b|that'?s not right\b|wrong number\b|i said\b|not that\b|different\b)/i.test(text)) {
+    return 'correction';
+  }
+  if (isCallerQuestion(text)) return 'caller_question';
+  return 'neutral';
+}
+
+function selectThinkingFiller(userText, lastFillerIdx = -1) {
+  const category = classifyFillerContext(userText);
+  if (category === 'urgent_or_distressed') return { category, text: null, fillerIdx: null };
+  if (category === 'caller_question') return { category, text: QUESTION_FILLER, fillerIdx: null };
+  if (category === 'correction') return { category, text: CORRECTION_FILLER, fillerIdx: null };
+  const fillerIdx = FILLER_PHRASES.length > 1 ? (lastFillerIdx + 1) % FILLER_PHRASES.length : 0;
+  return { category, text: FILLER_PHRASES[fillerIdx], fillerIdx };
 }
 
 function detectEarlyExit(text) {
@@ -2961,19 +2977,23 @@ app.post('/twiml', { preHandler: twilioSignaturePreHandler }, async (req, reply)
       // C3 — duplicate controller guard: if a controller is already pending, replay filler + redirect
       if (pendingResponses.has(callSid)) {
         app.log.warn({ callSid }, '/twiml: duplicate request while controller pending — replaying filler');
-        const lastFillerIdxDup = fillerLastIdxMap.get(callSid) ?? -1;
-        let fillerIdxDup;
-        do { fillerIdxDup = Math.floor(Math.random() * FILLER_PHRASES.length); }
-        while (FILLER_PHRASES.length > 1 && fillerIdxDup === lastFillerIdxDup);
-        const fillerKeyDup = fillerKeys[fillerIdxDup];
-        const fillerAudioUrlDup = fillerKeyDup
+        const selectedDup = selectThinkingFiller(userText, fillerLastIdxMap.get(callSid) ?? -1);
+        if (selectedDup.fillerIdx != null) fillerLastIdxMap.set(callSid, selectedDup.fillerIdx);
+        const fillerKeyDup = selectedDup.category === 'caller_question'
+          ? questionFillerKey
+          : selectedDup.category === 'correction'
+            ? correctionFillerKey
+            : selectedDup.fillerIdx != null
+              ? fillerKeys[selectedDup.fillerIdx]
+              : null;
+        const fillerAudioUrlDup = selectedDup.text && fillerKeyDup
           ? `${PUBLIC_BASE_URL}/api/tts?key=${encodeURIComponent(fillerKeyDup)}`
-          : `${PUBLIC_BASE_URL}/tts-live?text=${encodeURIComponent(FILLER_PHRASES[fillerIdxDup])}&firmId=${encodeURIComponent(firmId)}`;
+          : null;
         const resultUrlDup = `${PUBLIC_BASE_URL}/twiml-result?callSid=${encodeURIComponent(callSid)}&firmId=${encodeURIComponent(firmId)}`;
         reply.header('Content-Type', 'text/xml');
         return reply.send(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Play>${xmlEscape(fillerAudioUrlDup)}</Play>
+  ${fillerAudioUrlDup ? `<Play>${xmlEscape(fillerAudioUrlDup)}</Play>` : ''}
   <Redirect method="POST">${xmlEscape(resultUrlDup)}</Redirect>
 </Response>`);
       }
@@ -2999,31 +3019,30 @@ app.post('/twiml', { preHandler: twilioSignaturePreHandler }, async (req, reply)
         return reply.send(buildPendingResultTwiml({ step, pending, firmId, callSid }));
       }
 
-      const questionFiller = isCallerQuestion(userText);
-      app.log.info({ callSid, questionFiller }, 'filler-selected');
+      const selectedFiller = selectThinkingFiller(userText, fillerLastIdxMap.get(callSid) ?? -1);
+      app.log.info({ callSid, fillerCategory: selectedFiller.category, fillerSuppressed: !selectedFiller.text }, 'filler-selected');
 
-      // Static filler index computed (anti-repeat state maintained). Every filler now
-      // resolves to a prewarmed key — no live TTS and no parroted STT on the filler path.
-      const lastFillerIdx = fillerLastIdxMap.get(callSid) ?? -1;
-      let fillerIdx;
-      do { fillerIdx = Math.floor(Math.random() * FILLER_PHRASES.length); }
-      while (FILLER_PHRASES.length > 1 && fillerIdx === lastFillerIdx);
-      fillerLastIdxMap.set(callSid, fillerIdx);
-      const fillerText = questionFiller ? QUESTION_FILLER : FILLER_PHRASES[fillerIdx];
-      const fillerKey = questionFiller ? questionFillerKey : fillerKeys[fillerIdx];
-      const staticFillerAudioUrl = fillerKey
+      if (selectedFiller.fillerIdx != null) fillerLastIdxMap.set(callSid, selectedFiller.fillerIdx);
+      const fillerKey = selectedFiller.category === 'caller_question'
+        ? questionFillerKey
+        : selectedFiller.category === 'correction'
+          ? correctionFillerKey
+          : selectedFiller.fillerIdx != null
+            ? fillerKeys[selectedFiller.fillerIdx]
+            : null;
+      const staticFillerAudioUrl = selectedFiller.text && fillerKey
         ? `${PUBLIC_BASE_URL}/api/tts?key=${encodeURIComponent(fillerKey)}`
-        : `${PUBLIC_BASE_URL}/tts-live?text=${encodeURIComponent(fillerText)}&firmId=${encodeURIComponent(firmId)}`;
+        : null;
 
       const fillerAudioUrl = staticFillerAudioUrl;
 
       const resultUrl = `${PUBLIC_BASE_URL}/twiml-result?callSid=${encodeURIComponent(callSid)}&firmId=${encodeURIComponent(firmId)}`;
 
-      app.log.info({ callSid, fillerIdx, fillerCached: !!fillerKey, questionFiller }, 'filler-sent');
+      app.log.info({ callSid, fillerIdx: selectedFiller.fillerIdx, fillerCached: !!fillerKey, fillerCategory: selectedFiller.category, fillerSuppressed: !fillerAudioUrl }, 'filler-sent');
       reply.header('Content-Type', 'text/xml');
       return reply.send(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Play>${xmlEscape(fillerAudioUrl)}</Play>
+  ${fillerAudioUrl ? `<Play>${xmlEscape(fillerAudioUrl)}</Play>` : ''}
   <Redirect method="POST">${xmlEscape(resultUrl)}</Redirect>
 </Response>`);
     }
@@ -3696,6 +3715,7 @@ if (isMain) {
       if (i + FILLER_BATCH < FILLER_PREWARM_PHRASES.length) await new Promise((r) => setTimeout(r, 500));
     }
     questionFillerKey = fillerKeys[FILLER_PHRASES.length] || null;
+    correctionFillerKey = fillerKeys[FILLER_PHRASES.length + 1] || null;
     const fillerReady = fillerKeys.filter(Boolean).length;
     console.log(`filler-phrases ready: ${fillerReady}/${FILLER_PREWARM_PHRASES.length}`);
 

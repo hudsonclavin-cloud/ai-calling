@@ -79,6 +79,42 @@ function isLikelySummary(value, expectedField = '') {
   return words.length >= 8 && meaningful.length >= 3;
 }
 
+const FILLER_PHRASES = ['Got it — one sec.', 'Okay — let me note that.'];
+const QUESTION_FILLER = 'Good question — let me check.';
+const CORRECTION_FILLER = 'Ah, got it — one sec.';
+
+function detectUrgency(text) {
+  const lower = String(text || '').toLowerCase();
+  return /\b(arrested|in jail|emergency|evicted today|court tomorrow|restraining order|accident just happened|just had an accident|just was in an accident|in (a bad|a terrible|a serious) accident|injured right now|going to jail|being evicted|just got hurt|seriously hurt|car accident|hit by a car|i'?m scared|really scared|at the hospital right now|in the hospital right now)\b/.test(lower);
+}
+
+function isCallerQuestion(userText) {
+  const text = String(userText || '').trim();
+  return /\?$/.test(text) || /^(who|what|when|where|why|how|is|are|am|do|does|did|can|could|will|would|should)\b/i.test(text);
+}
+
+function classifyFillerContext(userText) {
+  const text = String(userText || '').trim();
+  const lower = text.toLowerCase();
+  if (detectUrgency(text) || /\b(hit me|domestic violence|protective order|restraining order|afraid|scared|terrified|hospital|serious accident|bad accident|severe injury|badly hurt|arrested|in jail)\b/.test(lower)) {
+    return 'urgent_or_distressed';
+  }
+  if (/^(no[,.\s]+(?:that'?s|its|it's|the|my)|actually\b|that'?s not right\b|wrong number\b|i said\b|not that\b|different\b)/i.test(text)) {
+    return 'correction';
+  }
+  if (isCallerQuestion(text)) return 'caller_question';
+  return 'neutral';
+}
+
+function selectThinkingFiller(userText, lastFillerIdx = -1) {
+  const category = classifyFillerContext(userText);
+  if (category === 'urgent_or_distressed') return { category, text: null, fillerIdx: null };
+  if (category === 'caller_question') return { category, text: QUESTION_FILLER, fillerIdx: null };
+  if (category === 'correction') return { category, text: CORRECTION_FILLER, fillerIdx: null };
+  const fillerIdx = FILLER_PHRASES.length > 1 ? (lastFillerIdx + 1) % FILLER_PHRASES.length : 0;
+  return { category, text: FILLER_PHRASES[fillerIdx], fillerIdx };
+}
+
 const session = { internalClarifyingNote: 'Caller is upset about a PI-only mismatch.' };
 const context = buildModelContext(session);
 assert.equal(context.prior_internal_note, 'Caller is upset about a PI-only mismatch.');
@@ -134,4 +170,15 @@ for (const notSummary of ['okay', 'yes', '7045551212', 'Hudson Clavin']) {
 assert.equal(isLikelyName('Hudson Clavin', 'Hudson Clavin', 'full_name'), true);
 assert.equal(isLikelyName('Hudson Clavin', 'Hudson Clavin', 'case_summary'), false);
 
-console.log('verify-conversation-guards: D2-D4 assertions passed');
+assert.equal(selectThinkingFiller("My husband hit me and I'm scared").text, null);
+assert.equal(selectThinkingFiller('I was just in a serious accident').text, null);
+assert.equal(selectThinkingFiller('My son was arrested last night').text, null);
+assert.equal(selectThinkingFiller('Do you charge for consultations?').text, QUESTION_FILLER);
+assert.equal(selectThinkingFiller("No, that's the wrong number").text, CORRECTION_FILLER);
+assert.equal(selectThinkingFiller('Actually, my last name is Clavin').text, CORRECTION_FILLER);
+assert.equal(FILLER_PHRASES.includes(selectThinkingFiller('I was rear-ended Tuesday').text), true);
+assert.equal(selectThinkingFiller('I was rear-ended Tuesday').text === 'Right.', false);
+assert.equal(selectThinkingFiller('I was rear-ended Tuesday').text === 'Mm-hm.', false);
+assert.ok(FILLER_PHRASES.includes(selectThinkingFiller('Neutral update', 0).text));
+
+console.log('verify-conversation-guards: D2-D5 assertions passed');
