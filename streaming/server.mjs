@@ -59,6 +59,7 @@ const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'XrExE9yKIg1Wjnnl
 const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID || 'eleven_turbo_v2_5';
 const TTS_TIMEOUT_MS = Number(process.env.TTS_TIMEOUT_MS || 2500);
 const MAX_TTS_CHARS = Number(process.env.MAX_TTS_CHARS || 180);
+const STT_LOW_CONFIDENCE_THRESHOLD = Number(process.env.STT_LOW_CONFIDENCE_THRESHOLD ?? 0.55);
 
 const RESEND_API_KEY    = process.env.RESEND_API_KEY    || '';
 const RESEND_FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.dev';
@@ -401,6 +402,22 @@ function normalizeInternalClarifyingNote(value) {
   return String(value || '').replace(/\s+/g, ' ').trim().slice(0, 240);
 }
 
+function parseSpeechConfidence(raw) {
+  if (raw == null || raw === '') return null;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 && value <= 1 ? value : null;
+}
+
+function isLowSpeechConfidence(confidence, threshold = STT_LOW_CONFIDENCE_THRESHOLD) {
+  return confidence != null && confidence < threshold;
+}
+
+function exactFieldClarification(field) {
+  if (field === 'full_name') return 'Sorry — I may have heard the name wrong. Could you say your name once more?';
+  if (field === 'callback_number') return 'Sorry — I may have missed a digit. Could you repeat the callback number?';
+  return '';
+}
+
 async function readJson(filePath, fallback) {
   try {
     const raw = await fs.readFile(filePath, 'utf8');
@@ -578,6 +595,7 @@ function createSession({ callSid, firmId, fromPhone, firmConfig }) {
     collected,
     lastQuestionId: '',
     lastQuestionText: '',
+    lastSpeechConfidence: null,
     internalClarifyingNote: '',
     transcript: [],
     disclaimerShown: false,
@@ -846,6 +864,7 @@ function callOpenAiForNextStep({ firmConfig, session, userText }) {
   const prompt = {
     conversation_so_far: recentTranscript || null,
     prior_internal_note: normalizeInternalClarifyingNote(session.internalClarifyingNote) || null,
+    speech_confidence: session.lastSpeechConfidence,
     previous_exchange: {
       ava_asked: session.lastQuestionText || null,
       caller_said: userText,
@@ -1937,7 +1956,7 @@ function isCallerQuestion(userText) {
   return /\?$/.test(text) || /^(who|what|when|where|why|how|is|are|am|do|does|did|can|could|will|would|should)\b/i.test(text);
 }
 
-async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
+async function runNextStepController({ firmId, callSid, fromPhone, userText, speechConfidence = null }) {
   return withCallLock(callSid, async () => {
   // Load this firm's config from its JSON file
   const firmConfig = await loadFirmConfig(firmId || 'firm_default');
@@ -1950,6 +1969,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
   }
   session.firmId = firmConfig.id;
   session.fromPhone = normalizedPhone;
+  session.lastSpeechConfidence = speechConfidence;
 
   const callerText = String(userText || '').trim();
   if (callerText) appendTranscript(session, 'caller', callerText);
@@ -2049,6 +2069,20 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
     if (k === 'case_summary' && extracted[k] && !isLikelySummary(String(v).trim())) continue;
     extracted[k] = v;
   }
+  const expectedField = session.lastQuestionId;
+  const lowConfidence = isLowSpeechConfidence(speechConfidence);
+  const lowConfidenceExactField = lowConfidence && ['full_name', 'callback_number'].includes(expectedField)
+    ? expectedField
+    : null;
+  const exactFieldUpdateBlocked = !!(lowConfidenceExactField && String(extracted[lowConfidenceExactField] || '').trim());
+  if (lowConfidenceExactField) delete extracted[lowConfidenceExactField];
+  app.log.info({
+    callSid,
+    speechConfidence,
+    threshold: STT_LOW_CONFIDENCE_THRESHOLD,
+    expectedField,
+    exactFieldUpdateBlocked,
+  }, 'stt-confidence');
   const fieldUpdates = mergeExtracted(session, extracted, callerText, firmConfig);
 
   // ── Urgency detection ──────────────────────────────────────────────────────
@@ -2138,6 +2172,14 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText }) {
         nextDecision = { done: false, nextField: missing[0], nextQuestionId: nextId, nextQuestionText: nextText };
       }
     }
+  }
+  if (lowConfidenceExactField) {
+    nextDecision = {
+      done: false,
+      nextField: lowConfidenceExactField,
+      nextQuestionId: lowConfidenceExactField,
+      nextQuestionText: exactFieldClarification(lowConfidenceExactField),
+    };
   }
 
   // Require both GPT agreement and core fields before allowing hangup.
@@ -2766,6 +2808,7 @@ app.post('/twiml', { preHandler: twilioSignaturePreHandler }, async (req, reply)
   const callSid = String(req.body?.CallSid || '').trim();
   const fromPhone = normalizePhone(req.body?.From);
   const userText = String(req.body?.SpeechResult || '').trim();
+  const speechConfidence = parseSpeechConfidence(req.body?.Confidence);
   const t0 = Date.now();
   const firmId = String(req.body?.firmId || req.query?.firmId || 'firm_default').trim();
   const isEmptyRedirect = String(req.query?.empty || '') === '1';
@@ -2875,7 +2918,7 @@ app.post('/twiml', { preHandler: twilioSignaturePreHandler }, async (req, reply)
     if (!userText) {
       if (session.turnCount === 0) {
         // First turn — controller handles TTS prefetch internally
-        const firstStep = await runNextStepController({ firmId, callSid, fromPhone, userText: '' });
+        const firstStep = await runNextStepController({ firmId, callSid, fromPhone, userText: '', speechConfidence });
         speakText = firstStep.payload.speakText;
         done = firstStep.payload.done;
         ttsKey = firstStep.payload.ttsKey;
@@ -2917,7 +2960,7 @@ app.post('/twiml', { preHandler: twilioSignaturePreHandler }, async (req, reply)
       }
 
       // Normal turn — start processing in background, then only play filler if OpenAI is slow
-      const processingPromise = runNextStepController({ firmId, callSid, fromPhone, userText });
+      const processingPromise = runNextStepController({ firmId, callSid, fromPhone, userText, speechConfidence });
       const pending = { promise: processingPromise, t0 };
       pendingResponses.set(callSid, pending);
 
@@ -3063,6 +3106,7 @@ app.post('/twiml-grace', { preHandler: twilioSignaturePreHandler }, async (req, 
   const callSid = String(req.body?.CallSid || req.query?.callSid || '').trim();
   const firmId = String(req.query?.firmId || 'firm_default').trim();
   const speech = String(req.body?.SpeechResult || '').trim();
+  const speechConfidence = parseSpeechConfidence(req.body?.Confidence);
 
   reply.header('Content-Type', 'text/xml');
 
@@ -3083,7 +3127,7 @@ app.post('/twiml-grace', { preHandler: twilioSignaturePreHandler }, async (req, 
 
   try {
     const fromPhone = session?.fromPhone || '';
-    const result = await runNextStepController({ firmId, callSid, fromPhone, userText: speech });
+    const result = await runNextStepController({ firmId, callSid, fromPhone, userText: speech, speechConfidence });
     const { speakText, ttsKey, done: newDone } = result.payload;
     const liveUrl = !ttsKey
       ? `${PUBLIC_BASE_URL}/tts-live?text=${encodeURIComponent(speakText)}&firmId=${encodeURIComponent(firmId)}`
