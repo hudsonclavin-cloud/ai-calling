@@ -1,0 +1,102 @@
+{
+  "version": "1.0.0-callback-diagnostic",
+  "firmId": "firm_default",
+  "notes": "Callback-representation diagnostic matrix. Every scenario collects the SAME synthetic number (+17045550128) but supplies it to the callback question in a different surface form via an event. Name/practice/summary are plain text so only the callback representation varies. Group + representation tags drive the grouped metrics.",
+  "scenarios": [
+    { "id": "callback-digits-plain", "family": "callback-matrix", "variant": "a", "representation": "digits-plain", "group": "digit",
+      "description": "Plain 10-digit string", "persona": { "tone": "calm", "verbosity": "brief" },
+      "facts": { "full_name": "Dana Rowe", "callback_number": "+17045550128", "practice_area": "Personal Injury", "case_summary": "Rear-ended on Monday" },
+      "opening_statement": "I was rear-ended on Monday and need a lawyer",
+      "events": [ { "whenQuestionId": "callback_number", "occurrence": 1, "callerText": "7045550128", "speechConfidence": 0.95 } ],
+      "expected": { "completed": true, "fields": { "callback_number": "+17045550128" }, "summary_must_include": [] } },
+
+    { "id": "callback-digits-hyphenated", "family": "callback-matrix", "variant": "a", "representation": "digits-hyphenated", "group": "digit-punct",
+      "description": "Hyphenated digits 704-555-0128", "persona": { "tone": "calm", "verbosity": "brief" },
+      "facts": { "full_name": "Dana Rowe", "callback_number": "+17045550128", "practice_area": "Personal Injury", "case_summary": "Rear-ended on Monday" },
+      "opening_statement": "I was rear-ended on Monday and need a lawyer",
+      "events": [ { "whenQuestionId": "callback_number", "occurrence": 1, "callerText": "704-555-0128", "speechConfidence": 0.95 } ],
+      "expected": { "completed": true, "fields": { "callback_number": "+17045550128" }, "summary_must_include": [] } },
+
+    { "id": "callback-digits-parentheses", "family": "callback-matrix", "variant": "a", "representation": "digits-parentheses", "group": "digit-punct",
+      "description": "Parenthesized (704) 555-0128", "persona": { "tone": "calm", "verbosity": "brief" },
+      "facts": { "full_name": "Dana Rowe", "callback_number": "+17045550128", "practice_area": "Personal Injury", "case_summary": "Rear-ended on Monday" },
+      "opening_statement": "I was rear-ended on Monday and need a lawyer",
+      "events": [ { "whenQuestionId": "callback_number", "occurrence": 1, "callerText": "(704) 555-0128", "speechConfidence": 0.95 } ],
+      "expected": { "completed": true, "fields": { "callback_number": "+17045550128" }, "summary_must_include": [] } },
+
+    { "id": "callback-e164", "family": "callback-matrix", "variant": "a", "representation": "e164", "group": "digit-e164",
+      "description": "E.164 spaced +1 704 555 0128", "persona": { "tone": "calm", "verbosity": "brief" },
+      "facts": { "full_name": "Dana Rowe", "callback_number": "+17045550128", "practice_area": "Personal Injury", "case_summary": "Rear-ended on Monday" },
+      "opening_statement": "I was rear-ended on Monday and need a lawyer",
+      "events": [ { "whenQuestionId": "callback_number", "occurrence": 1, "callerText": "+1 704 555 0128", "speechConfidence": 0.95 } ],
+      "expected": { "completed": true, "fields": { "callback_number": "+17045550128" }, "summary_must_include": [] } },
+
+    { "id": "callback-digits-spaced", "family": "callback-matrix", "variant": "a", "representation": "digits-spaced", "group": "digit",
+      "description": "Space-grouped 704 555 0128", "persona": { "tone": "calm", "verbosity": "brief" },
+      "facts": { "full_name": "Dana Rowe", "callback_number": "+17045550128", "practice_area": "Personal Injury", "case_summary": "Rear-ended on Monday" },
+      "opening_statement": "I was rear-ended on Monday and need a lawyer",
+      "events": [ { "whenQuestionId": "callback_number", "occurrence": 1, "callerText": "704 555 0128", "speechConfidence": 0.95 } ],
+      "expected": { "completed": true, "fields": { "callback_number": "+17045550128" }, "summary_must_include": [] } },
+
+    { "id": "callback-words-zero", "family": "callback-matrix", "variant": "a", "representation": "words-zero", "group": "word",
+      "description": "Word-form digits with 'zero'", "persona": { "tone": "calm", "verbosity": "brief" },
+      "facts": { "full_name": "Dana Rowe", "callback_number": "+17045550128", "practice_area": "Personal Injury", "case_summary": "Rear-ended on Monday" },
+      "opening_statement": "I was rear-ended on Monday and need a lawyer",
+      "events": [ { "whenQuestionId": "callback_number", "occurrence": 1, "callerText": "seven zero four five five five zero one two eight", "speechConfidence": 0.95 } ],
+      "expected": { "completed": true, "fields": { "callback_number": "+17045550128" }, "summary_must_include": [] } },
+
+    { "id": "callback-words-oh", "family": "callback-matrix", "variant": "a", "representation": "words-oh", "group": "word",
+      "description": "Word-form digits with 'oh' for zero", "persona": { "tone": "calm", "verbosity": "brief" },
+      "facts": { "full_name": "Dana Rowe", "callback_number": "+17045550128", "practice_area": "Personal Injury", "case_summary": "Rear-ended on Monday" },
+      "opening_statement": "I was rear-ended on Monday and need a lawyer",
+      "events": [ { "whenQuestionId": "callback_number", "occurrence": 1, "callerText": "seven oh four five five five oh one two eight", "speechConfidence": 0.95 } ],
+      "expected": { "completed": true, "fields": { "callback_number": "+17045550128" }, "summary_must_include": [] } },
+
+    { "id": "callback-mixed", "family": "callback-matrix", "variant": "a", "representation": "mixed", "group": "mixed",
+      "description": "Mixed digits and words", "persona": { "tone": "calm", "verbosity": "brief" },
+      "facts": { "full_name": "Dana Rowe", "callback_number": "+17045550128", "practice_area": "Personal Injury", "case_summary": "Rear-ended on Monday" },
+      "opening_statement": "I was rear-ended on Monday and need a lawyer",
+      "events": [ { "whenQuestionId": "callback_number", "occurrence": 1, "callerText": "704 five five five 0128", "speechConfidence": 0.95 } ],
+      "expected": { "completed": true, "fields": { "callback_number": "+17045550128" }, "summary_must_include": [] } },
+
+    { "id": "callback-low-confidence-digits", "family": "callback-matrix", "variant": "a", "representation": "low-confidence-digits", "group": "low-conf-digit",
+      "description": "Low-confidence digit string then clean digit retry", "persona": { "tone": "nervous", "verbosity": "brief" },
+      "facts": { "full_name": "Dana Rowe", "callback_number": "+17045550128", "practice_area": "Personal Injury", "case_summary": "Rear-ended on Monday" },
+      "opening_statement": "I was rear-ended on Monday and need a lawyer",
+      "events": [
+        { "whenQuestionId": "callback_number", "occurrence": 1, "callerText": "7045550128", "speechConfidence": 0.35 },
+        { "whenQuestionId": "callback_number", "occurrence": 2, "callerText": "7045550128", "speechConfidence": 0.96 }
+      ],
+      "expected": { "completed": true, "fields": { "callback_number": "+17045550128" }, "summary_must_include": [] } },
+
+    { "id": "callback-correction-digits", "family": "callback-matrix", "variant": "a", "representation": "correction-digits", "group": "correction-digit",
+      "description": "Digit number then digit correction", "persona": { "tone": "calm", "verbosity": "normal" },
+      "facts": { "full_name": "Dana Rowe", "callback_number": "+17045550128", "practice_area": "Personal Injury", "case_summary": "Rear-ended on Monday" },
+      "opening_statement": "I was rear-ended on Monday and need a lawyer",
+      "events": [
+        { "whenQuestionId": "callback_number", "occurrence": 1, "callerText": "7045550199", "speechConfidence": 0.95 },
+        { "whenQuestionId": "callback_number", "occurrence": 2, "callerText": "No, the number is 7045550128", "speechConfidence": 0.96 }
+      ],
+      "expected": { "completed": true, "fields": { "callback_number": "+17045550128" }, "summary_must_include": [], "correction": { "field": "callback_number", "from": "+17045550199", "to": "+17045550128" } } },
+
+    { "id": "callback-partial-then-full-digits", "family": "callback-matrix", "variant": "a", "representation": "partial-digits", "group": "partial-digit",
+      "description": "Partial 6 digits then full digit string", "persona": { "tone": "calm", "verbosity": "brief" },
+      "facts": { "full_name": "Dana Rowe", "callback_number": "+17045550128", "practice_area": "Personal Injury", "case_summary": "Rear-ended on Monday" },
+      "opening_statement": "I was rear-ended on Monday and need a lawyer",
+      "events": [
+        { "whenQuestionId": "callback_number", "occurrence": 1, "callerText": "704555", "speechConfidence": 0.9 },
+        { "whenQuestionId": "callback_number", "occurrence": 2, "callerText": "7045550128", "speechConfidence": 0.96 }
+      ],
+      "expected": { "completed": true, "fields": { "callback_number": "+17045550128" }, "summary_must_include": [] } },
+
+    { "id": "callback-word-correction", "family": "callback-matrix", "variant": "a", "representation": "word-correction", "group": "correction-word",
+      "description": "Word-form wrong number then word-form correction", "persona": { "tone": "calm", "verbosity": "normal" },
+      "facts": { "full_name": "Dana Rowe", "callback_number": "+17045550128", "practice_area": "Personal Injury", "case_summary": "Rear-ended on Monday" },
+      "opening_statement": "I was rear-ended on Monday and need a lawyer",
+      "events": [
+        { "whenQuestionId": "callback_number", "occurrence": 1, "callerText": "seven zero four five five five zero one nine nine", "speechConfidence": 0.95 },
+        { "whenQuestionId": "callback_number", "occurrence": 2, "callerText": "no, it's seven zero four five five five zero one two eight", "speechConfidence": 0.96 }
+      ],
+      "expected": { "completed": true, "fields": { "callback_number": "+17045550128" }, "summary_must_include": [], "correction": { "field": "callback_number", "from": "+17045550199", "to": "+17045550128" } } }
+  ]
+}

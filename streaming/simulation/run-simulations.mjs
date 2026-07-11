@@ -27,10 +27,11 @@ const say = (s) => realStdoutWrite(s + '\n');
 
 // ── args ──────────────────────────────────────────────────────────────────────
 function parseArgs(argv) {
-  const out = { count: 40, concurrency: 1, dryRun: false, only: null };
+  const out = { count: 40, concurrency: 1, dryRun: false, only: null, callbackDiagnostic: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--dry-run') out.dryRun = true;
+    else if (a === '--callback-diagnostic') out.callbackDiagnostic = true;
     else if (a === '--count') out.count = Number(argv[++i]);
     else if (a === '--concurrency') out.concurrency = Math.min(2, Math.max(1, Number(argv[++i]) || 1));
     else if (a === '--only') out.only = String(argv[++i]).split(',').map((s) => s.trim()).filter(Boolean);
@@ -191,6 +192,54 @@ export function firmIdFor(scenario) {
   return `sim_${scenario.id}`;
 }
 
+// Build the callback-representation matrix rows + grouped accuracy from records.
+export function buildCallbackMatrix(records) {
+  const norm = (x) => { const d = String(x || '').replace(/\D/g, ''); const t = d.length > 10 ? d.slice(-10) : d; return t.length === 10 ? '+1' + t : ''; };
+  const rows = (records || []).map((r) => {
+    const cb = (r.turns || []).filter((t) => t.classifiedKind === 'callback' || t.classifiedKind === 'phone_retry');
+    let pendTrans = 0, usedTrans = 0, prevPend = false, prevUsed = false;
+    for (const t of (r.turns || [])) { if (t.phoneRetryPending && !prevPend) pendTrans++; if (t.phoneRetryUsed && !prevUsed) usedTrans++; prevPend = !!t.phoneRetryPending; prevUsed = !!t.phoneRetryUsed; }
+    const stored = r.collected?.callback_number || '';
+    const expected = r.expected?.fields?.callback_number || '';
+    return {
+      scenarioId: r.scenarioId, representation: r.representation || '', group: r.group || '',
+      raw: cb.map((t) => t.callerText).join(' || '), confidence: cb.map((t) => t.confidence).join('/'),
+      expected, stored, normalizedStored: norm(stored),
+      pass: !!norm(expected) && norm(stored) === norm(expected),
+      pendTrans, usedTrans, turnCount: r.turnCount, repeatedCb: cb.length,
+    };
+  });
+  const byRep = (ids) => { const rs = rows.filter((x) => ids.includes(x.representation)); const p = rs.filter((x) => x.pass).length; return { pass: p, total: rs.length, rate: rs.length ? p / rs.length : null }; };
+  const groups = {
+    digitForm: byRep(['digits-plain', 'digits-spaced', 'digits-hyphenated', 'digits-parentheses', 'e164']),
+    punctuatedDigit: byRep(['digits-hyphenated', 'digits-parentheses']),
+    e164: byRep(['e164']),
+    wordForm: byRep(['words-zero', 'words-oh']),
+    mixedForm: byRep(['mixed']),
+    lowConfidenceRecovery: byRep(['low-confidence-digits']),
+    digitCorrectionRecovery: byRep(['correction-digits']),
+    wordCorrectionRecovery: byRep(['word-correction']),
+    partialNumberRecovery: byRep(['partial-digits']),
+  };
+  return { rows, groups };
+}
+
+// Apply the dispatch decision rule to the grouped accuracy.
+export function callbackVerdict(groups) {
+  const rate = (g) => (g && g.rate !== null && g.rate !== undefined) ? g.rate : null;
+  const digitRealistic = rate(groups.digitForm);
+  const digitCorrection = rate(groups.digitCorrectionRecovery);
+  const lowConf = rate(groups.lowConfidenceRecovery);
+  const partial = rate(groups.partialNumberRecovery);
+  const word = rate(groups.wordForm);
+  const allRealisticDigitPass = digitRealistic === 1 && digitCorrection === 1 && lowConf === 1 && partial === 1;
+  const anyRealisticDigitFail = (digitRealistic !== null && digitRealistic < 1) || (digitCorrection !== null && digitCorrection < 1) || (lowConf !== null && lowConf < 1) || (partial !== null && partial < 1);
+  const wordFails = word !== null && word < 1;
+  if (allRealisticDigitPass && wordFails) return 'CALLBACK CONTROLLER PASS — WORD-FORM HARNESS ARTIFACT';
+  if (anyRealisticDigitFail) return 'CALLBACK CONTROLLER DEFECT CONFIRMED';
+  return 'MIXED RESULT — NEED RAW TWILIO STT CAPTURE';
+}
+
 // ── driving one call ────────────────────────────────────────────────────────────
 
 async function driveCall({ app, db, scenario, callSid, fromPhone, firmId, clientIp }) {
@@ -306,11 +355,14 @@ async function main() {
   installFetchGuard();
 
   // Load scenarios BEFORE tapping stdout so any JSON parse issues surface plainly.
-  const scenariosDoc = JSON.parse(await fsp.readFile(path.join(__dirname, 'scenarios.json'), 'utf8'));
+  const scenariosFile = args.callbackDiagnostic ? 'callback-scenarios.json' : 'scenarios.json';
+  const scenariosDoc = JSON.parse(await fsp.readFile(path.join(__dirname, scenariosFile), 'utf8'));
   let scenarios = scenariosDoc.scenarios;
   const firmId = scenariosDoc.firmId || 'firm_default';
 
-  if (args.dryRun) {
+  if (args.callbackDiagnostic) {
+    // run the whole matrix, in file order
+  } else if (args.dryRun) {
     const dryIds = ['normal-intake-a', 'low-confidence-phone-a', 'distress-dv-a'];
     scenarios = scenarios.filter((s) => dryIds.includes(s.id));
   } else if (args.only) {
@@ -319,7 +371,8 @@ async function main() {
     scenarios = scenarios.slice(0, args.count);
   }
 
-  const runId = new Date().toISOString().replace(/[:.]/g, '-') + (args.dryRun ? '-dry' : '');
+  const runId = new Date().toISOString().replace(/[:.]/g, '-')
+    + (args.dryRun ? '-dry' : '') + (args.callbackDiagnostic ? '-callback-diagnostic' : '');
   const resultsDir = path.join(__dirname, 'results', runId);
   await fsp.mkdir(resultsDir, { recursive: true });
 
@@ -374,6 +427,7 @@ async function main() {
     const collected = result.finalSession?.collected || {};
     const record = {
       runId, commit, model, scenarioId: scenario.id, family: scenario.family, variant: scenario.variant, routedFirmId: callFirmId,
+      representation: scenario.representation || '', group: scenario.group || '',
       startedAt, endedAt: new Date().toISOString(), wallMs,
       status: result.status, failureReason: result.failureReason || '',
       turnCount: result.callerTurns ?? result.turns.length,
@@ -455,6 +509,26 @@ async function main() {
   say(`  (blocked external requests: ${blockedRequests.length})`);
   say(`\nResults: ${resultsDir}`);
   say(`Verdict: ${summary ? summary.verdict : 'INCONCLUSIVE — see evaluator error above'}`);
+
+  if (args.callbackDiagnostic) {
+    const { rows, groups } = buildCallbackMatrix(records);
+    const csv = ['scenario_id,representation,group,raw_speechresult,confidence,expected,stored,normalized_stored,pass,phone_retry_pending_transitions,phone_retry_used_transitions,turn_count,repeated_callback_questions'];
+    for (const x of rows) csv.push([x.scenarioId, x.representation, x.group, csvCell(x.raw), csvCell(x.confidence), x.expected, x.stored, x.normalizedStored, x.pass, x.pendTrans, x.usedTrans, x.turnCount, x.repeatedCb].join(','));
+    await fsp.writeFile(path.join(resultsDir, 'callback-matrix.csv'), csv.join('\n') + '\n');
+    const verdict = callbackVerdict(groups);
+    const g = (x) => x.rate === null ? 'n/a' : `${x.pass}/${x.total} (${(x.rate * 100).toFixed(0)}%)`;
+    say('\n=== CALLBACK MATRIX ===');
+    for (const x of rows) say(`  ${x.pass ? 'PASS' : 'FAIL'}  ${x.representation.padEnd(22)} stored=${x.normalizedStored || '(none)'} exp=${x.expected}`);
+    say('\n=== GROUPED ACCURACY ===');
+    say(`  digit-form (plain/spaced/hyphen/paren/e164): ${g(groups.digitForm)}`);
+    say(`  punctuated-digit: ${g(groups.punctuatedDigit)} · e164: ${g(groups.e164)}`);
+    say(`  word-form: ${g(groups.wordForm)} · mixed: ${g(groups.mixedForm)}`);
+    say(`  low-confidence recovery (digit): ${g(groups.lowConfidenceRecovery)}`);
+    say(`  correction recovery — digit: ${g(groups.digitCorrectionRecovery)} · word: ${g(groups.wordCorrectionRecovery)}`);
+    say(`  partial-number recovery (digit): ${g(groups.partialNumberRecovery)}`);
+    say(`\nCALLBACK VERDICT: ${verdict}`);
+    await fsp.writeFile(path.join(resultsDir, 'callback-verdict.json'), JSON.stringify({ verdict, groups }, null, 2));
+  }
 
   process.exit(0);
 }

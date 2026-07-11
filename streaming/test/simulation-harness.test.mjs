@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   parseTwiml, xmlUnescape, spokenFromTwiml, callSidFor, fromPhoneFor, clientIpFor, firmIdFor,
-  isAllowedHost, isolateEnv, MAX_CALLER_TURNS, BLANKED_ENV,
+  buildCallbackMatrix, callbackVerdict, isAllowedHost, isolateEnv, MAX_CALLER_TURNS, BLANKED_ENV,
 } from '../simulation/run-simulations.mjs';
 import { createSimulatedCaller, phoneToSpoken, classifyQuestion } from '../simulation/simulated-caller.mjs';
 import { evaluateCall, evaluateRun, prohibitedAckHits } from '../simulation/evaluate-results.mjs';
@@ -78,6 +78,45 @@ test('unique CallSids across all 40 for a fixed run', async () => {
 
 test('turn cap is 12', () => {
   assert.equal(MAX_CALLER_TURNS, 12);
+});
+
+test('callback matrix scenarios: unique ids, same expected number, a callback event each', async () => {
+  const doc = JSON.parse(await fsp.readFile(path.join(__dirname, '..', 'simulation', 'callback-scenarios.json'), 'utf8'));
+  const s = doc.scenarios;
+  assert.ok(s.length >= 12, 'need >=12 diagnostic scenarios');
+  const ids = s.map((x) => x.id);
+  assert.equal(new Set(ids).size, ids.length, 'unique diagnostic ids');
+  const norm = (x) => '+1' + String(x).replace(/\D/g, '').slice(-10);
+  for (const sc of s) {
+    assert.equal(norm(sc.expected.fields.callback_number), '+17045550128', `${sc.id}: expected number normalizes consistently`);
+    assert.ok((sc.events || []).some((e) => e.whenQuestionId === 'callback_number'), `${sc.id}: needs a callback event`);
+    assert.ok(sc.representation && sc.group, `${sc.id}: needs representation+group tags`);
+  }
+});
+
+test('buildCallbackMatrix: distinguishes raw representation from stored, and a wrong callback cannot pass', () => {
+  const mk = (id, rep, group, stored) => ({
+    scenarioId: id, representation: rep, group, turnCount: 4,
+    collected: { callback_number: stored }, expected: { fields: { callback_number: '+17045550128' } },
+    turns: [{ classifiedKind: 'callback', callerText: 'raw text differs from stored', confidence: 0.95, phoneRetryPending: false, phoneRetryUsed: false }],
+  });
+  const { rows } = buildCallbackMatrix([mk('a', 'digits-plain', 'digit', '+17045550128'), mk('f', 'words-zero', 'word', '+17045551228')]);
+  const good = rows.find((r) => r.scenarioId === 'a');
+  const bad = rows.find((r) => r.scenarioId === 'f');
+  assert.equal(good.pass, true);
+  assert.equal(bad.pass, false, 'wrong stored number must fail regardless of raw input');
+  assert.match(good.raw, /raw text/, 'raw representation is recorded separately from the stored result');
+  assert.equal(good.normalizedStored, '+17045550128');
+});
+
+test('callbackVerdict: all realistic digit pass + word fail => WORD-FORM HARNESS ARTIFACT', () => {
+  const g = { digitForm: { pass: 5, total: 5, rate: 1 }, digitCorrectionRecovery: { rate: 1 }, lowConfidenceRecovery: { rate: 1 }, partialNumberRecovery: { rate: 1 }, wordForm: { rate: 0 } };
+  assert.equal(callbackVerdict(g), 'CALLBACK CONTROLLER PASS — WORD-FORM HARNESS ARTIFACT');
+});
+
+test('callbackVerdict: a failing digit/punct format => DEFECT CONFIRMED', () => {
+  const g = { digitForm: { pass: 4, total: 5, rate: 0.8 }, digitCorrectionRecovery: { rate: 1 }, lowConfidenceRecovery: { rate: 1 }, partialNumberRecovery: { rate: 1 }, wordForm: { rate: 0 } };
+  assert.equal(callbackVerdict(g), 'CALLBACK CONTROLLER DEFECT CONFIRMED');
 });
 
 test('fetch guard blocks every non-OpenAI host, including railway/prod URLs and datastores', () => {
