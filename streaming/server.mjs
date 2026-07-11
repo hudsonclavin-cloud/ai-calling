@@ -632,7 +632,7 @@ function isAffirmative(text) {
   return false;
 }
 
-function extractStructuredDeterministic(userText) {
+function extractStructuredDeterministic(userText, expectedField = '') {
   const text = String(userText || '').trim();
   if (!text) return {};
 
@@ -643,8 +643,9 @@ function extractStructuredDeterministic(userText) {
   const phoneMatch = text.match(/(\+?\d[\d\s().-]{8,}\d)/);
   if (phoneMatch) extracted.callback_number = normalizePhone(phoneMatch[1]);
 
-  const nameMatch = text.match(/(?:my name is|this is)\s+([A-Za-z.'\-\s]{2,})/i);
-  if (nameMatch) extracted.full_name = nameMatch[1].trim();
+  const nameMatch = text.match(/(?:my name is|this is|i(?:'|’)?m|i am)\s+([A-Za-z.'\-\s]{2,})/i);
+  const nameCandidate = nameMatch ? nameMatch[1].trim() : (expectedField === 'full_name' ? text : '');
+  if (nameCandidate && isLikelyName(nameCandidate, text, expectedField)) extracted.full_name = nameCandidate;
 
   const lower = text.toLowerCase();
   if (lower.includes('injury') || lower.includes('accident')) extracted.practice_area = 'Personal Injury';
@@ -654,7 +655,7 @@ function extractStructuredDeterministic(userText) {
   else if (lower.includes('criminal') || lower.includes('arrested') || lower.includes('charged')) extracted.practice_area = 'Criminal Defense';
 
   const words = text.split(/\s+/).filter(Boolean);
-  if (text.length >= 40 && words.length >= 4 && !nameMatch && !phoneMatch) extracted.case_summary = text;
+  if (!nameMatch && !phoneMatch && isLikelySummary(text, expectedField)) extracted.case_summary = text;
   return extracted;
 }
 
@@ -677,14 +678,18 @@ function detectEarlyExit(text) {
   return /\b(never\s*mind|nevermind|forget it|i('ll| will) call back|i'?ll try again|good\s*bye|i'?m done|no thanks|not interested|i changed my mind|scratch that|disregard|i('ll| will) call back later|i don'?t need help|i'?m (all set|good for now)|end (the )?call)\b/.test(lower);
 }
 
-function isLikelyName(value, sourceText) {
+function isLikelyName(value, sourceText = '', expectedField = '') {
   const v = String(value || '').trim();
   if (!v) return false;
-  if (!/(my name is|this is)/i.test(sourceText)) return false;
-  if (!/^[A-Za-z.'\-\s]{2,}$/.test(v)) return false;
+  const sourceHasNamePrefix = /(?:my name is|this is|i(?:'|’)?m|i am)\s+[A-Za-z]/i.test(sourceText);
+  if (expectedField !== 'full_name' && !sourceHasNamePrefix) return false;
+  if (/\d/.test(v)) return false;
+  if (!/^[A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*){0,3}$/.test(v)) return false;
   const words = v.split(/\s+/).filter(Boolean);
-  if (words.length < 2 || words.length > 4) return false;
-  if (/\b(personal|injury|case|accident|rear-ended|matter|help)\b/i.test(v)) return false;
+  if (words.length < 1 || words.length > 4) return false;
+  const lower = v.toLowerCase();
+  if (FILLER_WORDS.has(lower) || AFFIRMATIVE_WORDS.has(lower)) return false;
+  if (/\b(personal|injury|case|accident|rear-ended|matter|help|legal|divorce|custody|arrested|evicted|fired|harassment|consultation)\b/i.test(v)) return false;
   return true;
 }
 
@@ -693,25 +698,38 @@ function isLikelyPhone(value) {
   return normalized.startsWith('+') && normalized.replace(/\D/g, '').length >= 10;
 }
 
-function isLikelySummary(value) {
+function isLikelySummary(value, expectedField = '') {
   const v = String(value || '').trim();
-  return v.length >= 40 && v.split(/\s+/).filter(Boolean).length >= 4;
+  if (!v) return false;
+  const lower = v.toLowerCase();
+  if (FILLER_WORDS.has(lower) || AFFIRMATIVE_WORDS.has(lower)) return false;
+  if (isLikelyPhone(v)) return false;
+  const words = v.split(/\s+/).filter(Boolean);
+  if (expectedField === 'case_summary') {
+    if (words.length < 3) return false;
+    if (isLikelyName(v, '', 'full_name')) return false;
+    const meaningful = words.filter((w) => !/^(a|an|the|and|or|but|for|to|of|on|in|at|is|was|were|my|i|we|he|she|they|it|this|that)$/i.test(w));
+    return meaningful.length >= 1;
+  }
+  if (isLikelyName(v, '', 'full_name')) return false;
+  const meaningful = words.filter((w) => !/^(a|an|the|and|or|but|for|to|of|on|in|at|is|was|were|my|i|we|he|she|they|it|this|that)$/i.test(w));
+  return words.length >= 8 && meaningful.length >= 3;
 }
 
 // Aggressive extraction for rambling callers (>100 words).
 // Differs from extractStructuredDeterministic in two ways:
 //  1. Captures case_summary even when name/phone are also present
 //  2. Lowers the case_summary word threshold to 15 words
-function extractAllFieldsFromLongResponse(text) {
+function extractAllFieldsFromLongResponse(text, expectedField = '') {
   const words = String(text || '').trim().split(/\s+/).filter(Boolean);
-  if (words.length <= 100) return extractStructuredDeterministic(text);
+  if (words.length <= 100) return extractStructuredDeterministic(text, expectedField);
 
   const extracted = {};
   const phoneMatch = text.match(/(\+?\d[\d\s().-]{8,}\d)/);
   if (phoneMatch) extracted.callback_number = normalizePhone(phoneMatch[1]);
 
-  const nameMatch = text.match(/(?:my name is|this is)\s+([A-Za-z.'\-\s]{2,})/i);
-  if (nameMatch) extracted.full_name = nameMatch[1].trim();
+  const nameMatch = text.match(/(?:my name is|this is|i(?:'|’)?m|i am)\s+([A-Za-z.'\-\s]{2,})/i);
+  if (nameMatch && isLikelyName(nameMatch[1].trim(), text, expectedField)) extracted.full_name = nameMatch[1].trim();
 
   const lower = text.toLowerCase();
   if (lower.includes('injury') || lower.includes('accident')) extracted.practice_area = 'Personal Injury';
@@ -1117,13 +1135,14 @@ clarifying_note is optional internal context for your next turn - use it for ton
 
 function mergeExtracted(session, extracted, userText, firmConfig) {
   const requiredFields = firmConfig.required_fields || REQUIRED_FIELDS_DEFAULT;
+  const expectedField = session.lastQuestionId;
   const updates = {};
   for (const key of requiredFields) {
     const value = String(extracted?.[key] ?? '').trim();
     if (!value) continue;
-    if (key === 'full_name' && !isLikelyName(value, userText)) continue;
+    if (key === 'full_name' && !isLikelyName(value, userText, expectedField)) continue;
     if (key === 'callback_number' && !isLikelyPhone(value)) continue;
-    if (key === 'case_summary' && !isLikelySummary(value)) continue;
+    if (key === 'case_summary' && !isLikelySummary(value, expectedField)) continue;
     if (!session.collected[key] || session.collected[key] !== value) {
       session.collected[key] = value;
       updates[key] = value;
@@ -2013,7 +2032,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
     }
   }
 
-  const deterministicExtracted = extractAllFieldsFromLongResponse(callerText);
+  const deterministicExtracted = extractAllFieldsFromLongResponse(callerText, session.lastQuestionId);
 
   // If callerType is already known from a prior turn, use effectiveConfig for the LLM
   // so it only suggests questions for the fields actually required in this caller's path.
@@ -2066,7 +2085,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
   const extracted = { ...deterministicExtracted };
   for (const [k, v] of Object.entries(llm?.extracted || {})) {
     if (v == null || String(v).trim() === '') continue;
-    if (k === 'case_summary' && extracted[k] && !isLikelySummary(String(v).trim())) continue;
+    if (k === 'case_summary' && extracted[k] && !isLikelySummary(String(v).trim(), session.lastQuestionId)) continue;
     extracted[k] = v;
   }
   const expectedField = session.lastQuestionId;
