@@ -137,7 +137,7 @@
       "opening_statement": "I got hit while riding my bike",
       "events": [
         { "whenQuestionId": "callback_number", "occurrence": 1, "callerText": "seven zero four, five five five, zero one two two", "speechConfidence": 0.95 },
-        { "whenQuestionId": "callback_number", "occurrence": 2, "callerText": "sorry, that's wrong, it's seven zero four, five five five, zero one eight eight", "speechConfidence": 0.97 }
+        { "atCallerTurn": 3, "callerText": "sorry, that's wrong, it's seven zero four, five five five, zero one eight eight", "speechConfidence": 0.97 }
       ],
       "expected": { "completed": true, "fields": { "full_name": "Harriet Bloom", "callback_number": "+17045550188", "practice_area": "Personal Injury" }, "summary_must_include": ["bicycle", "bike"], "urgent": false, "early_exit": false, "caller_question": false, "correction": { "field": "callback_number", "from": "+17045550122", "to": "+17045550188" } }
     },
@@ -149,7 +149,7 @@
       "opening_statement": "I need help getting child support paid",
       "events": [
         { "whenQuestionId": "callback_number", "occurrence": 1, "callerText": "seven zero four, five five five, zero one seven four", "speechConfidence": 0.95 },
-        { "whenQuestionId": "callback_number", "occurrence": 2, "callerText": "actually I mixed that up, it's zero one four seven, seven zero four five five five zero one four seven", "speechConfidence": 0.97 }
+        { "atCallerTurn": 3, "callerText": "actually I mixed that up, it's seven zero four, five five five, zero one four seven", "speechConfidence": 0.97 }
       ],
       "expected": { "completed": true, "fields": { "full_name": "Desmond Yu", "callback_number": "+17045550147", "practice_area": "Family Law" }, "summary_must_include": ["child support"], "urgent": false, "early_exit": false, "caller_question": false, "correction": { "field": "callback_number", "from": "+17045550174", "to": "+17045550147" } }
     },

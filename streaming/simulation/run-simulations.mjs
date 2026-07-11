@@ -232,9 +232,13 @@ export function callbackVerdict(groups) {
   const lowConf = rate(groups.lowConfidenceRecovery);
   const partial = rate(groups.partialNumberRecovery);
   const word = rate(groups.wordForm);
+  const mixed = rate(groups.mixedForm);
+  const wordCorrection = rate(groups.wordCorrectionRecovery);
   const allRealisticDigitPass = digitRealistic === 1 && digitCorrection === 1 && lowConf === 1 && partial === 1;
   const anyRealisticDigitFail = (digitRealistic !== null && digitRealistic < 1) || (digitCorrection !== null && digitCorrection < 1) || (lowConf !== null && lowConf < 1) || (partial !== null && partial < 1);
   const wordFails = word !== null && word < 1;
+  const everythingPasses = allRealisticDigitPass && word === 1 && mixed === 1 && wordCorrection === 1;
+  if (everythingPasses) return 'CALLBACK CONTROLLER PASS — ALL REPRESENTATIONS';
   if (allRealisticDigitPass && wordFails) return 'CALLBACK CONTROLLER PASS — WORD-FORM HARNESS ARTIFACT';
   if (anyRealisticDigitFail) return 'CALLBACK CONTROLLER DEFECT CONFIRMED';
   return 'MIXED RESULT — NEED RAW TWILIO STT CAPTURE';

@@ -119,6 +119,11 @@ test('callbackVerdict: a failing digit/punct format => DEFECT CONFIRMED', () => 
   assert.equal(callbackVerdict(g), 'CALLBACK CONTROLLER DEFECT CONFIRMED');
 });
 
+test('callbackVerdict: every representation passes => ALL REPRESENTATIONS', () => {
+  const g = { digitForm: { rate: 1 }, digitCorrectionRecovery: { rate: 1 }, lowConfidenceRecovery: { rate: 1 }, partialNumberRecovery: { rate: 1 }, wordForm: { rate: 1 }, mixedForm: { rate: 1 }, wordCorrectionRecovery: { rate: 1 } };
+  assert.equal(callbackVerdict(g), 'CALLBACK CONTROLLER PASS — ALL REPRESENTATIONS');
+});
+
 test('fetch guard blocks every non-OpenAI host, including railway/prod URLs and datastores', () => {
   assert.equal(isAllowedHost('api.openai.com'), true);
   for (const h of [
@@ -190,6 +195,19 @@ test('caller answers the SPOKEN question even when lastQuestionId is desynced', 
   const r = caller.respond({ questionId: 'callback_number', questionText: 'can I have your name, please?' });
   assert.equal(r.kind, 'name', 'must answer the spoken name question, not the desynced id');
   assert.equal(r.text, scen.facts.full_name);
+});
+
+test('atCallerTurn event fires an unsolicited correction independent of the current question', () => {
+  const scen = {
+    id: 'x', facts: { full_name: 'Dana Rowe', callback_number: '+17045550128', practice_area: 'Personal Injury', case_summary: 'rear-ended' },
+    opening_statement: 'I was rear-ended', events: [{ atCallerTurn: 3, callerText: 'No, the number is 7045550128', speechConfidence: 0.97 }],
+  };
+  const caller = createSimulatedCaller(scen);
+  caller.respond({ questionId: '', questionText: 'what can I help you with?' }); // turn 1 opening
+  caller.respond({ questionId: 'full_name', questionText: 'your name?' });        // turn 2
+  const r = caller.respond({ questionId: 'practice_area', questionText: 'what kind of matter?' }); // turn 3
+  assert.match(r.source, /atCallerTurn/);
+  assert.match(r.text, /the number is 7045550128/);
 });
 
 test('spokenFromTwiml extracts <Say> text and /tts-live text', () => {

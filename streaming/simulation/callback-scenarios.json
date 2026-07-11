@@ -75,7 +75,7 @@
       "opening_statement": "I was rear-ended on Monday and need a lawyer",
       "events": [
         { "whenQuestionId": "callback_number", "occurrence": 1, "callerText": "7045550199", "speechConfidence": 0.95 },
-        { "whenQuestionId": "callback_number", "occurrence": 2, "callerText": "No, the number is 7045550128", "speechConfidence": 0.96 }
+        { "atCallerTurn": 3, "callerText": "No, the number is 7045550128", "speechConfidence": 0.97 }
       ],
       "expected": { "completed": true, "fields": { "callback_number": "+17045550128" }, "summary_must_include": [], "correction": { "field": "callback_number", "from": "+17045550199", "to": "+17045550128" } } },
 
@@ -95,7 +95,7 @@
       "opening_statement": "I was rear-ended on Monday and need a lawyer",
       "events": [
         { "whenQuestionId": "callback_number", "occurrence": 1, "callerText": "seven zero four five five five zero one nine nine", "speechConfidence": 0.95 },
-        { "whenQuestionId": "callback_number", "occurrence": 2, "callerText": "no, it's seven zero four five five five zero one two eight", "speechConfidence": 0.96 }
+        { "atCallerTurn": 3, "callerText": "no, it's seven zero four five five five zero one two eight", "speechConfidence": 0.96 }
       ],
       "expected": { "completed": true, "fields": { "callback_number": "+17045550128" }, "summary_must_include": [], "correction": { "field": "callback_number", "from": "+17045550199", "to": "+17045550128" } } }
   ]

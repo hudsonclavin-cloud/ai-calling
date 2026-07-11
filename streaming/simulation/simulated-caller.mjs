@@ -48,6 +48,8 @@ export function createSimulatedCaller(scenario) {
   const events = Array.isArray(scenario.events) ? scenario.events : [];
   const occurrence = new Map();     // questionId/kind -> times asked
   let firstResponseDone = false;
+  let callerTurn = 0;               // Nth caller utterance (for atCallerTurn events)
+  const consumedAtTurn = new Set(); // indices of fired atCallerTurn events
   const consumedFirstInject = { done: false };
   const unexpected = [];
 
@@ -102,6 +104,7 @@ export function createSimulatedCaller(scenario) {
      */
     respond(ask) {
       const kind = classifyQuestion(ask.questionId, ask.questionText);
+      callerTurn += 1;
 
       // 1. First-response proactive injection (e.g. caller opens with a question).
       if (!firstResponseDone) {
@@ -115,7 +118,16 @@ export function createSimulatedCaller(scenario) {
         return { text: scenario.opening_statement || defaultFor('summary').text, confidence: 0.95, kind, source: 'opening' };
       }
 
-      // 2. Scheduled event for this field + occurrence.
+      // 2. Unsolicited scheduled event pinned to a specific caller turn (e.g. an
+      //    unsolicited correction) — fires regardless of the field Ava is asking.
+      const atIdx = events.findIndex((e, i) => Number.isInteger(e.atCallerTurn) && e.atCallerTurn === callerTurn && !consumedAtTurn.has(i));
+      if (atIdx >= 0) {
+        consumedAtTurn.add(atIdx);
+        const e = events[atIdx];
+        return { text: e.callerText, confidence: e.speechConfidence ?? 0.95, kind, source: `atCallerTurn#${callerTurn}` };
+      }
+
+      // 3. Scheduled event for this field + occurrence.
       const occ = nextOccurrence(kind === 'unknown' ? String(ask.questionId || 'unknown') : kind);
       const ev = findEvent(kind, occ);
       if (ev) {
