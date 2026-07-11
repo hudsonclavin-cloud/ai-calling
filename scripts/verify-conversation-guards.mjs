@@ -1,4 +1,15 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+
+const serverSource = fs.readFileSync(new URL('../streaming/server.mjs', import.meta.url), 'utf8');
+
+function assertSourceOrder(before, after, label) {
+  const beforeIdx = serverSource.indexOf(before);
+  const afterIdx = serverSource.indexOf(after);
+  assert.ok(beforeIdx >= 0, `${label}: missing source marker ${before}`);
+  assert.ok(afterIdx >= 0, `${label}: missing source marker ${after}`);
+  assert.ok(beforeIdx < afterIdx, `${label}: expected source marker order`);
+}
 
 function normalizeInternalClarifyingNote(value) {
   return String(value || '').replace(/\s+/g, ' ').trim().slice(0, 240);
@@ -39,6 +50,28 @@ function exactFieldClarification(field) {
   return '';
 }
 
+const DETERMINISTIC_ACK_ALLOWLIST = ['Got it.', 'Understood.', 'Thanks for that.'];
+
+function normalizeDeterministicAck(value) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  const punctuated = /[.!?]$/.test(text) ? text : `${text}.`;
+  return DETERMINISTIC_ACK_ALLOWLIST.find((ack) => ack.toLowerCase() === punctuated.toLowerCase()) || '';
+}
+
+function getSafeDeterministicAcks(firmConfig) {
+  const safe = [...new Set((firmConfig.acknowledgments || []).map(normalizeDeterministicAck).filter(Boolean))];
+  return safe.length ? safe : ['Got it.'];
+}
+
+function getNextAck(callSid, firmConfig, callerContext = 'neutral') {
+  if (callerContext === 'urgent_or_distressed' || callerContext === 'caller_question') return '';
+  if (callerContext === 'correction') return 'Ah, got it —';
+  const acks = getSafeDeterministicAcks(firmConfig);
+  const next = Number(callSid.split(':').pop() || 0) % acks.length;
+  return acks[next];
+}
+
 const FILLER_WORDS = new Set(['ok', 'okay', 'yes', 'no', 'sure', 'go ahead', 'ready', 'hi', 'hello', 'yeah', 'yep', 'yup', 'alright', 'sounds good', 'got it', 'uh huh']);
 const AFFIRMATIVE_WORDS = new Set(['yes', 'yeah', 'yep', 'yup', 'sure', 'correct', 'right', 'ok', 'okay', 'sounds good', 'that works', "that's right", "that's correct", 'still good', 'same number', 'same', 'uh huh', 'mm hm', 'mhm']);
 
@@ -57,8 +90,22 @@ function isLikelyName(value, sourceText = '', expectedField = '') {
   if (words.length < 1 || words.length > 4) return false;
   const lower = v.toLowerCase();
   if (FILLER_WORDS.has(lower) || AFFIRMATIVE_WORDS.has(lower)) return false;
+  if (/^(monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|may|june|july|august|september|october|november|december)$/i.test(v)) return false;
   if (/\b(personal|injury|case|accident|rear-ended|matter|help|legal|divorce|custody|arrested|evicted|fired|harassment|consultation)\b/i.test(v)) return false;
   return true;
+}
+
+function extractStructuredDeterministic(userText, expectedField = '') {
+  const text = String(userText || '').trim();
+  if (!text) return {};
+  const directExpectedName = expectedField === 'full_name' && isLikelyName(text, text, expectedField);
+  if (!directExpectedName && (text.length < 10 || FILLER_WORDS.has(text.toLowerCase()))) return {};
+
+  const extracted = {};
+  const nameMatch = text.match(/(?:my name is|this is|i(?:'|’)?m|i am)\s+([A-Za-z.'\-\s]{2,})/i);
+  const nameCandidate = nameMatch ? nameMatch[1].trim() : (expectedField === 'full_name' ? text : '');
+  if (nameCandidate && isLikelyName(nameCandidate, text, expectedField)) extracted.full_name = nameCandidate;
+  return extracted;
 }
 
 function isLikelySummary(value, expectedField = '') {
@@ -106,13 +153,108 @@ function classifyFillerContext(userText) {
   return 'neutral';
 }
 
-function selectThinkingFiller(userText, lastFillerIdx = -1) {
-  const category = classifyFillerContext(userText);
+function selectThinkingFiller(userText, lastFillerIdx = -1, callerContext = classifyFillerContext(userText)) {
+  const category = callerContext;
   if (category === 'urgent_or_distressed') return { category, text: null, fillerIdx: null };
   if (category === 'caller_question') return { category, text: QUESTION_FILLER, fillerIdx: null };
   if (category === 'correction') return { category, text: CORRECTION_FILLER, fillerIdx: null };
   const fillerIdx = FILLER_PHRASES.length > 1 ? (lastFillerIdx + 1) % FILLER_PHRASES.length : 0;
   return { category, text: FILLER_PHRASES[fillerIdx], fillerIdx };
+}
+
+function normalizePhone(raw) {
+  const txt = String(raw || '').trim();
+  const digits = txt.replace(/[^\d+]/g, '');
+  const onlyDigits = digits.replace(/\D/g, '');
+  if (onlyDigits.length === 10) return `+1${onlyDigits}`;
+  if (onlyDigits.length === 11 && onlyDigits.startsWith('1')) return `+${onlyDigits}`;
+  if (digits.startsWith('+') && onlyDigits.length >= 10) return digits;
+  return txt || 'unknown';
+}
+
+function deterministicPhoneCandidate(text) {
+  const match = String(text || '').match(/(\+?\d[\d\s().-]{8,}\d)/);
+  return match ? normalizePhone(match[1]) : '';
+}
+
+function buildDeterministicQuestionReplay(session) {
+  if (session.phoneRetryPending) {
+    return {
+      done: false,
+      nextField: 'callback_number',
+      nextQuestionId: '__phone_retry__',
+      nextQuestionText: 'Just want to double-check your number — could you repeat it for me?',
+    };
+  }
+  const requiredFields = ['callback_number', 'case_summary'];
+  const missing = requiredFields.filter((field) => !String(session.collected[field] || '').trim());
+  if (!missing.length) return { done: true, nextField: null, nextQuestionId: null, nextQuestionText: '' };
+  const nextField = missing.find((f) => !session.askedQuestionIds.includes(f)) ?? missing[0];
+  return {
+    done: false,
+    nextField,
+    nextQuestionId: nextField,
+    nextQuestionText: nextField === 'case_summary'
+      ? 'Briefly — what happened and what kind of help are you looking for?'
+      : 'And the best number to reach you?',
+  };
+}
+
+function replayCallbackTurn(session, { text, confidence }) {
+  const speechConfidence = parseSpeechConfidence(confidence);
+  const expectedField = session.lastQuestionId;
+  const lowConfidenceExactField = shouldBlockExactCapture({ expectedField, speechConfidence, threshold: 0.55 })
+    ? expectedField
+    : null;
+  const extracted = {};
+  const phone = deterministicPhoneCandidate(text);
+  if (phone) extracted.callback_number = phone;
+  if (lowConfidenceExactField) delete extracted[lowConfidenceExactField];
+
+  const fieldUpdates = {};
+  if (extracted.callback_number && isLikelyPhone(extracted.callback_number)) {
+    session.collected.callback_number = extracted.callback_number;
+    fieldUpdates.callback_number = extracted.callback_number;
+  }
+  let callbackCollectedThisTurn = !!fieldUpdates.callback_number;
+
+  if (!session.phoneRetryUsed && text) {
+    if (session.lastQuestionId === '__phone_retry__') {
+      session.phoneRetryPending = false;
+      session.phoneRetryUsed = true;
+      if (!fieldUpdates.callback_number) {
+        const digits = text.replace(/\D/g, '');
+        if (digits.length >= 10) {
+          const candidate = digits.length === 10 ? `+1${digits}`
+            : digits.length === 11 && digits[0] === '1' ? `+${digits}` : null;
+          if (candidate && isLikelyPhone(candidate)) {
+            session.collected.callback_number = candidate;
+            callbackCollectedThisTurn = true;
+          }
+        }
+      }
+    } else if (session.lastQuestionId === 'callback_number') {
+      const digits = text.replace(/\D/g, '');
+      if (digits.length >= 7 && !fieldUpdates.callback_number && lowConfidenceExactField !== 'callback_number') {
+        session.phoneRetryPending = true;
+      }
+    }
+  }
+
+  if (callbackCollectedThisTurn || String(session.collected.callback_number || '').trim()) {
+    session.phoneRetryPending = false;
+  }
+
+  let nextDecision = buildDeterministicQuestionReplay(session);
+  if (lowConfidenceExactField) {
+    nextDecision = {
+      done: false,
+      nextField: lowConfidenceExactField,
+      nextQuestionId: lowConfidenceExactField,
+      nextQuestionText: exactFieldClarification(lowConfidenceExactField),
+    };
+  }
+  return { lowConfidenceExactField, fieldUpdates, nextDecision, speakText: nextDecision.nextQuestionText };
 }
 
 const session = { internalClarifyingNote: 'Caller is upset about a PI-only mismatch.' };
@@ -180,5 +322,87 @@ assert.equal(FILLER_PHRASES.includes(selectThinkingFiller('I was rear-ended Tues
 assert.equal(selectThinkingFiller('I was rear-ended Tuesday').text === 'Right.', false);
 assert.equal(selectThinkingFiller('I was rear-ended Tuesday').text === 'Mm-hm.', false);
 assert.ok(FILLER_PHRASES.includes(selectThinkingFiller('Neutral update', 0).text));
+
+const mixedFirm = {
+  acknowledgments: ['Right.', 'Got it.', 'Mm-hm.', 'Understood.', 'Okay.', 'Thanks for that.', 'Of course.', 'Sure.', 'Perfect.'],
+};
+for (const text of [
+  "My husband hit me and I'm scared.",
+  'I was just in a serious accident.',
+  'My son was arrested last night.',
+  'Do you charge for consultations?',
+]) {
+  assert.equal(getNextAck('ack:0', mixedFirm, classifyFillerContext(text)), '', `expected no deterministic ack: ${text}`);
+}
+assert.equal(getNextAck('ack:0', mixedFirm, classifyFillerContext("No, that's the wrong number.")), 'Ah, got it —');
+assert.equal(getNextAck('ack:0', mixedFirm, classifyFillerContext('Actually, my last name is Clavin.')), 'Ah, got it —');
+const neutralAcks = new Set(Array.from({ length: 6 }, (_, idx) => getNextAck(`ack:${idx}`, mixedFirm, 'neutral')));
+for (const ack of neutralAcks) assert.ok(DETERMINISTIC_ACK_ALLOWLIST.includes(ack), `unsafe neutral ack selected: ${ack}`);
+for (const unsafe of ['Right.', 'Mm-hm.', 'Okay.', 'Alright.', 'Of course.', 'Sure.', 'Perfect.']) {
+  assert.equal(neutralAcks.has(unsafe), false, `unsafe ack should be filtered: ${unsafe}`);
+}
+
+const lowPhoneSession = {
+  collected: { callback_number: '', case_summary: '' },
+  lastQuestionId: 'callback_number',
+  askedQuestionIds: ['callback_number'],
+  phoneRetryPending: false,
+  phoneRetryUsed: false,
+};
+const lowPhone = replayCallbackTurn(lowPhoneSession, { text: '704 555 1212', confidence: '0.40' });
+assert.equal(lowPhoneSession.collected.callback_number, '');
+assert.equal(lowPhone.lowConfidenceExactField, 'callback_number');
+assert.equal(lowPhoneSession.phoneRetryPending, false);
+assert.equal(lowPhone.nextDecision.nextQuestionId, 'callback_number');
+assert.equal(lowPhone.speakText, exactFieldClarification('callback_number'));
+
+const highPhone = replayCallbackTurn(lowPhoneSession, { text: '704 555 1212', confidence: '0.91' });
+assert.equal(lowPhoneSession.collected.callback_number, '+17045551212');
+assert.equal(lowPhone.lowConfidenceExactField, 'callback_number');
+assert.equal(lowPhoneSession.phoneRetryPending, false);
+assert.notEqual(highPhone.nextDecision.nextQuestionId, '__phone_retry__');
+assert.equal(highPhone.nextDecision.nextQuestionId, 'case_summary');
+
+const legacyRetrySession = {
+  collected: { callback_number: '', case_summary: '' },
+  lastQuestionId: 'callback_number',
+  askedQuestionIds: ['callback_number'],
+  phoneRetryPending: false,
+  phoneRetryUsed: false,
+};
+const legacyRetry = replayCallbackTurn(legacyRetrySession, { text: '555-1212', confidence: '0.91' });
+assert.equal(legacyRetrySession.collected.callback_number, '');
+assert.equal(legacyRetrySession.phoneRetryPending, true);
+assert.equal(legacyRetry.nextDecision.nextQuestionId, '__phone_retry__');
+
+for (const name of ['Hudson', "O'Connor", 'Li', 'Jean', 'A.J.']) {
+  assert.equal(extractStructuredDeterministic(name, 'full_name').full_name, name, `expected direct name extracted: ${name}`);
+}
+for (const notName of ['okay', 'yes', 'no', 'Tuesday', 'Monday', 'January', 'July', 'accident', 'divorce', 'help', 'car accident', 'personal injury', '7045551212']) {
+  assert.equal(extractStructuredDeterministic(notName, 'full_name').full_name, undefined, `expected direct name rejected: ${notName}`);
+}
+assert.equal(extractStructuredDeterministic('Hudson', 'case_summary').full_name, undefined);
+assert.equal(extractStructuredDeterministic("I'm Hudson Clavin", 'full_name').full_name, 'Hudson Clavin');
+assert.equal(extractStructuredDeterministic('My name is Hudson', 'full_name').full_name, 'Hudson');
+assert.equal(extractStructuredDeterministic("This is O'Connor", 'full_name').full_name, "O'Connor");
+
+assert.match(serverSource, /const callerContext = classifyFillerContext\(userText\)/);
+assert.match(serverSource, /function composeSpeakText\(\{[^}]*callerContext/s);
+assert.match(serverSource, /composeSpeakText\(\{[^}]*callerContext/s);
+assert.match(serverSource, /function getNextAck\(callSid, firmConfig, callerContext/s);
+assert.match(serverSource, /if \(llmAck\) return enrichForSpeech\(trimmed\)/);
+assert.match(serverSource, /selectThinkingFiller\(userText, fillerLastIdxMap\.get\(callSid\) \?\? -1, callerContext\)/);
+assert.match(serverSource, /lowConfidenceExactField !== 'callback_number'/);
+assert.match(serverSource, /let callbackCollectedThisTurn = !!fieldUpdates\.callback_number/);
+assert.match(serverSource, /if \(callbackCollectedThisTurn \|\| String\(session\.collected\.callback_number \|\| ''\)\.trim\(\)\)/);
+assertSourceOrder(
+  "if (callbackCollectedThisTurn || String(session.collected.callback_number || '').trim())",
+  'let nextDecision = buildDeterministicQuestion(session, effectiveConfig)',
+  'callback retry clearing before routing',
+);
+assert.match(serverSource, /extractAllFieldsFromLongResponse\(callerText, session\.lastQuestionId\)/);
+assert.match(serverSource, /const directExpectedName = expectedField === 'full_name' && isLikelyName\(text, text, expectedField\)/);
+assertSourceOrder('const directExpectedName = expectedField', 'if (!directExpectedName && (text.length < 10', 'short name guard');
+assert.match(serverSource, /if \(nameCandidate && isLikelyName\(nameCandidate, text, expectedField\)\)/);
 
 console.log('verify-conversation-guards: D2-D5 assertions passed');

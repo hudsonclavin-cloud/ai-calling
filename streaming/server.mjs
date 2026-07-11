@@ -243,9 +243,25 @@ rateLimitCleanupTimer.unref?.();
 const sessionAckIndex = new Map();
 // Stores in-flight runNextStepController promises keyed by callSid so /twiml-result can await them
 const pendingResponses = new Map(); // callSid → { promise, t0 }
+const DETERMINISTIC_ACK_ALLOWLIST = ['Got it.', 'Understood.', 'Thanks for that.'];
 
-function getNextAck(callSid, firmConfig) {
+function normalizeDeterministicAck(value) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  const punctuated = /[.!?]$/.test(text) ? text : `${text}.`;
+  return DETERMINISTIC_ACK_ALLOWLIST.find((ack) => ack.toLowerCase() === punctuated.toLowerCase()) || '';
+}
+
+function getSafeDeterministicAcks(firmConfig) {
   const acks = firmConfig.acknowledgments?.length ? firmConfig.acknowledgments : DEFAULT_FIRM_CONFIG.acknowledgments;
+  const safe = [...new Set(acks.map(normalizeDeterministicAck).filter(Boolean))];
+  return safe.length ? safe : ['Got it.'];
+}
+
+function getNextAck(callSid, firmConfig, callerContext = 'neutral') {
+  if (callerContext === 'urgent_or_distressed' || callerContext === 'caller_question') return '';
+  if (callerContext === 'correction') return 'Ah, got it —';
+  const acks = getSafeDeterministicAcks(firmConfig);
   const last = sessionAckIndex.get(callSid) ?? -1;
   const next = (last + 1) % acks.length;
   sessionAckIndex.set(callSid, next);
@@ -253,8 +269,10 @@ function getNextAck(callSid, firmConfig) {
 }
 
 // Read the next ack without advancing the index (used for speculative TTS prefetch)
-function peekNextAck(callSid, firmConfig) {
-  const acks = firmConfig.acknowledgments?.length ? firmConfig.acknowledgments : DEFAULT_FIRM_CONFIG.acknowledgments;
+function peekNextAck(callSid, firmConfig, callerContext = 'neutral') {
+  if (callerContext === 'urgent_or_distressed' || callerContext === 'caller_question') return '';
+  if (callerContext === 'correction') return 'Ah, got it —';
+  const acks = getSafeDeterministicAcks(firmConfig);
   const last = sessionAckIndex.get(callSid) ?? -1;
   return acks[(last + 1) % acks.length];
 }
@@ -630,8 +648,10 @@ function extractStructuredDeterministic(userText, expectedField = '') {
   const text = String(userText || '').trim();
   if (!text) return {};
 
-  // Skip extraction entirely for short acknowledgments and filler phrases
-  if (text.length < 10 || FILLER_WORDS.has(text.toLowerCase())) return {};
+  // Skip short acknowledgments and filler phrases, but let expected direct names
+  // reach the contextual validator before being discarded.
+  const directExpectedName = expectedField === 'full_name' && isLikelyName(text, text, expectedField);
+  if (!directExpectedName && (text.length < 10 || FILLER_WORDS.has(text.toLowerCase()))) return {};
 
   const extracted = {};
   const phoneMatch = text.match(/(\+?\d[\d\s().-]{8,}\d)/);
@@ -678,8 +698,8 @@ function classifyFillerContext(userText) {
   return 'neutral';
 }
 
-function selectThinkingFiller(userText, lastFillerIdx = -1) {
-  const category = classifyFillerContext(userText);
+function selectThinkingFiller(userText, lastFillerIdx = -1, callerContext = classifyFillerContext(userText)) {
+  const category = callerContext;
   if (category === 'urgent_or_distressed') return { category, text: null, fillerIdx: null };
   if (category === 'caller_question') return { category, text: QUESTION_FILLER, fillerIdx: null };
   if (category === 'correction') return { category, text: CORRECTION_FILLER, fillerIdx: null };
@@ -705,6 +725,7 @@ function isLikelyName(value, sourceText = '', expectedField = '') {
   if (words.length < 1 || words.length > 4) return false;
   const lower = v.toLowerCase();
   if (FILLER_WORDS.has(lower) || AFFIRMATIVE_WORDS.has(lower)) return false;
+  if (/^(monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|may|june|july|august|september|october|november|december)$/i.test(v)) return false;
   if (/\b(personal|injury|case|accident|rear-ended|matter|help|legal|divorce|custody|arrested|evicted|fired|harassment|consultation)\b/i.test(v)) return false;
   return true;
 }
@@ -1244,7 +1265,7 @@ function enrichForSpeech(text) {
 
 // ── Speech composition (firm-aware) ──────────────────────────────────────────
 
-function composeSpeakText({ session, bodyText, callSid, firmConfig, llmAck = '' }) {
+function composeSpeakText({ session, bodyText, callSid, firmConfig, llmAck = '', callerContext = 'neutral' }) {
   const trimmed = String(bodyText || '').trim();
   if (!trimmed) return '';
 
@@ -1263,8 +1284,8 @@ function composeSpeakText({ session, bodyText, callSid, firmConfig, llmAck = '' 
   // so return it directly instead of prepending a redundant deterministic ack.
   if (llmAck) return enrichForSpeech(trimmed);
 
-  const ack = getNextAck(callSid || session.callSid, firmConfig);
-  return enrichForSpeech(`${ack} ${trimmed}`);
+  const ack = getNextAck(callSid || session.callSid, firmConfig, callerContext);
+  return enrichForSpeech(ack ? `${ack} ${trimmed}` : trimmed);
 }
 
 // ── XML + TwiML ───────────────────────────────────────────────────────────────
@@ -1991,7 +2012,7 @@ function isCallerQuestion(userText) {
   return /\?$/.test(text) || /^(who|what|when|where|why|how|is|are|am|do|does|did|can|could|will|would|should)\b/i.test(text);
 }
 
-async function runNextStepController({ firmId, callSid, fromPhone, userText, speechConfidence = null }) {
+async function runNextStepController({ firmId, callSid, fromPhone, userText, speechConfidence = null, callerContext = classifyFillerContext(userText) }) {
   return withCallLock(callSid, async () => {
   // Load this firm's config from its JSON file
   const firmConfig = await loadFirmConfig(firmId || 'firm_default');
@@ -2119,6 +2140,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
     exactFieldUpdateBlocked,
   }, 'stt-confidence');
   const fieldUpdates = mergeExtracted(session, extracted, callerText, firmConfig);
+  let callbackCollectedThisTurn = !!fieldUpdates.callback_number;
 
   // ── Urgency detection ──────────────────────────────────────────────────────
   if (!session.isUrgent && callerText && detectUrgency(callerText)) {
@@ -2162,13 +2184,14 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
             : digits.length === 11 && digits[0] === '1' ? `+${digits}` : null;
           if (candidate && isLikelyPhone(candidate)) {
             session.collected.callback_number = candidate;
+            callbackCollectedThisTurn = true;
           }
         }
       }
     } else if (session.lastQuestionId === 'callback_number') {
       // Normal phone turn: if caller gave digits but extraction failed, schedule a retry
       const digits = callerText.replace(/\D/g, '');
-      if (digits.length >= 7 && !fieldUpdates.callback_number) {
+      if (digits.length >= 7 && !fieldUpdates.callback_number && lowConfidenceExactField !== 'callback_number') {
         session.phoneRetryPending = true;
       }
     }
@@ -2185,6 +2208,11 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
       && !fieldUpdates.callback_number
       && isAffirmative(callerText)) {
     session.collected.callback_number = session.carriedCallback;
+    callbackCollectedThisTurn = true;
+  }
+
+  if (callbackCollectedThisTurn || String(session.collected.callback_number || '').trim()) {
+    session.phoneRetryPending = false;
   }
 
   const maxQ = firmConfig.max_questions || 8;
@@ -2299,7 +2327,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
     // If the LLM returned any text, trust it — the system prompt requires it to bake in an ack.
     // Never prepend a deterministic ack on top of LLM-generated speech.
     const effectiveLlmAck = llmAck || (llmQuestionText ? '_baked_in_' : '');
-    speakText = composeSpeakText({ session, bodyText: questionBody, callSid, firmConfig: effectiveConfig, llmAck: effectiveLlmAck });
+    speakText = composeSpeakText({ session, bodyText: questionBody, callSid, firmConfig: effectiveConfig, llmAck: effectiveLlmAck, callerContext });
     app.log.info({ llmAck, effectiveLlmAck, usedLlmText: !!llmQuestionText, questionBody, speakText }, 'ava-speaks');
 
     // Urgency: only apply empathetic fallback if LLM didn't already provide an acknowledgment.
@@ -2844,6 +2872,7 @@ app.post('/twiml', { preHandler: twilioSignaturePreHandler }, async (req, reply)
   const fromPhone = normalizePhone(req.body?.From);
   const userText = String(req.body?.SpeechResult || '').trim();
   const speechConfidence = parseSpeechConfidence(req.body?.Confidence);
+  const callerContext = classifyFillerContext(userText);
   const t0 = Date.now();
   const firmId = String(req.body?.firmId || req.query?.firmId || 'firm_default').trim();
   const isEmptyRedirect = String(req.query?.empty || '') === '1';
@@ -2953,7 +2982,7 @@ app.post('/twiml', { preHandler: twilioSignaturePreHandler }, async (req, reply)
     if (!userText) {
       if (session.turnCount === 0) {
         // First turn — controller handles TTS prefetch internally
-        const firstStep = await runNextStepController({ firmId, callSid, fromPhone, userText: '', speechConfidence });
+        const firstStep = await runNextStepController({ firmId, callSid, fromPhone, userText: '', speechConfidence, callerContext });
         speakText = firstStep.payload.speakText;
         done = firstStep.payload.done;
         ttsKey = firstStep.payload.ttsKey;
@@ -2977,7 +3006,7 @@ app.post('/twiml', { preHandler: twilioSignaturePreHandler }, async (req, reply)
       // C3 — duplicate controller guard: if a controller is already pending, replay filler + redirect
       if (pendingResponses.has(callSid)) {
         app.log.warn({ callSid }, '/twiml: duplicate request while controller pending — replaying filler');
-        const selectedDup = selectThinkingFiller(userText, fillerLastIdxMap.get(callSid) ?? -1);
+        const selectedDup = selectThinkingFiller(userText, fillerLastIdxMap.get(callSid) ?? -1, callerContext);
         if (selectedDup.fillerIdx != null) fillerLastIdxMap.set(callSid, selectedDup.fillerIdx);
         const fillerKeyDup = selectedDup.category === 'caller_question'
           ? questionFillerKey
@@ -2999,7 +3028,7 @@ app.post('/twiml', { preHandler: twilioSignaturePreHandler }, async (req, reply)
       }
 
       // Normal turn — start processing in background, then only play filler if OpenAI is slow
-      const processingPromise = runNextStepController({ firmId, callSid, fromPhone, userText, speechConfidence });
+      const processingPromise = runNextStepController({ firmId, callSid, fromPhone, userText, speechConfidence, callerContext });
       const pending = { promise: processingPromise, t0 };
       pendingResponses.set(callSid, pending);
 
@@ -3019,7 +3048,7 @@ app.post('/twiml', { preHandler: twilioSignaturePreHandler }, async (req, reply)
         return reply.send(buildPendingResultTwiml({ step, pending, firmId, callSid }));
       }
 
-      const selectedFiller = selectThinkingFiller(userText, fillerLastIdxMap.get(callSid) ?? -1);
+      const selectedFiller = selectThinkingFiller(userText, fillerLastIdxMap.get(callSid) ?? -1, callerContext);
       app.log.info({ callSid, fillerCategory: selectedFiller.category, fillerSuppressed: !selectedFiller.text }, 'filler-selected');
 
       if (selectedFiller.fillerIdx != null) fillerLastIdxMap.set(callSid, selectedFiller.fillerIdx);
@@ -3145,6 +3174,7 @@ app.post('/twiml-grace', { preHandler: twilioSignaturePreHandler }, async (req, 
   const firmId = String(req.query?.firmId || 'firm_default').trim();
   const speech = String(req.body?.SpeechResult || '').trim();
   const speechConfidence = parseSpeechConfidence(req.body?.Confidence);
+  const callerContext = classifyFillerContext(speech);
 
   reply.header('Content-Type', 'text/xml');
 
@@ -3165,7 +3195,7 @@ app.post('/twiml-grace', { preHandler: twilioSignaturePreHandler }, async (req, 
 
   try {
     const fromPhone = session?.fromPhone || '';
-    const result = await runNextStepController({ firmId, callSid, fromPhone, userText: speech, speechConfidence });
+    const result = await runNextStepController({ firmId, callSid, fromPhone, userText: speech, speechConfidence, callerContext });
     const { speakText, ttsKey, done: newDone } = result.payload;
     const liveUrl = !ttsKey
       ? `${PUBLIC_BASE_URL}/tts-live?text=${encodeURIComponent(speakText)}&firmId=${encodeURIComponent(firmId)}`
