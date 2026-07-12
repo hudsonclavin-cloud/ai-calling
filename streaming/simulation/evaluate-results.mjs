@@ -198,6 +198,12 @@ export async function evaluateRun(resultsDir) {
   const returningOk = returningScope.filter((r) => byId.get(r.scenarioId).ev.checks.field_phone === true);
   const urgentScope = records.filter((r) => r.expected?.urgent === true);
   const urgentOk = urgentScope.filter((r) => byId.get(r.scenarioId).ev.checks.urgent_ok === true);
+  // Urgency precision: scenarios that should NOT be urgent but were flagged.
+  const nonUrgentScope = records.filter((r) => r.expected?.urgent !== true);
+  const urgentFalsePositives = nonUrgentScope.filter((r) => !!r.isUrgent);
+  const urgentFalseNegatives = urgentScope.filter((r) => !r.isUrgent);
+  const urgencyRecall = pct(urgentOk.length, urgentScope.length);
+  const urgencyFalsePositiveRate = pct(urgentFalsePositives.length, nonUrgentScope.length);
   const earlyScope = records.filter((r) => r.expected?.early_exit === true);
   const earlyOk = earlyScope.filter((r) => byId.get(r.scenarioId).ev.checks.early_exit_ok === true);
   const cqScope = records.filter((r) => r.expected?.caller_question === true);
@@ -219,6 +225,11 @@ export async function evaluateRun(resultsDir) {
     { name: '0 premature hangups', pass: prematureTotal === 0, actual: String(prematureTotal) },
     { name: '<=2 calls with repeated questions', pass: repeatedCalls <= 2, actual: String(repeatedCalls) },
     { name: '>=95% correction recovery', pass: pct(corrOk.length, corrScope.length) >= 0.95, actual: `${(pct(corrOk.length, corrScope.length) * 100).toFixed(1)}%` },
+    { name: '>=95% practice-area accuracy', pass: pct(practiceOk.length, practiceScope.length) >= 0.95, actual: `${(pct(practiceOk.length, practiceScope.length) * 100).toFixed(1)}%` },
+    { name: '>=90% usable case-summary accuracy', pass: pct(summaryOk.length, summaryScope.length) >= 0.90, actual: `${(pct(summaryOk.length, summaryScope.length) * 100).toFixed(1)}%` },
+    { name: '>=90% urgency recall', pass: urgencyRecall >= 0.90, actual: `${(urgencyRecall * 100).toFixed(1)}% (${urgentOk.length}/${urgentScope.length})` },
+    { name: '<=5% urgency false-positive rate', pass: urgencyFalsePositiveRate <= 0.05, actual: `${(urgencyFalsePositiveRate * 100).toFixed(1)}% (${urgentFalsePositives.length}/${nonUrgentScope.length})` },
+    { name: '>=90% early-exit accuracy', pass: pct(earlyOk.length, earlyScope.length) >= 0.90, actual: `${(pct(earlyOk.length, earlyScope.length) * 100).toFixed(1)}% (${earlyOk.length}/${earlyScope.length})` },
     { name: 'median processing latency <3s', pass: quantile(allProcMs, 0.5) < 3000, actual: `${Math.round(quantile(allProcMs, 0.5))}ms` },
     { name: 'p95 processing latency <6s', pass: quantile(allProcMs, 0.95) < 6000, actual: `${Math.round(quantile(allProcMs, 0.95))}ms` },
   ];
@@ -248,6 +259,12 @@ export async function evaluateRun(resultsDir) {
     returningCallerAccuracy: pct(returningOk.length, returningScope.length),
     earlyExitAccuracy: pct(earlyOk.length, earlyScope.length),
     urgencyHandlingAccuracy: pct(urgentOk.length, urgentScope.length),
+    urgencyRecall,
+    urgencyFalsePositiveRate,
+    urgencyFalsePositives: urgentFalsePositives.length,
+    urgencyFalseNegatives: urgentFalseNegatives.length,
+    urgencyFalsePositiveScenarios: urgentFalsePositives.map((r) => r.scenarioId),
+    urgencyFalseNegativeScenarios: urgentFalseNegatives.map((r) => r.scenarioId),
     callerQuestionAnswerRate: pct(cqOk.length, cqScope.length),
     repeatedQuestionRate: pct(repeatedCalls, total),
     prohibitedAcknowledgmentCount: prohibitedTotal,
