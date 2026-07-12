@@ -324,3 +324,34 @@ test('always-finalize: evaluateRun writes all six files for a mixed run (complet
   assert.match(failures, /normal-intake-b/);
   await fsp.rm(dir, { recursive: true, force: true });
 });
+
+test('evaluator: urgency recall + false-positive metrics and gates', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'ava-eval-urg-'));
+  const base = { runId: 't', commit: 'abc', model: 'gpt-4o-mini', done: true, turnCount: 4, processingLatencyMs: [1200], transcript: [], turns: [] };
+  const mk = (id, isUrgent, expUrgent, extra = {}) => ({
+    ...base, scenarioId: id, family: id.replace(/-[ab]$/, ''), status: 'completed', isUrgent, description: id,
+    collected: { full_name: 'A B', callback_number: '+17045550128', practice_area: 'Personal Injury', case_summary: 'x y z' },
+    expected: { completed: true, ...(expUrgent ? { urgent: true } : {}), fields: {} }, ...extra,
+  });
+  const recs = [
+    mk('distress-dv-a', true, true),       // recall hit
+    mk('implied-danger-a', false, true),   // recall miss (false negative)
+    mk('normal-intake-a', false, false),   // true negative
+    mk('returning-confirm-a', true, false),// false positive
+  ];
+  await fsp.writeFile(path.join(dir, 'calls.jsonl'), recs.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  await fsp.writeFile(path.join(dir, 'turns.csv'), 'run_id,scenario_id,turn_index\n');
+  await fsp.writeFile(path.join(dir, 'run-meta.json'), JSON.stringify({ runId: 't', commit: 'abc', model: 'gpt-4o-mini', totalLlmCalls: 0 }));
+
+  const summary = await evaluateRun(dir);
+  assert.equal(summary.metrics.urgencyFalseNegatives, 1, 'one urgent scenario not flagged');
+  assert.equal(summary.metrics.urgencyFalsePositives, 1, 'one non-urgent scenario flagged urgent');
+  assert.equal(summary.metrics.urgencyRecall, 0.5, 'recall = 1/2');
+  assert.ok(summary.metrics.urgencyFalseNegativeScenarios.includes('implied-danger-a'));
+  assert.ok(summary.metrics.urgencyFalsePositiveScenarios.includes('returning-confirm-a'));
+  const recallGate = summary.gates.find((g) => g.name.includes('urgency recall'));
+  const fpGate = summary.gates.find((g) => g.name.includes('urgency false-positive'));
+  assert.ok(recallGate && recallGate.pass === false, 'recall gate fails at 50%');
+  assert.ok(fpGate && fpGate.pass === false, 'FP gate fails at 25%');
+  await fsp.rm(dir, { recursive: true, force: true });
+});

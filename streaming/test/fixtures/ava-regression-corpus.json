@@ -1492,6 +1492,168 @@
         }
       },
       "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "distress-state-not-stored-as-name",
+      "category": "name-integrity",
+      "description": "A distress answer to the name question ('my husband hit me and I'm scared') is never stored as full_name, and urgency is flagged.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 3,
+        "lastQuestionId": "full_name",
+        "askedQuestionIds": ["case_summary", "callback_number", "full_name"],
+        "collected": { "case_summary": "Prior incident noted", "callback_number": "+17045550100", "practice_area": "Personal Injury" }
+      },
+      "turns": [ { "callerText": "My husband hit me and I'm scared", "speechConfidence": 0.95 } ],
+      "expect": {
+        "collected": {},
+        "notCollected": ["full_name"],
+        "done": false,
+        "flags": { "isUrgent": true }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "physical-state-not-stored-as-name",
+      "category": "name-integrity",
+      "description": "A physical-state answer ('I'm banged up') to the name question is not stored as full_name.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 1,
+        "lastQuestionId": "full_name",
+        "askedQuestionIds": ["full_name"],
+        "collected": { "practice_area": "Personal Injury" }
+      },
+      "turns": [ { "callerText": "I'm banged up", "speechConfidence": 0.95 } ],
+      "expect": {
+        "collected": {},
+        "notCollected": ["full_name"],
+        "done": false
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "explicit-name-statement-accepted",
+      "category": "name-integrity",
+      "description": "An explicit name statement is stored as full_name.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 1,
+        "lastQuestionId": "full_name",
+        "askedQuestionIds": ["full_name"],
+        "collected": { "practice_area": "Personal Injury" }
+      },
+      "turns": [ { "callerText": "My name is Gregory Tan", "speechConfidence": 0.95 } ],
+      "expect": {
+        "collected": { "full_name": "Gregory Tan" },
+        "notCollected": [],
+        "done": false
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "explicit-name-correction-overwrites",
+      "category": "name-integrity",
+      "description": "An explicit name correction replaces a previously captured name even when Ava asked a different field.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 3,
+        "lastQuestionId": "callback_number",
+        "askedQuestionIds": ["full_name", "callback_number"],
+        "collected": { "full_name": "Jon Smith", "practice_area": "Personal Injury" }
+      },
+      "turns": [ { "callerText": "No, my name is Gregory Tan", "speechConfidence": 0.96 } ],
+      "expect": {
+        "collected": { "full_name": "Gregory Tan" },
+        "notCollected": [],
+        "done": false
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "valid-name-protected-from-distress",
+      "category": "name-integrity",
+      "description": "A previously captured name is not overwritten by a later distress statement on the summary turn.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 3,
+        "lastQuestionId": "case_summary",
+        "askedQuestionIds": ["full_name", "case_summary"],
+        "collected": { "full_name": "Maria Santos", "practice_area": "Personal Injury" }
+      },
+      "turns": [ { "callerText": "My husband hit me and I'm scared, I don't feel safe", "speechConfidence": 0.95 } ],
+      "expect": {
+        "collected": { "full_name": "Maria Santos" },
+        "notCollected": [],
+        "done": false,
+        "flags": { "isUrgent": true }
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "early-exit-have-to-go",
+      "category": "early-exit",
+      "description": "'I have to go' ends the call promptly and never claims all info was collected.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 2,
+        "lastQuestionId": "callback_number",
+        "askedQuestionIds": ["full_name", "callback_number"],
+        "collected": { "full_name": "Dana Lee", "practice_area": "Personal Injury" }
+      },
+      "turns": [ { "callerText": "I have to go", "speechConfidence": 0.95 } ],
+      "expect": {
+        "collected": {},
+        "notCollected": ["callback_number"],
+        "done": true
+      },
+      "prohibitedSpeechFragments": ["Perfect", "everything I need"]
+    },
+    {
+      "id": "early-exit-not-triggered-by-hospital",
+      "category": "early-exit",
+      "description": "'I have to go to the hospital' is a destination, not an exit — intake does not end.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 2,
+        "lastQuestionId": "case_summary",
+        "askedQuestionIds": ["full_name", "case_summary"],
+        "collected": { "full_name": "Dana Lee", "practice_area": "Personal Injury" }
+      },
+      "turns": [ { "callerText": "I have to go to the hospital", "speechConfidence": 0.95 } ],
+      "expect": {
+        "collected": {},
+        "notCollected": [],
+        "done": false
+      },
+      "prohibitedSpeechFragments": []
+    },
+    {
+      "id": "refused-callback-stops-asking",
+      "category": "required-field-completion",
+      "description": "An explicit callback refusal stops the loop and completes gracefully without inventing a number.",
+      "startingState": {
+        "callerType": "new",
+        "disclaimerShown": true,
+        "turnCount": 4,
+        "lastQuestionId": "callback_number",
+        "askedQuestionIds": ["full_name", "case_summary", "callback_number"],
+        "collected": { "full_name": "Bruce Callahan", "case_summary": "Injured on a construction site", "practice_area": "Personal Injury" }
+      },
+      "turns": [ { "callerText": "I'd rather not give my number, can you just take my info", "speechConfidence": 0.95 } ],
+      "expect": {
+        "collected": {},
+        "notCollected": ["callback_number"],
+        "done": true
+      },
+      "prohibitedSpeechFragments": ["Perfect", "everything I need"]
     }
   ]
 }

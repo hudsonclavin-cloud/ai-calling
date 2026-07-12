@@ -1,6 +1,18 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
+// Real production classifiers (Fix A-G) — asserted directly so the guard tracks the
+// actual server.mjs logic, not a stale copy.
+import {
+  classifyNameCandidate as realClassifyName,
+  classifyUrgency as realClassifyUrgency,
+  detectEarlyExit as realDetectEarlyExit,
+  detectRefusal as realDetectRefusal,
+  isLikelySummary as realIsLikelySummary,
+  stripLeadingProhibitedAck as realStripAck,
+  selectClosing as realSelectClosing,
+} from '../streaming/server.mjs';
+
 const serverSource = fs.readFileSync(new URL('../streaming/server.mjs', import.meta.url), 'utf8');
 
 function assertSourceOrder(before, after, label) {
@@ -405,4 +417,67 @@ assert.match(serverSource, /const directExpectedName = expectedField === 'full_n
 assertSourceOrder('const directExpectedName = expectedField', 'if (!directExpectedName && (text.length < 10', 'short name guard');
 assert.match(serverSource, /if \(nameCandidate && isLikelyName\(nameCandidate, text, expectedField\)\)/);
 
-console.log('verify-conversation-guards: D2-D5 assertions passed');
+// ── Launch-hardening contract guards (Fix A–G) — against real server.mjs exports ──
+
+// Fix A — name candidate acceptance + rejection categories.
+for (const n of ['Hudson', 'Hudson Clavin', "O'Connor", 'Jean-Luc Picard', 'A.J.', 'Li', 'Gregory Tan', "Sean O'Brien", 'Maria Santos', 'Riley Morgan', 'Kenji Watanabe']) {
+  assert.equal(realClassifyName(n, { expectedField: 'full_name' }).accepted, true, `name should be accepted: ${n}`);
+}
+assert.equal(realClassifyName('Hudson', { sourceText: "I'm Hudson", expectedField: '' }).accepted, true);
+const nameRejects = {
+  emotional: ['scared', 'really frightened', 'worried', 'terrified', 'afraid'],
+  physical: ['banged up', 'injured', 'bleeding'],
+  safety: ['not safe', 'allowed to do'],
+  case: ['Car crash', 'Car accident', 'Divorce', 'Rear-ended'],
+  temporal: ['Tuesday'],
+  filler: ['okay', 'yes'],
+  refusal: ["I'd rather not say"],
+  digit: ['7045550128'],
+};
+for (const [cat, list] of Object.entries(nameRejects)) {
+  for (const v of list) assert.equal(realClassifyName(v, { expectedField: 'full_name' }).accepted, false, `${cat} should be rejected as name: ${v}`);
+}
+
+// Fix C — urgency recall, precision, and negation.
+for (const u of ["I'm really frightened", "I don't feel safe going home", "He's outside my house", 'My husband hit me', 'She threatened me', "I'm being followed", "I'm bleeding badly", "I'm at the hospital", 'My son was arrested tonight', 'I need to get the kids and me out of the house tonight', "My ex is threatening me and I'm really frightened"]) {
+  assert.equal(realClassifyUrgency(u).urgent, true, `should be urgent: ${u}`);
+}
+for (const u of ['I was rear-ended last Tuesday', "I'm returning a call", 'Yes, that number is correct', 'I need help with a contract', 'I was fired last month', 'My landlord sent a notice', 'I was in a car accident and I think I need a lawyer', 'Hi, I called before about my car accident, just following up']) {
+  assert.equal(realClassifyUrgency(u).urgent, false, `should NOT be urgent: ${u}`);
+}
+for (const u of ["I'm not in danger", 'No one is threatening me', "I was scared at first, but I'm safe now"]) {
+  assert.equal(realClassifyUrgency(u).urgent, false, `negation should suppress urgency: ${u}`);
+}
+assert.ok(realClassifyUrgency('My husband hit me').category, 'urgency returns a category');
+
+// Fix F — early exit (true intents vs destination false-positives).
+for (const e of ['Never mind.', "I'll call back.", 'I have to go.', 'I need to go.', "I can't talk right now.", 'Can I call back later?', 'Forget it.', "I'm done.", 'Goodbye.', 'Bye.']) {
+  assert.equal(realDetectEarlyExit(e), true, `should be early-exit: ${e}`);
+}
+for (const e of ['I have to go to the hospital.', 'I need to go back to work tomorrow.', "I'll call my doctor."]) {
+  assert.equal(realDetectEarlyExit(e), false, `should NOT be early-exit: ${e}`);
+}
+
+// Fix D/G — refusal detection.
+assert.equal(realDetectRefusal("I'd rather not say"), true);
+assert.equal(realDetectRefusal("I don't want to give my number"), true);
+assert.equal(realDetectRefusal('my number is 704 555 0128'), false);
+
+// Fix E — a caller question / refusal is not a case summary.
+assert.equal(realIsLikelySummary('how much does this cost? do you charge upfront?', 'case_summary'), false);
+assert.equal(realIsLikelySummary('am I talking to a real person or is this an AI?', 'case_summary'), false);
+assert.equal(realIsLikelySummary("I'd rather not give my number", 'case_summary'), false);
+assert.equal(realIsLikelySummary('I was rear-ended at a stoplight on Tuesday and my neck is sore', 'case_summary'), true);
+
+// Fix B — closing sanitation + sensitive/refusal/correction closing selection.
+assert.equal(realStripAck("Perfect. I've got everything I need."), "I've got everything I need.");
+assert.equal(realStripAck('Okay, I have your details.'), 'I have your details.');
+assert.equal(realStripAck('Great — someone will follow up.'), 'Someone will follow up.');
+for (const ctx of [{ isUrgent: true }, { refusedField: 'callback_number' }, { hadCorrection: true }, {}]) {
+  const c = realSelectClosing(ctx, {});
+  assert.equal(/^(perfect|great|awesome|excellent|wonderful|fantastic|okay|alright|right|sure)\b/i.test(c), false, `closing must not lead with a prohibited ack: "${c}"`);
+}
+assert.equal(/everything i need/i.test(realSelectClosing({ isUrgent: true }, {})), false, 'urgent closing must not claim everything');
+assert.equal(/everything i need/i.test(realSelectClosing({ refusedField: 'callback_number' }, {})), false, 'refusal closing must not claim everything');
+
+console.log('verify-conversation-guards: D2-D5 + launch-hardening (A-G) assertions passed');

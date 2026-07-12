@@ -62,7 +62,7 @@ function validateCorpusShape(data) {
   assert.equal(data.version, 1, 'corpus version must be 1');
   assert.equal(data.mode, 'controller-replay', 'corpus mode must be controller-replay');
   assert.ok(Array.isArray(data.scenarios), 'corpus.scenarios must be an array');
-  assert.equal(data.scenarios.length, 36, 'corpus must contain exactly 36 scenarios');
+  assert.equal(data.scenarios.length, 44, 'corpus must contain exactly 44 scenarios');
 
   const ids = data.scenarios.map((scenario) => scenario.id);
   assert.equal(new Set(ids).size, ids.length, 'scenario IDs must be unique');
