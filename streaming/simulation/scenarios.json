@@ -159,7 +159,7 @@
       "persona": { "tone": "calm", "verbosity": "brief" },
       "prior_lead": { "full_name": "Angela Foster", "callback_number": "+17045550151", "practice_area": "Personal Injury", "case_summary": "Prior car accident intake" },
       "facts": { "full_name": "Angela Foster", "callback_number": "+17045550151", "practice_area": "Personal Injury", "case_summary": "Following up, new pain in shoulder since the accident" },
-      "opening_statement": "Hi, I called before about my car accident, just following up",
+      "opening_statement": "Hi, I called before about my car accident — I'm following up because I've got new shoulder pain",
       "events": [ { "whenQuestionId": "callback_number", "occurrence": 1, "callerText": "yes that number is fine", "speechConfidence": 0.96 } ],
       "expected": { "completed": true, "fields": { "callback_number": "+17045550151" }, "summary_must_include": ["shoulder"], "urgent": false, "early_exit": false, "caller_question": false, "returning": true }
     },
@@ -243,7 +243,7 @@
       "description": "Caller asks about cost after giving name",
       "persona": { "tone": "cautious", "verbosity": "normal" },
       "facts": { "full_name": "Gerald Simmons", "callback_number": "+17045550159", "practice_area": "Employment", "case_summary": "Unpaid commissions after leaving a sales job" },
-      "opening_statement": "I have a pay dispute with my old job",
+      "opening_statement": "I have a dispute over unpaid commissions at my old sales job",
       "events": [ { "whenQuestionId": "case_summary", "occurrence": 1, "callerText": "and by the way, is there a consultation fee for this?", "speechConfidence": 0.94 } ],
       "expected": { "completed": true, "fields": { "full_name": "Gerald Simmons", "callback_number": "+17045550159", "practice_area": "Employment" }, "summary_must_include": ["commission"], "urgent": false, "early_exit": false, "caller_question": true }
     },

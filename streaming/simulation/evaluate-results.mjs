@@ -182,13 +182,16 @@ export async function evaluateRun(resultsDir) {
   const crashFree = evals.filter((e) => e.crashFree).length;
   const completedExpected = records.filter((r) => r.expected?.completed === true);
   const allFieldsOk = completedExpected.filter((r) => { const e = byId.get(r.scenarioId).ev; return ['field_name', 'field_phone', 'field_practice', 'field_summary'].every((k) => e.checks[k] !== false); });
-  const nameScope = records.filter((r) => r.expected?.fields?.full_name != null);
+  // Field-capture accuracy excludes early-exit flows — the caller may hang up before
+  // a given field is ever reached, so scoring capture there measures the impossible.
+  const notEarlyExit = (r) => r.expected?.early_exit !== true;
+  const nameScope = records.filter((r) => r.expected?.fields?.full_name != null && notEarlyExit(r));
   const nameOk = nameScope.filter((r) => byId.get(r.scenarioId).ev.checks.field_name === true);
-  const phoneScope = records.filter((r) => r.expected?.fields?.callback_number != null);
+  const phoneScope = records.filter((r) => r.expected?.fields?.callback_number != null && notEarlyExit(r));
   const phoneOk = phoneScope.filter((r) => byId.get(r.scenarioId).ev.checks.field_phone === true);
-  const practiceScope = records.filter((r) => r.expected?.fields?.practice_area != null);
+  const practiceScope = records.filter((r) => r.expected?.fields?.practice_area != null && notEarlyExit(r));
   const practiceOk = practiceScope.filter((r) => byId.get(r.scenarioId).ev.checks.field_practice === true);
-  const summaryScope = records.filter((r) => (r.expected?.summary_must_include || []).length);
+  const summaryScope = records.filter((r) => (r.expected?.summary_must_include || []).length && notEarlyExit(r));
   const summaryOk = summaryScope.filter((r) => byId.get(r.scenarioId).ev.checks.field_summary === true);
   const corrScope = records.filter((r) => r.expected?.correction);
   const corrOk = corrScope.filter((r) => byId.get(r.scenarioId).ev.checks.correction_recovered === true);
