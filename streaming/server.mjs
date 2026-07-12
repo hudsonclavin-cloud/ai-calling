@@ -323,6 +323,36 @@ function getUrgencyOpener(firmConfig, session) {
   return openers[idx];
 }
 
+// (Fix B) Remove a leading throwaway acknowledgment ("Perfect." / "Great," / "Okay —")
+// from Ava speech. These read as tone-deaf on sensitive calls and are what the launch
+// evaluator flags. Deterministic; only strips a single leading filler token.
+const PROHIBITED_LEADING_ACK = /^\s*(perfect|great|awesome|excellent|wonderful|fantastic|amazing|right|mm-?hm+|okay|ok|alright|all right|of course|sure|got it|gotcha)\b[\s.,!—–-]*/i;
+function stripLeadingProhibitedAck(text) {
+  let s = String(text || '');
+  if (!PROHIBITED_LEADING_ACK.test(s)) return s;
+  s = s.replace(PROHIBITED_LEADING_ACK, '');
+  s = s.replace(/^\s*([a-z])/, (_, c) => c.toUpperCase());
+  return s.trim();
+}
+
+// (Fix B) Deterministic, context-aware closing policy. Sensitive, refusal, and
+// correction closings never claim "everything I need" and never lead with a
+// prohibited acknowledgment. Neutral closings reuse the firm's line, sanitized.
+function selectClosing(session, firmConfig) {
+  const base = firmConfig?.closing || DEFAULT_FIRM_CONFIG.closing;
+  if (session.isUrgent) {
+    return "I'm really glad you reached out. I've noted everything for the team so the right person can follow up with you as soon as possible.";
+  }
+  if (session.refusedField) {
+    return "I've noted what you were able to share, and someone from the office will follow up with you.";
+  }
+  if (session.hadCorrection) {
+    return "Thanks for clarifying that — I've got the updated details, and someone from the office will follow up with you.";
+  }
+  const cleaned = stripLeadingProhibitedAck(base);
+  return cleaned || base;
+}
+
 function getReturningGreeting(firstName, firmConfig) {
   const style = firmConfig.greeting_style || 'casual';
   if (style === 'formal') {
@@ -652,6 +682,11 @@ function createSession({ callSid, firmId, fromPhone, firmConfig }) {
     phoneRetryPending: false,  // true when caller gave digits but extraction failed
     phoneRetryUsed: false,     // ensures only one phone retry per session
     callbackProvenance: '',    // extraction source of callback_number (debug/provenance, in-memory only)
+    urgencyCategory: '',       // classifyUrgency category when isUrgent (in-memory only)
+    hadCorrection: false,      // caller corrected a field this call (closing context)
+    hadCallerQuestion: false,  // caller asked Ava a question this call (closing context)
+    refusedField: '',          // a required field the caller explicitly refused to give
+    refusalCounts: {},         // per-field count of explicit refusals (stop re-asking)
     askedQuestionIds: [],
     collected,
     lastQuestionId: '',
@@ -718,9 +753,11 @@ function extractStructuredDeterministic(userText, expectedField = '') {
   else if (lower.includes('criminal') || lower.includes('arrested') || lower.includes('charged')) extracted.practice_area = 'Criminal Defense';
 
   const words = text.split(/\s+/).filter(Boolean);
-  // Callback integrity: a spoken phone number (word/mixed form escapes the digit
-  // regex above) must not leak into case_summary just because it reads like a phrase.
-  if (!nameMatch && !phoneMatch && !extractPhoneCandidate(text) && isLikelySummary(text, expectedField)) extracted.case_summary = text;
+  // Gate case_summary on whether a VALID name was actually extracted, not on a raw
+  // "I'm …" prefix match — "I'm scared, my husband hit me" is a distress summary, not a
+  // name statement, and must still be captured (Fix A/E). A spoken phone number (word or
+  // mixed form) must not leak into case_summary just because it reads like a phrase.
+  if (!extracted.full_name && !phoneMatch && !extractPhoneCandidate(text) && isLikelySummary(text, expectedField)) extracted.case_summary = text;
   return extracted;
 }
 
@@ -731,9 +768,51 @@ function detectCallerType(text) {
   return null;
 }
 
-function detectUrgency(text) {
+// Ordered urgency signal groups (Fix C). Precision-first: a bare incident type
+// ("car accident", "rear-ended") is NOT urgent — only immediacy, safety, violence,
+// arrest, or severe-injury language is. Recall covers fear + implied-danger phrasing.
+const URGENCY_SIGNALS = [
+  { category: 'domestic_violence', re: /\b(hit me|beat me|beat(en)? up|hurt me|attacked me|assault(ed|ing)?|domestic violence|restraining order|protective order|(he|she|they)('?s| is| has been| been) violent)\b/ },
+  { category: 'active_threat', re: /\b(threaten(ed|ing)?|following me|stalking me|being (followed|stalked)|followed me|coming after (me|us)|has a (gun|knife|weapon)|going to (hurt|kill)|kill (me|us)|hurt (me|us|the kids))\b/ },
+  { category: 'immediate_safety', re: /\b(don'?t feel safe|do(es)?n'?t (feel|think).{0,25}safe|not safe|aren'?t safe|isn'?t safe|unsafe|in danger|outside my (house|door|home)|need to get (out|away)|get (out|away) (tonight|now|right now)|somewhere safe|leave (tonight|right now|immediately))\b/ },
+  { category: 'immediate_safety', re: /\bout of the (house|home)\b[^.?!]*\b(tonight|right now|now|immediately|tonight)\b/ },
+  { category: 'severe_injury', re: /\b(bleeding( badly| a lot)?|can'?t breathe|badly hurt|seriously (hurt|injured)|severely (hurt|injured)|broke my|broken (bone|arm|leg|rib)|unconscious|passed out|chest pain|knocked out|hit by a car|just (got|been) hurt)\b/ },
+  { category: 'medical_emergency', re: /\b(at the (hospital|er)|in the (hospital|er)|emergency room|ambulance|call(ed|ing)? 911|urgent care right now)\b/ },
+  { category: 'arrest_or_detention', re: /\b(arrested|in jail|in custody|being held|holding (him|her|them)|detained|locked up|going to jail|court (tomorrow|in the morning)|post bail|bonded out)\b/ },
+  { category: 'emergency_immediacy', re: /\b(emergency|right now|immediately|as soon as possible|do something fast|need (help|to do something) (fast|now|immediately)|need to act fast)\b/ },
+  { category: 'fear', re: /\b(scared|frightened|terrified|petrified|panicking|freaking out|so afraid|really afraid)\b/ },
+];
+
+// Negated-safety context — the caller asserts they are NOT in danger. Suppresses the
+// soft fear/safety tiers so "I was scared but I'm safe now" is not flagged urgent.
+const URGENCY_NEGATION = /(not in danger|no(?: one| body)?(?: is)? (?:threaten|follow)\w*|i'?m safe now|we'?re safe now|(?:is|are|we'?re|i'?m|everyone'?s|everything'?s) (?:safe|fine|okay|ok) now|no danger|nothing like that|not scared anymore)/;
+
+// Structured urgency classifier. Returns { urgent, category, signals, confidence }.
+function classifyUrgency(text) {
   const lower = String(text || '').toLowerCase();
-  return /\b(arrested|in jail|emergency|evicted today|court tomorrow|restraining order|accident just happened|just had an accident|just was in an accident|in (a bad|a terrible|a serious) accident|injured right now|going to jail|being evicted|just got hurt|seriously hurt|car accident|hit by a car|i'?m scared|really scared|at the hospital right now|in the hospital right now)\b/.test(lower);
+  if (!lower.trim()) return { urgent: false, category: 'routine', signals: [], confidence: 'none' };
+  const negated = URGENCY_NEGATION.test(lower);
+  const hits = [];
+  for (const { category, re } of URGENCY_SIGNALS) {
+    if (re.test(lower)) hits.push(category);
+  }
+  // A negated-safety assertion ("no one is threatening me", "I'm safe now") negates
+  // the threat/fear/safety tiers — drop them. Keep only factual hard events that a
+  // safety negation cannot undo (violence, severe injury, medical, arrest).
+  const soft = new Set(['fear', 'immediate_safety', 'emergency_immediacy', 'active_threat']);
+  const effective = negated ? hits.filter((c) => !soft.has(c)) : hits;
+  if (!effective.length) return { urgent: false, category: 'routine', signals: [], confidence: negated ? 'negated' : 'none' };
+  const hard = effective.some((c) => c !== 'fear' && c !== 'emergency_immediacy');
+  return {
+    urgent: true,
+    category: effective[0],
+    signals: [...new Set(effective)],
+    confidence: hard ? 'high' : 'medium',
+  };
+}
+
+function detectUrgency(text) {
+  return classifyUrgency(text).urgent;
 }
 
 function classifyFillerContext(userText) {
@@ -759,26 +838,113 @@ function selectThinkingFiller(userText, lastFillerIdx = -1, callerContext = clas
 }
 
 function detectEarlyExit(text) {
-  const lower = String(text || '').toLowerCase();
-  // Only fire on unambiguous, explicit exit signals — never on colloquial phrases like
-  // "I'm fine" or "don't worry" which callers say mid-conversation without meaning to hang up.
-  return /\b(never\s*mind|nevermind|forget it|i('ll| will) call back|i'?ll try again|good\s*bye|i'?m done|no thanks|not interested|i changed my mind|scratch that|disregard|i('ll| will) call back later|i don'?t need help|i'?m (all set|good for now)|end (the )?call)\b/.test(lower);
+  const lower = String(text || '').toLowerCase().trim();
+  if (!lower) return false;
+  // (Fix F) Unambiguous exit intents — no destination sense, safe to fire on directly.
+  if (/\b(never\s*mind|nevermind|forget it|scratch that|disregard|not interested|changed my mind|i don'?t need help|i'?m (all set|good for now)|no thanks?|good\s*bye|goodbye|bye( now)?|i'?m done|end (the |this )?call|hang up|maybe another time|some other time|call me later)\b/.test(lower)) {
+    return true;
+  }
+  // "call (you) back" / "try again" / "reach out later" — an exit, and distinct from
+  // "call my doctor" (which names a person to contact, not a callback intent).
+  if (/\b(i|we)\b[^.?!]*\b(call (you |u )?back|call back|call again|try (you )?again|reach out later)\b/.test(lower)) return true;
+  if (/\bcan i call (you )?back\b/.test(lower)) return true;
+  if (/\bcan'?t talk (right now|now|at the moment|at the minute)\b/.test(lower)) return true;
+  // "have/need/gotta to go|run" — an exit ONLY when the caller is not naming a
+  // destination ("go to the hospital", "go back to work", "go pick up the kids").
+  if (/\b(have|need|got|gotta)\s+to?\s*(go|run|hop off|get going|get off)\b/.test(lower)
+      || /\bi'?ll let you go\b/.test(lower)) {
+    if (/\bgo\s+(to|back|pick|get|see|check|grab|home|and)\b/.test(lower)) return false;
+    return true;
+  }
+  return false;
+}
+
+// Explicit refusal to provide a specific field (Fix D/G) — "I'd rather not say",
+// "I don't want to give my number", "can you just take my info". Utterance-driven.
+function detectRefusal(text) {
+  const t = String(text || '').toLowerCase().trim();
+  if (!t) return false;
+  if (/\b(rather not (say|give|share)|prefer not to (say|give|share)|don'?t want to (give|share|say)|won'?t give|not comfortable (giving|sharing)|not (gonna|going to) give|no comment)\b/.test(t)) return true;
+  if (/\bcan you just take (my|the) (info|information|message)\b/.test(t)) return true;
+  return false;
+}
+
+// Tokens that are never part of a real caller name. If any word of a name
+// candidate appears here the candidate is an emotional / physical / safety
+// state or a case description — not a name. Deliberately broad; real names do
+// not collide with these. (Fix A — name integrity.)
+const NON_NAME_WORDS = new Set([
+  // emotional state
+  'scared', 'afraid', 'frightened', 'terrified', 'worried', 'anxious', 'nervous',
+  'upset', 'overwhelmed', 'confused', 'panicked', 'panicking', 'distraught', 'shaken',
+  'stressed', 'freaking', 'crying', 'desperate', 'helpless', 'hopeless', 'devastated',
+  // physical state
+  'injured', 'hurt', 'hurting', 'bleeding', 'banged', 'bruised', 'sore', 'dizzy',
+  'sick', 'nauseous', 'unconscious', 'broken', 'aching', 'limping', 'concussed',
+  'wounded', 'bandaged', 'paralyzed', 'numb',
+  // safety state
+  'unsafe', 'trapped', 'stuck', 'threatened', 'followed', 'stranded', 'cornered',
+  'allowed', 'danger', 'dangerous', 'abused', 'assaulted', 'attacked', 'stalked',
+  // case description / incident
+  'crash', 'accident', 'wreck', 'collision', 'injury', 'lawsuit', 'divorce', 'custody',
+  'arrested', 'evicted', 'fired', 'terminated', 'harassment', 'eviction', 'bankruptcy',
+  'ticket', 'dui', 'charged', 'sued', 'fell', 'slipped',
+  // intensifiers / fillers that only appear around states, never in names
+  'really', 'very', 'super', 'kinda', 'pretty', 'badly', 'severely', 'barely',
+  'not', 'just', 'still', 'about', 'trying', 'rather',
+  // relational / third-party words seen in distress openings
+  'husband', 'wife', 'boyfriend', 'girlfriend', 'partner', 'someone', 'somebody',
+]);
+
+// Deterministic name-candidate classifier (Fix A). Returns { accepted, reason }.
+// A value becomes full_name only when Ava is asking for the name, the caller made
+// an explicit name statement, or an explicit name correction — AND the candidate is
+// semantically a name, not a state/description/refusal. Never uses an LLM.
+function classifyNameCandidate(candidate, { sourceText = '', expectedField = '', correctionIntent = false } = {}) {
+  const v = String(candidate || '').trim();
+  if (!v) return { accepted: false, reason: 'empty' };
+  const sourceHasNamePrefix = /(?:my name is|this is|i(?:'|’)?m|i am|i'?m called|call me|it'?s)\s+[A-Za-z]/i.test(sourceText);
+  // Field/intent gate: only accept when the name was actually solicited or volunteered.
+  if (expectedField !== 'full_name' && !sourceHasNamePrefix && !correctionIntent) {
+    return { accepted: false, reason: 'unexpected_field' };
+  }
+  if (/\d/.test(v)) return { accepted: false, reason: 'digit_dominated' };
+  if (!/^[A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*){0,3}$/.test(v)) {
+    return { accepted: false, reason: 'invalid_characters' };
+  }
+  const words = v.split(/\s+/).filter(Boolean);
+  if (words.length < 1 || words.length > 4) return { accepted: false, reason: 'too_many_tokens' };
+  const lower = v.toLowerCase();
+  if (FILLER_WORDS.has(lower) || AFFIRMATIVE_WORDS.has(lower)) return { accepted: false, reason: 'filler' };
+  if (/^(monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|may|june|july|august|september|october|november|december)$/i.test(v)) {
+    return { accepted: false, reason: 'weekday_or_month' };
+  }
+  // Refusal / non-answer ("I'd rather not say", "I don't want to give my name").
+  if (/\b(rather not|don'?t want|won'?t|prefer not|not comfortable|no comment|none of)\b/i.test(v)) {
+    return { accepted: false, reason: 'refusal' };
+  }
+  // Any state / incident word disqualifies the whole candidate.
+  const stateWord = words.find((w) => NON_NAME_WORDS.has(w.toLowerCase().replace(/[.'-]+$/, '')));
+  if (stateWord) return { accepted: false, reason: 'non_name_state' };
+  // Legacy case-description guard (multi-word phrases).
+  if (/\b(personal|case|rear-ended|matter|help|legal|consultation|problem|situation|hospital|police|court|jail)\b/i.test(v)) {
+    return { accepted: false, reason: 'case_description' };
+  }
+  return { accepted: true, reason: 'name' };
 }
 
 function isLikelyName(value, sourceText = '', expectedField = '') {
-  const v = String(value || '').trim();
-  if (!v) return false;
-  const sourceHasNamePrefix = /(?:my name is|this is|i(?:'|’)?m|i am)\s+[A-Za-z]/i.test(sourceText);
-  if (expectedField !== 'full_name' && !sourceHasNamePrefix) return false;
-  if (/\d/.test(v)) return false;
-  if (!/^[A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*){0,3}$/.test(v)) return false;
-  const words = v.split(/\s+/).filter(Boolean);
-  if (words.length < 1 || words.length > 4) return false;
-  const lower = v.toLowerCase();
-  if (FILLER_WORDS.has(lower) || AFFIRMATIVE_WORDS.has(lower)) return false;
-  if (/^(monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|may|june|july|august|september|october|november|december)$/i.test(v)) return false;
-  if (/\b(personal|injury|case|accident|rear-ended|matter|help|legal|divorce|custody|arrested|evicted|fired|harassment|consultation)\b/i.test(v)) return false;
-  return true;
+  return classifyNameCandidate(value, { sourceText, expectedField }).accepted;
+}
+
+// Explicit name-correction intent (Fix A) — utterance-driven, lets a caller replace
+// a previously captured name ("no, my name is Gregory Tan" / "actually it's Sean").
+function detectNameCorrectionIntent(text) {
+  const t = String(text || '').toLowerCase().trim();
+  if (/^(no|nope|actually)\b/.test(t) && /(name|it'?s|i'?m|spelled|call me)\b/.test(t)) return true;
+  if (/\b(my name is|the name is|it'?s spelled|i (said|meant)|correct name is)\b/.test(t)) return true;
+  if (/\bnot\b.*\b(it'?s|my name)\b/.test(t)) return true;
+  return false;
 }
 
 function isLikelyPhone(value) {
@@ -792,6 +958,11 @@ function isLikelySummary(value, expectedField = '') {
   const lower = v.toLowerCase();
   if (FILLER_WORDS.has(lower) || AFFIRMATIVE_WORDS.has(lower)) return false;
   if (isLikelyPhone(v)) return false;
+  // (Fix E) A question the caller asked ("how much does this cost?", "am I talking to
+  // an AI?") or a refusal is NOT an incident summary — don't let it fill case_summary,
+  // so Ava still asks "what happened" and captures the real reason for the call.
+  if (isCallerQuestion(v)) return false;
+  if (detectRefusal(v)) return false;
   const words = v.split(/\s+/).filter(Boolean);
   if (expectedField === 'case_summary') {
     if (words.length < 3) return false;
@@ -889,13 +1060,17 @@ function buildDeterministicQuestion(session, firmConfig) {
   }
 
   const requiredFields = firmConfig.required_fields || REQUIRED_FIELDS_DEFAULT;
+  // A field the caller explicitly refused is not askable — asking it again is the
+  // repeated-question loop (Fix D/G). It stays "missing" but we never re-request it.
+  const refused = session.refusedField ? new Set([session.refusedField]) : new Set();
   const missing = requiredFields.filter((field) => !String(session.collected[field] || '').trim());
-  if (!missing.length) return { done: true, nextField: null, nextQuestionId: null, nextQuestionText: '' };
+  const askable = missing.filter((f) => !refused.has(f));
+  if (!askable.length) return { done: true, nextField: null, nextQuestionId: null, nextQuestionText: '' };
 
-  // Scan all missing fields for the first one not yet asked, not just missing[0].
-  // Checking only missing[0] would allow a filler response to exhaust the "unasked"
+  // Scan all askable fields for the first one not yet asked, not just askable[0].
+  // Checking only [0] would allow a filler response to exhaust the "unasked"
   // slot and jump to final_clarify, skipping intermediate required fields.
-  const nextField = missing.find((f) => !session.askedQuestionIds.includes(f)) ?? missing[0];
+  const nextField = askable.find((f) => !session.askedQuestionIds.includes(f)) ?? askable[0];
 
   if (!session.askedQuestionIds.includes(nextField)) {
     return {
@@ -906,11 +1081,11 @@ function buildDeterministicQuestion(session, firmConfig) {
     };
   }
 
-  // Every missing required field has been asked at least once — one final chance
+  // Every askable required field has been asked at least once — one final chance
   if (!session.askedQuestionIds.includes('final_clarify')) {
     return {
       done: false,
-      nextField: missing[0],
+      nextField: askable[0],
       nextQuestionId: 'final_clarify',
       nextQuestionText: getQuestionText('final_clarify', firmConfig),
     };
@@ -1224,6 +1399,7 @@ clarifying_note is optional internal context for your next turn - use it for ton
 function mergeExtracted(session, extracted, userText, firmConfig) {
   const requiredFields = firmConfig.required_fields || REQUIRED_FIELDS_DEFAULT;
   const expectedField = session.lastQuestionId;
+  const nameCorrection = detectNameCorrectionIntent(userText);
   const updates = {};
   for (const key of requiredFields) {
     const value = String(extracted?.[key] ?? '').trim();
@@ -1231,6 +1407,16 @@ function mergeExtracted(session, extracted, userText, firmConfig) {
     if (key === 'full_name' && !isLikelyName(value, userText, expectedField)) continue;
     if (key === 'callback_number' && !isLikelyPhone(value)) continue;
     if (key === 'case_summary' && !isLikelySummary(value, expectedField)) continue;
+    const existing = String(session.collected[key] || '').trim();
+    // Name overwrite protection (Fix A): a valid, collected name is authoritative —
+    // only replace it on an explicit name correction or when Ava is re-asking the name.
+    // Blocks unrelated LLM re-proposals from silently swapping a good name.
+    if (key === 'full_name' && existing && existing !== value
+        && !nameCorrection && expectedField !== 'full_name') continue;
+    // Summary overwrite protection (Fix E): don't let a weaker/shorter LLM summary
+    // replace a good one already captured, unless Ava is explicitly on the summary turn.
+    if (key === 'case_summary' && existing && existing !== value
+        && value.length < existing.length && expectedField !== 'case_summary') continue;
     if (!session.collected[key] || session.collected[key] !== value) {
       session.collected[key] = value;
       updates[key] = value;
@@ -1317,7 +1503,7 @@ function enrichForSpeech(text) {
 // ── Speech composition (firm-aware) ──────────────────────────────────────────
 
 function composeSpeakText({ session, bodyText, callSid, firmConfig, llmAck = '', callerContext = 'neutral' }) {
-  const trimmed = String(bodyText || '').trim();
+  let trimmed = String(bodyText || '').trim();
   if (!trimmed) return '';
 
   if (!session.disclaimerShown) {
@@ -1330,6 +1516,13 @@ function composeSpeakText({ session, bodyText, callSid, firmConfig, llmAck = '',
     // On first turn, append the caller type question so the caller knows what to say
     return session.callerType === null && trimmed ? `${opening} ${trimmed}` : opening;
   }
+
+  // (Fix B) On sensitive calls, strip any prohibited lead-in ack the LLM baked into its
+  // line ("Okay, I have your details…") so distress/correction/question turns don't
+  // open with a tone-deaf throwaway acknowledgment.
+  const sensitiveTurn = session.isUrgent || session.hadCorrection || session.hadCallerQuestion
+    || ['urgent_or_distressed', 'correction', 'caller_question'].includes(callerContext);
+  if (sensitiveTurn) trimmed = stripLeadingProhibitedAck(trimmed) || trimmed;
 
   // LLM provided its own acknowledgment — next_question_text already has it baked in,
   // so return it directly instead of prepending a redundant deterministic ack.
@@ -2246,15 +2439,40 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
     app.log.info({ callSid, callbackProvenance: session.callbackProvenance || 'unknown' }, 'callback-collected');
   }
 
-  // ── Urgency detection ──────────────────────────────────────────────────────
-  if (!session.isUrgent && callerText && detectUrgency(callerText)) {
-    session.isUrgent = true;
-    // The urgency statement ("I was in a car accident and I'm scared") may have been
-    // auto-extracted as case_summary by extractStructuredDeterministic (≥40 chars, ≥4 words).
-    // That's NOT a real case summary — it's just the distress signal.
-    // Clear it so Ava explicitly asks for a case summary on a later turn instead of jumping to done.
-    if (!session.askedQuestionIds.includes('case_summary')) {
-      delete session.collected.case_summary;
+  // ── Urgency detection (Fix C) ──────────────────────────────────────────────
+  if (!session.isUrgent && callerText) {
+    const urg = classifyUrgency(callerText);
+    if (urg.urgent) {
+      session.isUrgent = true;
+      session.urgencyCategory = urg.category;
+      app.log.info({ callSid, urgencyCategory: urg.category, signals: urg.signals, confidence: urg.confidence }, 'urgency-detected');
+      // The urgency statement ("I was in a car accident and I'm scared") may have been
+      // auto-extracted as case_summary by extractStructuredDeterministic (≥40 chars, ≥4 words).
+      // That's NOT a real case summary — it's just the distress signal.
+      // Clear it so Ava explicitly asks for a case summary on a later turn instead of jumping to done.
+      if (!session.askedQuestionIds.includes('case_summary')) {
+        delete session.collected.case_summary;
+      }
+    }
+  }
+
+  // ── Closing-context signals (Fix B) + refusal tracking (Fix D/G) ────────────
+  if (callerText) {
+    if (phoneCorrection || detectNameCorrectionIntent(callerText) || classifyFillerContext(callerText) === 'correction') {
+      session.hadCorrection = true;
+    }
+    if (isCallerQuestion(callerText)) session.hadCallerQuestion = true;
+    // Explicit refusal of the field Ava is currently asking for: record it so the
+    // gate stops re-asking after one polite retry instead of looping (Fix D/G).
+    if (detectRefusal(callerText)) {
+      const f = session.lastQuestionId === '__phone_retry__' ? 'callback_number' : session.lastQuestionId;
+      if (f && f !== 'final_clarify' && f !== '__caller_type__') {
+        // Defensive init — sessions persisted before this field existed lack it.
+        if (!session.refusalCounts) session.refusalCounts = {};
+        session.refusalCounts[f] = (session.refusalCounts[f] || 0) + 1;
+        if (session.refusalCounts[f] >= 1) session.refusedField = f;
+        session.phoneRetryPending = false;
+      }
     }
   }
 
@@ -2323,7 +2541,11 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
   const maxQ = firmConfig.max_questions || 8;
   const reachedQuestionCap = session.turnCount >= maxQ;
   const requiredFields = effectiveConfig.required_fields || REQUIRED_FIELDS_DEFAULT;
-  const allCollected = requiredFields.every((f) => String(session.collected[f] || '').trim());
+  // A required field counts as resolved-for-completion when collected OR explicitly
+  // refused — so a caller who declines to give a field completes the intake gracefully
+  // instead of being asked the same question until the hard cap (Fix D/G).
+  const isFieldSatisfied = (f) => !!String(session.collected[f] || '').trim() || session.refusedField === f;
+  const allCollected = requiredFields.every(isFieldSatisfied);
 
   // Recompute after mergeExtracted so nextDecision reflects the updated collected fields.
   // The speculative decision above may be stale if extraction filled a previously missing field.
@@ -2331,7 +2553,8 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
   if (!allCollected && !reachedQuestionCap && llm) {
     const nextId = String(llm.next_question_id || '').trim();
     const nextText = String(llm.next_question_text || '').trim();
-    const missing = requiredFields.filter((field) => !String(session.collected[field] || '').trim());
+    // Exclude a refused field so the LLM can't re-propose it (Fix D).
+    const missing = requiredFields.filter((field) => !isFieldSatisfied(field));
     if (nextId && nextText && !session.askedQuestionIds.includes(nextId) && missing.includes(nextId) && missing.length) {
       // 5.2 — field-repeat guard: skip if already collected
       if (session.collected[nextId] && String(session.collected[nextId]).trim()) {
@@ -2357,14 +2580,17 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
   const llmWantsContinue = llm && String(llm.next_question_id || '').trim() !== 'done';
   // callback_number must be explicitly collected (not just inferred from caller ID)
   // to count as present for the done check.
-  const allCorePresent = ['full_name', 'case_summary'].every(
-      (f) => String(session.collected[f] || '').trim().length >= 2,
-    ) && String(session.collected.callback_number || '').trim().length >= 2;
+  const corePresentOrRefused = (f) => String(session.collected[f] || '').trim().length >= 2 || session.refusedField === f;
+  const allCorePresent = ['full_name', 'case_summary'].every(corePresentOrRefused)
+    && corePresentOrRefused('callback_number');
   // Hard cap: allow up to 4 extra turns if core fields aren't collected yet.
   // This prevents hanging up on a caller who never gave their name or number.
   const hardCap = reachedQuestionCap && (allCorePresent || session.turnCount >= (maxQ + 4));
   const done = hardCap
-    || (allCorePresent && !llmWantsContinue && (allCollected || nextDecision.done));
+    || (allCorePresent && !llmWantsContinue && (allCollected || nextDecision.done))
+    // Caller refused a field and everything else is collected — complete gracefully
+    // even if the LLM would keep probing, so we don't loop on the refused field (Fix G).
+    || (!!session.refusedField && allCorePresent && nextDecision.done);
 
   // ── Gate/generator divergence interceptor (audit R3) ───────────────────────
   // If the done-gate says NOT done but the deterministic generator has exhausted
@@ -2375,7 +2601,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
   if (!done && nextDecision.done === true) {
     const coreFields = ['full_name', 'case_summary', 'callback_number'];
     const missingCore = coreFields.filter(
-      (f) => String(session.collected[f] || '').trim().length < 2,
+      (f) => String(session.collected[f] || '').trim().length < 2 && session.refusedField !== f,
     );
     const targetField = missingCore[0] || 'final_clarify';
     const overrideText = getQuestionText(targetField, effectiveConfig);
@@ -2448,7 +2674,9 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
     session.done = true;
     session.lastQuestionId = '';
     session.lastQuestionText = '';
-    speakText = effectiveConfig.closing || DEFAULT_FIRM_CONFIG.closing;
+    // (Fix B) Context-aware closing: sensitive / refusal / correction closings never
+    // claim "everything I need" and never lead with a prohibited acknowledgment.
+    speakText = selectClosing(session, effectiveConfig);
     // Urgency on the final turn: only override if LLM didn't already handle emotional acknowledgment
     if (session.isUrgent && !session.urgencySpoken) {
       session.urgencySpoken = true;
@@ -2542,7 +2770,8 @@ function applyRepromptText(session, firmConfig) {
   const maxReprompts = firmConfig?.max_reprompts || 2;
   if (session.repromptCount >= maxReprompts) {
     session.done = true;
-    const closing = firmConfig?.closing || DEFAULT_FIRM_CONFIG.closing;
+    // (Fix B) Use the context-aware, ack-sanitized closing here too.
+    const closing = selectClosing(session, firmConfig || DEFAULT_FIRM_CONFIG);
     return getRepromptClosePhrase(firmConfig || DEFAULT_FIRM_CONFIG, closing);
   }
   const base = session.lastQuestionText || getQuestionText('full_name', firmConfig || DEFAULT_FIRM_CONFIG);
@@ -3861,4 +4090,12 @@ if (isMain) {
   }
 }
 
-export { app, extractPhoneCandidate, detectPhoneCorrectionIntent, spokenToDigits };
+export {
+  app,
+  extractPhoneCandidate, detectPhoneCorrectionIntent, spokenToDigits,
+  classifyNameCandidate, isLikelyName, detectNameCorrectionIntent,
+  classifyUrgency, detectUrgency,
+  detectEarlyExit, detectRefusal,
+  isLikelySummary, isCallerQuestion,
+  stripLeadingProhibitedAck, selectClosing,
+};
