@@ -966,7 +966,9 @@ function isLikelySummary(value, expectedField = '') {
   const words = v.split(/\s+/).filter(Boolean);
   if (expectedField === 'case_summary') {
     if (words.length < 3) return false;
-    if (isLikelyName(v, '', 'full_name')) return false;
+    // When Ava explicitly asked "what happened", a 3+ word answer is the summary —
+    // don't reject it just because it superficially matches the loose name pattern
+    // ("Child support enforcement question" is a matter, not a person's name).
     const meaningful = words.filter((w) => !/^(a|an|the|and|or|but|for|to|of|on|in|at|is|was|were|my|i|we|he|she|they|it|this|that)$/i.test(w));
     return meaningful.length >= 1;
   }
@@ -1517,12 +1519,11 @@ function composeSpeakText({ session, bodyText, callSid, firmConfig, llmAck = '',
     return session.callerType === null && trimmed ? `${opening} ${trimmed}` : opening;
   }
 
-  // (Fix B) On sensitive calls, strip any prohibited lead-in ack the LLM baked into its
-  // line ("Okay, I have your details…") so distress/correction/question turns don't
-  // open with a tone-deaf throwaway acknowledgment.
-  const sensitiveTurn = session.isUrgent || session.hadCorrection || session.hadCallerQuestion
-    || ['urgent_or_distressed', 'correction', 'caller_question'].includes(callerContext);
-  if (sensitiveTurn) trimmed = stripLeadingProhibitedAck(trimmed) || trimmed;
+  // (Fix B) Strip any prohibited lead-in ack the LLM baked into its line ("Okay, I
+  // have your details…", "Perfect, and your name?") — Ava must never open a line with
+  // a tone-deaf throwaway acknowledgment. Deterministic neutral acks are added
+  // separately below from a safe allowlist, so this only removes the banned lead-ins.
+  trimmed = stripLeadingProhibitedAck(trimmed) || trimmed;
 
   // LLM provided its own acknowledgment — next_question_text already has it baked in,
   // so return it directly instead of prepending a redundant deterministic ack.
@@ -2465,7 +2466,12 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
     // Explicit refusal of the field Ava is currently asking for: record it so the
     // gate stops re-asking after one polite retry instead of looping (Fix D/G).
     if (detectRefusal(callerText)) {
-      const f = session.lastQuestionId === '__phone_retry__' ? 'callback_number' : session.lastQuestionId;
+      // Attribute to the field named in the refusal when explicit ("I'd rather not
+      // give my NUMBER") — robust against a desynced lastQuestionId — otherwise the
+      // field Ava is currently asking for.
+      const f = /\b(number|phone|digits|call me|reach me|text me)\b/i.test(callerText) ? 'callback_number'
+        : session.lastQuestionId === '__phone_retry__' ? 'callback_number'
+          : session.lastQuestionId;
       if (f && f !== 'final_clarify' && f !== '__caller_type__') {
         // Defensive init — sessions persisted before this field existed lack it.
         if (!session.refusalCounts) session.refusalCounts = {};
