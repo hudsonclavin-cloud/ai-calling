@@ -2658,6 +2658,16 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
     const llmQuestionText = String(llm?.next_question_text || '').trim();
     let questionBody = llmQuestionText || nextDecision.nextQuestionText;
 
+    // A refused field must not keep being asked (Fix D/G): if the LLM ignores the
+    // refusal and keeps pushing it in free-form text, use the deterministic question
+    // for the next needed field instead so Ava moves on rather than hounding the caller.
+    if (session.refusedField && llmQuestionText && nextDecision.nextField
+        && nextDecision.nextField !== session.refusedField) {
+      const pushesRefused = String(llm?.next_question_id || '') === session.refusedField
+        || (session.refusedField === 'callback_number' && /\b(number|phone|reach you|call you back|digits|best way to reach)\b/i.test(llmQuestionText));
+      if (pushesRefused) questionBody = nextDecision.nextQuestionText;
+    }
+
     // If the LLM didn't return a separate acknowledgment but baked one into next_question_text
     // (as the system prompt allows), treat it as having an ack to prevent composeSpeakText
     // from prepending a redundant deterministic ack.
