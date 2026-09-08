@@ -289,7 +289,9 @@ app.addHook('onRequest', async (req, reply) => {
     reply.header('Access-Control-Max-Age', '86400');
   }
   if (req.method === 'OPTIONS') {
-    reply.code(origin && CORS_ALLOWED_ORIGINS.has(origin) ? 204 : 403).send();
+    // Returning the reply is how an async hook tells Fastify the response is
+    // already sent; without it the request continues into routing.
+    return reply.code(origin && CORS_ALLOWED_ORIGINS.has(origin) ? 204 : 403).send();
   }
 });
 
@@ -3141,14 +3143,15 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
     }
     nextField = nextDecision.nextField;
 
-    // If the LLM didn't return a separate acknowledgment but baked one into next_question_text
-    // (as the system prompt allows), treat it as having an ack to prevent composeSpeakText
-    // from prepending a redundant deterministic ack.
-    // If the LLM returned any text, trust it — the system prompt requires it to bake in an ack.
-    // Never prepend a deterministic ack on top of LLM-generated speech.
-    const effectiveLlmAck = llmAck || (llmQuestionText ? '_baked_in_' : '');
+    // The model bakes its acknowledgment into next_question_text, so when we speak
+    // ITS words we must not prepend another one. This has to test what is actually
+    // being spoken, not merely whether the model returned something: on the turns
+    // where we override its text (it tried to close, or a clarification wins), the
+    // line is our deterministic question and it should get the deterministic ack.
+    const speakingModelText = !!llmQuestionText && questionBody === llmQuestionText;
+    const effectiveLlmAck = llmAck || (speakingModelText ? '_baked_in_' : '');
     speakText = composeSpeakText({ session, bodyText: questionBody, callSid, firmConfig: effectiveConfig, llmAck: effectiveLlmAck, callerContext });
-    app.log.info({ llmAck, effectiveLlmAck, usedLlmText: !!llmQuestionText, questionBody, speakText }, 'ava-speaks');
+    app.log.info({ llmAck, effectiveLlmAck, usedLlmText: speakingModelText, questionBody, speakText }, 'ava-speaks');
 
     // Urgency: only apply empathetic fallback if LLM didn't already provide an acknowledgment.
     // Uses effectiveLlmAck (not llmAck) so baked-in acks in next_question_text are respected.

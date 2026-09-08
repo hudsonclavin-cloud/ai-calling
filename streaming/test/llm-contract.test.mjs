@@ -203,3 +203,24 @@ test('a malformed model reply does not end the call', async () => {
   assert.ok(!/<Hangup\/>/.test(xml), 'an unusable model reply must not hang up on the caller');
   assert.ok(spokenFrom(xml).length > 0, 'Ava still says something');
 });
+
+test('overriding the model still gets an acknowledgment, not a bare question', async () => {
+  const callSid = 'CALLM_ACK_OVERRIDE';
+  nextLlmReply = reply();
+  await turn(callSid, null);
+
+  // The model tries to close while a core field is still missing. Ava must ask
+  // for the field instead — and that question is hers, so it takes her own
+  // acknowledgment rather than being spoken bare.
+  nextLlmReply = reply({
+    next_question_id: 'done',
+    next_question_text: "Thanks, someone will call you shortly. Goodbye!",
+    done_reason: 'caller seems finished',
+  });
+  const xml = await turn(callSid, 'I was hurt at work last Tuesday');
+
+  const said = spokenFrom(xml);
+  assert.ok(!/goodbye/i.test(said), 'the model’s goodbye is not spoken while the call continues');
+  assert.ok(!/<Hangup\/>/.test(xml), 'and the call is still open');
+  assert.match(said, /^(Got it\.|Understood\.|Thanks for that\.)/, `an acknowledgment leads the line, got: ${said}`);
+});
