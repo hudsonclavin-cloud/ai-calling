@@ -30,6 +30,7 @@ import {
   getWebhookLogs,
   withCallLock,
   logEmailAttempt,
+  purgeStaleSessions,
 } from './db.mjs';
 
 const isMain = process.argv[1] === fileURLToPath(import.meta.url);
@@ -179,7 +180,19 @@ let correctionFillerKey = null;
 // Per-session last filler index (avoids consecutive repeated filler within a call)
 const fillerLastIdxMap = new Map();
 const DYNAMIC_FILLER_TIMEOUT_MS = Number(process.env.DYNAMIC_FILLER_TIMEOUT_MS ?? 800);
-const FILLER_GATE_MS = 1200;
+// How long to wait for the answer before covering the gap with a filler.
+//
+// At 1200ms this fired on essentially every model turn, so the common turn paid
+// for the mask it did not need: ~1.5s of "Got it — one sec.", plus a full extra
+// Twilio round trip to fetch the real answer. A turn that would have completed
+// in 1.6s of quiet took closer to 3.5s of Ava talking over herself. Conversation
+// tolerates a beat of silence far better than that, so the gate now waits long
+// enough that only genuinely slow turns get covered.
+const FILLER_GATE_MS = Number(process.env.FILLER_GATE_MS || 2200);
+// If no filler is going to play (urgent and distressed callers deliberately get
+// none), a redirect buys nothing but silence and a round trip — keep waiting
+// instead, up to Twilio's practical webhook budget.
+const NO_FILLER_EXTRA_WAIT_MS = Number(process.env.NO_FILLER_EXTRA_WAIT_MS || 4000);
 
 // ── Default firm config (used as fallback if no file found) ──────────────────
 // To add a new firm: copy firm_default.json → firm_yourname.json and edit it.
@@ -3965,10 +3978,24 @@ app.post('/twiml', { preHandler: twilioSignaturePreHandler }, async (req, reply)
       const pending = { promise: processingPromise, t0 };
       pendingResponses.set(callSid, pending);
 
-      const winner = await Promise.race([
-        pending.promise.then(() => 'ready', () => 'slow'),
+      const settled = pending.promise.then(() => 'ready', () => 'slow');
+      let winner = await Promise.race([
+        settled,
         new Promise(r => setTimeout(() => r('slow'), FILLER_GATE_MS)),
       ]);
+
+      const selectedFiller = winner === 'ready'
+        ? { text: '', category: 'none', fillerIdx: null }
+        : selectThinkingFiller(userText, fillerLastIdxMap.get(callSid) ?? -1, callerContext);
+
+      // Nothing to play: a redirect here is pure silence plus a round trip, which
+      // is exactly the wrong thing to hand a distressed caller. Wait instead.
+      if (winner === 'slow' && !selectedFiller.text) {
+        winner = await Promise.race([
+          settled,
+          new Promise(r => setTimeout(() => r('slow'), NO_FILLER_EXTRA_WAIT_MS)),
+        ]);
+      }
 
       if (winner === 'ready') {
         let step;
@@ -3981,7 +4008,6 @@ app.post('/twiml', { preHandler: twilioSignaturePreHandler }, async (req, reply)
         return reply.send(buildPendingResultTwiml({ step, pending, firmId, callSid }));
       }
 
-      const selectedFiller = selectThinkingFiller(userText, fillerLastIdxMap.get(callSid) ?? -1, callerContext);
       app.log.info({ callSid, fillerCategory: selectedFiller.category, fillerSuppressed: !selectedFiller.text }, 'filler-selected');
 
       if (selectedFiller.fillerIdx != null) fillerLastIdxMap.set(callSid, selectedFiller.fillerIdx);
@@ -4823,6 +4849,15 @@ if (isMain) {
     console.log(`filler-phrases ready: ${fillerReady}/${FILLER_PREWARM_PHRASES.length}`);
 
     prewarmTtsCache().catch((err) => app.log.warn({ err: String(err) }, 'TTS prewarm error'));
+
+    // Sweep sessions whose call-completed webhook never arrived, at boot and
+    // hourly. Left alone they accumulate forever and are re-read on every turn.
+    const sweep = () => purgeStaleSessions()
+      .then((n) => { if (n) app.log.info({ removed: n }, 'purged stale sessions'); })
+      .catch((err) => app.log.warn({ err: String(err) }, 'session purge failed'));
+    sweep();
+    const sessionPurgeTimer = setInterval(sweep, 60 * 60_000);
+    sessionPurgeTimer.unref?.();
   } catch (err) {
     app.log.error({ err: String(err) }, 'Server failed to start');
     process.exit(1);

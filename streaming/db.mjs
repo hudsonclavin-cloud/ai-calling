@@ -436,6 +436,19 @@ export async function saveSession(callSid, session) {
   await _saveSessions({ [String(callSid)]: session });
 }
 
+// Sessions are deleted when /call-status reports the call finished. That webhook
+// can be missed (a misconfigured number, a failed REST registration, a restart
+// mid-call), and every survivor was previously re-read and re-written on every
+// turn of every other call. Sweep anything far older than a phone call.
+export async function purgeStaleSessions(maxAgeMs = 6 * 60 * 60 * 1000) {
+  const cutoff = new Date(Date.now() - maxAgeMs).toISOString();
+  const result = await serializedWrite(() => getClient().execute({
+    sql: 'DELETE FROM sessions WHERE updatedAt < ?',
+    args: [cutoff],
+  }));
+  return Number(result?.rowsAffected || 0);
+}
+
 export async function deleteSession(callSid) {
   await serializedWrite(() => getClient().execute({ sql: 'DELETE FROM sessions WHERE callSid = ?', args: [callSid] }));
 }
