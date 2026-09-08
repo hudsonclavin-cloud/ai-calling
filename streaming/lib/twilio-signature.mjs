@@ -2,10 +2,28 @@ import crypto from 'node:crypto';
 
 let skipWarned = false;
 
+// A rejected Twilio webhook must answer with TwiML, not JSON. Twilio treats a
+// non-TwiML or error response as a failed webhook and plays its own "an
+// application error has occurred" recording before hanging up — so a
+// misconfigured auth token presented as silence-then-error with nothing in the
+// logs pointing at the signature check.
+const REJECT_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response><Say>Sorry, this line is not configured correctly right now. Please try again later.</Say><Hangup/></Response>';
+
+function reject(reply) {
+  reply.code(403).header('Content-Type', 'text/xml').send(REJECT_TWIML);
+}
+
 function buildUrl(publicBase, rawUrl) {
   // rawUrl already contains path+query
   const base = String(publicBase || '').replace(/\/$/, '');
   return `${base}${rawUrl}`;
+}
+
+function timingSafeEqualStrings(a, b) {
+  const bufA = Buffer.from(String(a));
+  const bufB = Buffer.from(String(b));
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
 }
 
 function computeExpectedSignature(authToken, url, params) {
@@ -31,8 +49,8 @@ export async function twilioSignaturePreHandler(req, reply) {
   const url = buildUrl(process.env.PUBLIC_BASE_URL || '', req.raw.url || req.url || '');
 
   if (!token) {
-    req.log?.error('TWILIO_AUTH_TOKEN not set and signature validation is required');
-    return reply.code(403).send({ error: 'Invalid Twilio signature' });
+    req.log?.error('TWILIO_AUTH_TOKEN not set and signature validation is required — every inbound call will be rejected. Set TWILIO_AUTH_TOKEN, or SKIP_TWILIO_SIGNATURE_VALIDATION=true for local development.');
+    return reject(reply);
   }
 
   // Try to use twilio.validateRequest if available (keeps grep detectible),
@@ -49,10 +67,13 @@ export async function twilioSignaturePreHandler(req, reply) {
 
   if (!valid) {
     const expected = computeExpectedSignature(token, url, req.body || {});
-    valid = expected === signature;
+    valid = timingSafeEqualStrings(expected, signature);
   }
 
-  if (!valid) return reply.code(403).send({ error: 'Invalid Twilio signature' });
+  if (!valid) {
+    req.log?.warn({ url }, 'Twilio signature validation failed — check that PUBLIC_BASE_URL exactly matches the URL configured on the Twilio number (scheme, host, and query string)');
+    return reject(reply);
+  }
 }
 
 // Expose a symbol named validateRequest to satisfy grep checks in the dispatch

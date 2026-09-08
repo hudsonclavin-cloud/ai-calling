@@ -51,7 +51,10 @@ const fetch = globalThis.fetch;
 if (!fetch) throw new Error('Node 18+ is required (global fetch).');
 
 const PORT = Number(process.env.PORT || 5050);
-const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://127.0.0.1:${PORT}`;
+// Every TwiML action, Play, Redirect and status-callback URL is built by string
+// concatenation from this value, so a trailing slash turns each one into a
+// double-slash 404 and the call dies the moment the caller first replies.
+const PUBLIC_BASE_URL = String(process.env.PUBLIC_BASE_URL || `http://127.0.0.1:${PORT}`).trim().replace(/\/+$/, '');
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || '';
@@ -512,13 +515,24 @@ function sha1(value) {
   return crypto.createHash('sha1').update(String(value)).digest('hex');
 }
 
+// An env var set to an empty string is NOT nullish, so `Number(env.X ?? 0.55)`
+// returned 0 for it — an empty ELEVEN_* variable in Railway silently set
+// stability, similarity, style AND speed to zero, which is not a tuning mistake
+// but a broken request. Treat blank as unset, and ignore non-numeric values.
+function numberSetting(raw, fallback) {
+  const value = String(raw ?? '').trim();
+  if (!value) return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 function getVoiceSettings(env = process.env) {
   return {
-    stability: Number(env.ELEVEN_STABILITY ?? 0.55),
-    similarity_boost: Number(env.ELEVEN_SIMILARITY ?? 0.75),
-    style: Number(env.ELEVEN_STYLE ?? 0.10),
+    stability: numberSetting(env.ELEVEN_STABILITY, 0.55),
+    similarity_boost: numberSetting(env.ELEVEN_SIMILARITY, 0.75),
+    style: numberSetting(env.ELEVEN_STYLE, 0.10),
     use_speaker_boost: env.ELEVEN_SPEAKER_BOOST !== 'false',
-    speed: Number(env.ELEVEN_SPEED ?? 1.00),
+    speed: numberSetting(env.ELEVEN_SPEED, 1.00),
   };
 }
 
@@ -3847,19 +3861,45 @@ app.post('/twiml-result', { preHandler: twilioSignaturePreHandler }, async (req,
 
   const pending = pendingResponses.get(callSid);
 
+  // pendingResponses is in-process memory, so it is empty after a deploy, a
+  // crash, or on a second replica — and Twilio retries this redirect. Ending the
+  // call with an error message was the worst possible answer: recover by asking
+  // the caller to repeat, which keeps the line open and the session intact.
   if (!pending) {
-    app.log.warn({ callSid }, '/twiml-result: no pending response — call may have already completed');
-    return reply.send(doneTwiml({ speakText: getErrorMessage(), ttsKey: null }));
+    app.log.warn({ callSid }, '/twiml-result: no pending controller (restart, retry, or another replica) — reprompting instead of ending the call');
+    try {
+      const firmConfig = await loadFirmConfig(firmId);
+      const session = await getSession(callSid);
+      const retryText = (session?.lastQuestionText && session.lastQuestionText.trim())
+        || getQuestionText('final_clarify', firmConfig)
+        || 'Sorry — could you say that again?';
+      const retryKey = await synthesizeToDisk(retryText).catch(() => null);
+      const liveUrl = retryKey ? null : `${PUBLIC_BASE_URL}/tts-live?text=${encodeURIComponent(retryText)}&firmId=${encodeURIComponent(firmId)}`;
+      return reply.send(gatherTwiml({
+        actionUrl: `${PUBLIC_BASE_URL}/twiml?firmId=${encodeURIComponent(firmId)}`,
+        speakText: retryText,
+        ttsKey: retryKey,
+        liveUrl,
+        emptyCount: session?.repromptCount || 0,
+        hints: (firmConfig.practice_areas || []).join(', '),
+      }));
+    } catch (err) {
+      app.log.error({ err: String(err), callSid }, '/twiml-result recovery failed');
+      return reply.send(doneTwiml({ speakText: getErrorMessage(), ttsKey: null }));
+    }
   }
 
-  let step;
+  // The controller promise is awaited INSIDE the try. It was outside, so a
+  // rejected controller (an OpenAI timeout on the filler path, whose rejection
+  // the Promise.race deliberately swallows) escaped the handler as an HTTP 500
+  // with a JSON body, and Twilio played its generic error and dropped the call.
   try {
-    step = await pending.promise;
-  } finally {
-    pendingResponses.delete(callSid);
-  }
-
-  try {
+    let step;
+    try {
+      step = await pending.promise;
+    } finally {
+      pendingResponses.delete(callSid);
+    }
     return reply.send(buildPendingResultTwiml({ step, pending, firmId, callSid }));
   } catch (err) {
     app.log.error({ err: String(err), stack: err?.stack, callSid }, '/twiml-result failed');
@@ -3886,11 +3926,18 @@ app.post('/twiml-grace', { preHandler: twilioSignaturePreHandler }, async (req, 
 
   app.log.info({ callSid, speech: speech.slice(0, 100) }, 'twiml-grace: caller spoke — continuing');
 
-  const session = await getSession(callSid);
-  if (session) {
-    session.done = false;
-    session.updatedAt = nowIso();
-    await saveSession(callSid, session);
+  let session = null;
+  try {
+    session = await getSession(callSid);
+    if (session) {
+      session.done = false;
+      session.updatedAt = nowIso();
+      await saveSession(callSid, session);
+    }
+  } catch (err) {
+    // A DB hiccup here used to escape as an HTTP 500, which Twilio answers by
+    // cutting the caller off during the goodbye.
+    app.log.error({ err: String(err), callSid }, 'twiml-grace: session reload failed');
   }
 
   try {
@@ -4407,6 +4454,28 @@ app.post('/api/billing/webhook', async (req, reply) => {
 // ── Boot ──────────────────────────────────────────────────────────────────────
 
 app.log.info(`BOOT PORT=${PORT} PUBLIC_BASE_URL=${PUBLIC_BASE_URL}`);
+
+// Configuration problems that present as "calls just fail" with nothing obvious
+// in the logs. Each line names the symptom so a deploy can be diagnosed from the
+// boot output alone.
+if (!process.env.TWILIO_AUTH_TOKEN && process.env.SKIP_TWILIO_SIGNATURE_VALIDATION !== 'true') {
+  app.log.error('BOOT FATAL-ish: TWILIO_AUTH_TOKEN is not set and signature validation is not skipped — EVERY inbound call will be rejected before Ava speaks. Set TWILIO_AUTH_TOKEN in the environment.');
+}
+if (!/^https?:\/\//.test(PUBLIC_BASE_URL)) {
+  app.log.error({ PUBLIC_BASE_URL }, 'BOOT: PUBLIC_BASE_URL has no scheme — TwiML action and Play URLs will be invalid and calls will fail.');
+}
+if (PUBLIC_BASE_URL.includes('127.0.0.1') || PUBLIC_BASE_URL.includes('localhost')) {
+  app.log.warn({ PUBLIC_BASE_URL }, 'BOOT: PUBLIC_BASE_URL points at localhost — Twilio cannot reach this server, so audio and callbacks will fail.');
+}
+if (!process.env.DATA_DIR) {
+  app.log.error({ DATA_DIR }, 'BOOT: DATA_DIR is not set, so the lead database, firm configs and TTS cache live inside the build directory and are DESTROYED on every deploy. Attach a persistent volume and set DATA_DIR to its mount path.');
+}
+if (!ADMIN_API_KEY) {
+  app.log.warn('BOOT: ADMIN_API_KEY is not set — admin routes and firm-config updates from the dashboard will refuse to run.');
+}
+if (WEB_BASE_URL.includes('localhost')) {
+  app.log.warn({ WEB_BASE_URL }, 'BOOT: WEB_BASE_URL is still localhost — every "View Lead in Dashboard" link in the notification emails will be a dead link.');
+}
 app.log.info({
   RESEND_API_KEY_prefix:     RESEND_API_KEY     ? RESEND_API_KEY.slice(0, 4)     : '(unset)',
   RESEND_FROM_EMAIL,
@@ -4434,6 +4503,24 @@ app.log.info({
 }, 'BOOT ElevenLabs voice config');
 
 if (isMain) {
+  // Node exits the process on an unhandled rejection. This service is full of
+  // deliberately un-awaited work (notifications, webhooks, Twilio REST calls,
+  // TTS caching), so a single unlucky call could take down the phone line for
+  // every firm — and Railway's restart policy gives up after 10 crashes, which
+  // turns one bad call into an outage that stays down. Log and keep serving.
+  process.on('unhandledRejection', (reason) => {
+    app.log.error({ err: String(reason), stack: reason?.stack }, 'unhandledRejection — keeping the process alive');
+  });
+  process.on('uncaughtException', (err) => {
+    app.log.error({ err: String(err), stack: err?.stack }, 'uncaughtException — keeping the process alive');
+  });
+  for (const signal of ['SIGTERM', 'SIGINT']) {
+    process.on(signal, () => {
+      app.log.info({ signal }, 'shutting down — draining in-flight calls');
+      app.close().then(() => process.exit(0), () => process.exit(0));
+    });
+  }
+
   try {
     await app.listen({ port: PORT, host: '0.0.0.0' });
     app.log.info(`HTTP listening on http://127.0.0.1:${PORT}`);

@@ -48,3 +48,13 @@ streaming/data/db.json
 streaming/data/firms.json
 streaming/data/memory.json
 streaming/data/tts_cache.json
+
+# Archives and databases must never be committed: an archive of the working tree
+# smuggles .env past the rule above (ai-calling.zip carried live OpenAI and
+# ElevenLabs keys plus a caller's transcript into the repository's history).
+*.zip
+*.tar
+*.tar.gz
+*.db
+*.sqlite
+*.sqlite3
