@@ -16,6 +16,47 @@ function getClient() {
   return _client;
 }
 
+// ── Global write serialization ────────────────────────────────────────────────
+// This is one process talking to one local SQLite file, and SQLite allows a
+// single writer. Explicit write transactions issued concurrently collide with
+// SQLITE_BUSY, and a failed transaction can leave the connection unable to
+// commit anything afterwards ("cannot commit transaction - SQL statements in
+// progress"). Measured on this code before the fix: 40 simultaneous completed
+// calls produced 39 SQLITE_BUSY errors, 39 lost leads, and a connection that
+// then refused every later write for the life of the process. withCallLock does
+// not help — it is keyed per callSid, so it serializes turns within ONE call
+// while doing nothing between different callers.
+//
+// Every write goes through this queue. Writes here are small and short.
+let writeQueue = Promise.resolve();
+function withDbWrite(fn) {
+  const run = writeQueue.then(fn, fn);
+  writeQueue = run.then(() => {}, () => {});
+  return run;
+}
+
+const WRITE_RETRIES = 3;
+function isBusyError(err) {
+  return /SQLITE_BUSY|database is locked/i.test(String(err?.message || err));
+}
+
+// Serialized, with a short retry for the residual case of an external writer.
+async function serializedWrite(fn) {
+  return withDbWrite(async () => {
+    let lastErr;
+    for (let attempt = 0; attempt < WRITE_RETRIES; attempt++) {
+      try {
+        return await fn();
+      } catch (err) {
+        lastErr = err;
+        if (!isBusyError(err)) throw err;
+        await new Promise((r) => setTimeout(r, 50 * (attempt + 1)));
+      }
+    }
+    throw lastErr;
+  });
+}
+
 // ── Per-call async lock ───────────────────────────────────────────────────────
 // Serializes all DB writes for a given callSid so persistSessionArtifacts and
 // patchLead calls from concurrent Twilio webhooks never race for the writer lock.
@@ -105,7 +146,7 @@ async function _saveCalls(calls) {
       JSON.stringify(c.transcript || []),
     ],
   }));
-  await client.batch(stmts, 'write');
+  await serializedWrite(() => client.batch(stmts, 'write'));
 }
 
 async function _saveLeads(leads) {
@@ -143,7 +184,7 @@ async function _saveLeads(leads) {
       JSON.stringify(l.timeline   || []),
     ],
   }));
-  await client.batch(stmts, 'write');
+  await serializedWrite(() => client.batch(stmts, 'write'));
 }
 
 async function _saveSessions(sessions) {
@@ -163,7 +204,7 @@ async function _saveSessions(sessions) {
       session.updatedAt || nowIso(),
     ],
   }));
-  await client.batch(stmts, 'write');
+  await serializedWrite(() => client.batch(stmts, 'write'));
 }
 
 // ── Schema ────────────────────────────────────────────────────────────────────
@@ -359,7 +400,7 @@ export async function patchLead(id, updates) {
   const now = nowIso();
   const setClauses = [...entries.map(([k]) => `${k} = ?`), 'updatedAt = ?'].join(', ');
   const args = [...entries.map(([, v]) => v), now, id];
-  await getClient().execute({ sql: `UPDATE leads SET ${setClauses} WHERE id = ?`, args });
+  await serializedWrite(() => getClient().execute({ sql: `UPDATE leads SET ${setClauses} WHERE id = ?`, args }));
 }
 
 export async function loadSessions() {
@@ -396,17 +437,17 @@ export async function saveSession(callSid, session) {
 }
 
 export async function deleteSession(callSid) {
-  await getClient().execute({ sql: 'DELETE FROM sessions WHERE callSid = ?', args: [callSid] });
+  await serializedWrite(() => getClient().execute({ sql: 'DELETE FROM sessions WHERE callSid = ?', args: [callSid] }));
 }
 
 // ── Webhook logs ──────────────────────────────────────────────────────────────
 
 export async function createWebhookLog({ id, firmId, event, url, statusCode, attempts }) {
-  await getClient().execute({
+  await serializedWrite(() => getClient().execute({
     sql: `INSERT OR REPLACE INTO webhook_logs (id, firm_id, event, url, status_code, attempts, created_at)
           VALUES (?, ?, ?, ?, ?, ?, ?)`,
     args: [id, firmId, event, url, statusCode ?? null, attempts ?? 1, new Date().toISOString()],
-  });
+  }));
 }
 
 export async function getWebhookLogs(firmId, limit = 50) {
@@ -425,14 +466,20 @@ export async function getWebhookLogs(firmId, limit = 50) {
 
 export async function logEmailAttempt({ leadId, firmId, to, subject, status, resend_id, error }) {
   const id = `elog_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  await getClient().execute({
+  await serializedWrite(() => getClient().execute({
     sql: `INSERT INTO email_logs (id, leadId, firmId, "to", subject, status, resend_id, error, sentAt)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     args: [id, leadId || null, firmId || null, to, subject || null, status, resend_id || null, error || null, nowIso()],
-  });
+  }));
 }
 
-async function persistSessionArtifactsUnlocked(session, { assistantText, callerText, done }) {
+function persistSessionArtifactsUnlocked(session, opts) {
+  // The explicit write transaction is the part that collided: run it inside the
+  // global write queue like every other writer.
+  return serializedWrite(() => persistSessionArtifactsTx(session, opts));
+}
+
+async function persistSessionArtifactsTx(session, { assistantText, callerText, done }) {
   const client = getClient();
   const now = nowIso();
   const newEntries = [];
@@ -544,8 +591,13 @@ async function persistSessionArtifactsUnlocked(session, { assistantText, callerT
 
     await tx.commit();
   } catch (e) {
-    await tx.rollback();
+    // A rollback can itself throw when the transaction never opened cleanly, and
+    // an un-closed transaction is what left the connection unable to commit
+    // anything afterwards. Never let cleanup mask the original error.
+    await tx.rollback().catch(() => {});
     throw e;
+  } finally {
+    tx.close?.();
   }
 }
 

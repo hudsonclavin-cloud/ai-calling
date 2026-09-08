@@ -362,3 +362,44 @@ test('call-status files a partial lead when the caller hangs up mid-intake', asy
   assert.ok(call, 'the call is still recorded');
   assert.ok(call.leadId, 'and it is linked to a lead the attorney can see');
 });
+
+test('simultaneous completed calls all persist their lead', async () => {
+  // Before the write path was serialized, this lost almost everything: SQLite
+  // allows one writer, withCallLock is keyed per callSid so it serializes turns
+  // within a call and nothing between callers, and the explicit write
+  // transactions collided. Measured at 40 concurrent calls: 39 SQLITE_BUSY
+  // errors, 39 leads lost, and a connection that then refused every later write
+  // for the life of the process — a firm with two phone lines losing leads.
+  const N = 15;
+  const made = Array.from({ length: N }, (_, i) => ({
+    callSid: `CATEST_CONC_${String(i).padStart(3, '0')}`,
+    leadId: `lead_conc_${i}`,
+    session: {
+      callSid: `CATEST_CONC_${String(i).padStart(3, '0')}`,
+      firmId: 'firm_default',
+      fromPhone: `+1704555${String(2000 + i)}`,
+      callId: `call_conc_${i}`,
+      leadId: `lead_conc_${i}`,
+      collected: { full_name: `Caller ${i}`, callback_number: `+1704555${String(2000 + i)}`, practice_area: 'Personal Injury', case_summary: 'Rear-ended on Tuesday' },
+      transcript: [], callerType: 'new', isUrgent: false, done: true,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    },
+  }));
+
+  const errors = [];
+  await Promise.all(made.map(async (m) => {
+    try {
+      await db.saveSession(m.callSid, m.session);
+      await db.persistSessionArtifacts(m.session, { assistantText: 'thanks', callerText: 'hello', done: true });
+      await db.patchLead(m.leadId, { status: 'ready_for_review' });
+    } catch (err) { errors.push(String(err?.message || err)); }
+  }));
+
+  assert.deepEqual(errors, [], 'no write errors under concurrency');
+  const found = await Promise.all(made.map((m) => db.getLeadById(m.leadId)));
+  assert.equal(found.filter(Boolean).length, N, 'every concurrent call kept its lead');
+
+  // And the connection is still usable afterwards.
+  await db.saveSession('CATEST_CONC_AFTER', { callSid: 'CATEST_CONC_AFTER', collected: {}, turnCount: 1 });
+  assert.equal((await db.getSession('CATEST_CONC_AFTER')).turnCount, 1, 'writes still work after the burst');
+});
