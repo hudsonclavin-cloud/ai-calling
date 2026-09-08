@@ -5,16 +5,151 @@
 ---
 
 ## Open Problems (not yet fixed)
-- **Stripe not activated** — billing is fully coded but blocked on Hudson's bank account
-- **Custom domain** — tryava.ai or meetava.ai not yet configured
-- **Confirmation email reliability** — was on the known problems list; no explicit fix was ever committed
-- **Non-admin sign-out** — `app-shell.tsx` uses `<Link href="/login">` for non-admin clients instead of `signOut()`, which may not fully terminate the NextAuth session
-- **Ava voice naturalness** — SSML enrichment + voice settings tuned (2026-03-26); real-world Twilio call testing still needed to confirm audible improvement
-- **Tone setting** — toneInstruction bug fixed; firms can now actually use warm/professional/friendly
+- **No per-firm client authentication** — `?firmId=` in the URL is the only thing standing between a
+  visitor and a firm's leads, and firm ids are derived from the business name (`firm_` + slug), so they
+  are guessable. Every `/api/leads`, `/api/calls` and `/api/analytics` read is scoped by firmId but not
+  authenticated by it. Firm-config *writes* and the admin routes are now behind the admin key, so
+  self-service settings editing is admin-only until a real client credential exists. **This is the
+  largest remaining hole and the next thing to build**: issue each firm a random secret at creation,
+  require it on every `/api/*` call for that firm, and put it in the dashboard link you send clients.
+- **DATA_DIR must point at a Railway volume** — if it does not, the lead database, the per-firm configs
+  and the TTS cache all live in the build directory and are destroyed on every deploy. The server now
+  logs this loudly at boot. Verify it before trusting anything else.
+- **ROTATE the OpenAI and ElevenLabs keys** — `ai-calling.zip` was tracked and contained
+  `streaming/.env` with live keys; `streaming/memory.db` contained a real caller's phone number and
+  transcript. Both are untracked now and archives/databases are gitignored, but they remain in the
+  repository's git history, so the keys must be considered compromised.
+- **Stripe not activated** — billing is coded but blocked on the bank account. Note that checkout does
+  not propagate firmId to the Subscription, so `subscription.updated` cannot match a firm; fix before
+  activating or a paying customer's line auto-suspends when their trial ends.
+- **Twilio Gather architecture** — the request/response design has a per-turn floor of roughly 1.5-2s
+  and cannot capture speech while Ava is "thinking". The fixes below remove the artificial latency on
+  top of that floor, but going materially below it means Media Streams or ConversationRelay.
+- **Custom domain** — tryava.ai / meetava.ai not configured.
 
 ---
 
 ## Session Log (newest first)
+
+### 2026-09-08 — Full-system audit and repair: 18 read-only lenses, 303 findings, 10 fix commits
+**Why:** a year of fixes had not converged; calls still failed in ways the logs did not explain.
+Eighteen independent read-only agents audited the call path, controller, prompt/parser contract, TTS,
+recording, database, notifications, dashboard, landing page, deployment, tests, security, concurrency,
+Twilio semantics, latency, git history, a caller walkthrough, and the architecture itself. Every fix
+below was reproduced before and after the change.
+
+**The defect that explains "she doesn't listen":** on the very first turn `composeSpeakText` spoke only
+the greeting while the controller had already recorded the name question as asked. Ava never asked for
+the caller's name, attributed their first answer to the wrong field, and the `askedQuestionIds` guard
+then blocked her (and the model) from ever asking for it again — so she asked for a phone number first,
+discarded the name when volunteered, jumped to "anything else?" with everything still empty, and only
+circled back to the name at the end, where she looped. The same spoken-versus-recorded split existed on
+later turns: Ava spoke the model's question but recorded the deterministic one, so the caller's answer
+was graded against a field they were never asked about.
+
+**Conversation**
+- First turn now speaks the question it records. The shipped opening is a greeting again, not the IVR
+  monologue the log claimed had been removed in March.
+- The recorded question follows the spoken words, accepting the model's question id when it names a
+  real field. The low-confidence clarification and the divergence question were being computed,
+  recorded and then never spoken; they are now spoken.
+- A still-empty core field is re-asked once, rephrased, instead of being dropped for "anything else?".
+- The model may ask again for a field that is genuinely still missing.
+- A name given while Ava is asking for a number is captured instead of discarded.
+- `"My name's Maria"` (the contraction people actually say) is extracted; accented and non-Latin names
+  are accepted instead of producing a nameless lead; `"that's everything"` is no longer stored as a name.
+- Urgency detection no longer deletes an already-captured summary, so the most urgent call of the day
+  stops arriving with an empty one.
+- A blocked caller ID no longer matches every other anonymous caller, so Ava stops greeting strangers
+  by a previous caller's name.
+- Confirming the number you are calling from now counts as giving a callback number.
+
+**Hanging up**
+- `repromptCount` was only ever incremented: two pauses anywhere in a call ended it. Speaking clears it,
+  and the allowance is 3, because an empty SpeechResult also means Twilio could not transcribe.
+- Rate limiting counted webhook requests, not calls — a normal 8-turn intake spent 8 units of quota and
+  the per-IP key is Twilio's shared egress address, not a caller. Only new calls are counted, and a call
+  in progress can never be rejected.
+- `detectEarlyExit` treated "I'm done with my husband, I want a divorce" as a goodbye.
+- When the model wanted to close but a required field was missing, Ava spoke its goodbye and then held
+  the line open in silence.
+- An exception in `/twiml` hung up; it now speaks and keeps listening. Provisioned numbers get a
+  VoiceFallbackUrl and there is a dependency-free `/twiml-fallback` behind it.
+- `/twiml-result` returned an HTTP 500 on a rejected controller, and ended the call outright when its
+  in-memory pending entry was missing (any redeploy). Both now recover.
+
+**Voice**
+- `speakText` carried SSML, so `<break>` tags counted against the character budget and truncated normal
+  replies mid-sentence — dropping the question the caller needed to hear — and the tags were stored in
+  transcripts, replayed to the model as history and shown to the attorney. Markup is applied only at the
+  ElevenLabs call now.
+- The TTS prefetch synthesized a different string than the one spoken, so it missed on nearly every turn
+  and the caller waited on a second, serial synthesis. Prewarm warmed strings Ava never says.
+- An empty `ELEVEN_*` variable set stability, similarity, style and speed to zero. Blank now means unset.
+- `<Say>` fallbacks used Twilio's default male voice; the boot log reported settings that were not the
+  ones being sent; `/tts-live` URLs did not change when the voice did, so Twilio replayed the old voice.
+- An ElevenLabs outage produced dead air; consecutive failures now fall back to `<Say>`. Lost cached
+  audio regenerates from self-authenticating fallback text instead of 404-ing into silence.
+- `stripLeadingProhibitedAck` decapitated real sentences: "Great question —" became "Question —".
+
+**Data**
+- **Concurrent calls were losing almost every lead.** 40 simultaneous completed calls produced 39
+  SQLITE_BUSY errors, 39 lost leads, and a connection that then refused every later write for the life
+  of the process. Writes are now serialized through one queue; the same test loses nothing.
+- Whole-table session writes let two callers revert each other's state; single-row get/save now.
+- Lead identity was a hash of firm + caller phone, so a repeat caller overwrote their own earlier lead
+  and merged both transcripts. Leads are per call.
+- A silent call was stamped intake_complete and emailed as a lead; `/call-status` then re-promoted the
+  ones the reprompt path had deliberately filed as partial.
+
+**Email**
+- The `notified` latch was set after the session row was written, so it never persisted and the grace
+  window could send the attorney a second copy of the same lead.
+- The early-exit path saved a completed lead and notified nobody.
+- The reprompt path awaited the email inside the Twilio webhook, where Resend's retries can outlast
+  Twilio's budget and drop the call.
+- Lead emails linked to the dashboard without firmId, bouncing the attorney to the admin login.
+
+**Recording**
+- Recording never started: `Record` and `RecordingStatusCallback` were sent to the Call *update*
+  endpoint, which has no such parameters. Twilio ignores unknown fields and returns 200, and the
+  response was never inspected — which is why a year of debugging produced no signal. Recording now uses
+  the Recordings sub-resource with a retry, and every Twilio response is checked.
+- The playback proxy ignored Range requests, so recordings would not play in Safari or on iOS.
+
+**Dashboard and website**
+- There was no CORS anywhere, and the dashboard and API are separate services, so every browser-side
+  fetch was blocked: leads, calls and dashboard lists sat empty and settings saves did nothing, while
+  server-rendered pages worked — which is why it looked intermittent.
+- The settings page loaded and saved `firm_default` for every client, so a firm editing its settings was
+  rewriting the fallback config that unknown firmIds inherit.
+- Every tone selector offered values that were not `TONE_PRESETS` keys, so the setting did nothing.
+- `getLeadById` and `patchLead` dropped firmId, and the backend treated it as optional.
+- The landing page's main call to action dialled a 555 number, which cannot ring.
+
+**Security**
+- Unauthenticated `POST /api/firms/:id` let anyone redirect a firm's lead emails and webhooks.
+- `requireAdminKey` failed *open* when `ADMIN_API_KEY` was unset.
+- The admin key was shipped to browsers via `NEXT_PUBLIC_ADMIN_KEY`; privileged calls now go through a
+  same-origin server proxy that holds it.
+- Closed: the open email relay, SSRF with read-back, unauthenticated number purchase and Stripe portal,
+  path traversal in firm ids and in the audio cache key, and unauthenticated ElevenLabs synthesis.
+- A new firm inherited the default firm's notification email and webhook.
+
+**Deployment**
+- A trailing slash on `PUBLIC_BASE_URL` made every TwiML URL a 404. Signature rejection answered Twilio
+  with JSON instead of speech. There were no `unhandledRejection`/`uncaughtException` handlers, so one
+  bad call could kill the process and Railway's retry limit could take the line down for good.
+- Boot now names each misconfiguration and the symptom it causes. `.env.example` documents all 30
+  variables (it documented 12); `web/.env.example` added.
+
+**Tests:** 44 → 98, all passing. Added `test/call-flow.test.mjs` (18 tests driving the server the way
+Twilio does — 11 of them fail against the pre-fix commit) and `test/llm-contract.test.mjs` (the first
+tests in this repo to exercise the model path at all; the discarded-summary defect was found by them,
+not by reading). `npm test` no longer runs a credentials-dependent script as if it were a test suite.
+
+**Still to do, highest first:** per-firm client authentication; confirm DATA_DIR is a volume; rotate the
+leaked keys; the simulation harness still tolerates the desync it was adapted to and gates nothing in CI.
 
 ### 2026-07-06 — Dashboard `/api/dashboard-leads` 502: harden the data path
 **Symptom:** `/dashboard` HTML loaded but clicking Open returned a 502 from the Railway edge with NO application logs. Local reproduction returned 200 — but only because the local DB was empty; the real-row path was never exercised.
