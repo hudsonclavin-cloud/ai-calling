@@ -17,7 +17,15 @@ import { auth } from "@/auth";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? process.env.API_BASE ?? "http://127.0.0.1:5050";
 
-const ALLOWED_PREFIXES = ["api/firms", "api/admin", "api/dashboard-leads", "api/analytics", "api/webhook-logs"];
+const ALLOWED_PREFIXES = [
+  "api/firms",
+  "api/admin",
+  "api/dashboard-leads",
+  "api/analytics",
+  "api/webhook-logs",
+  "api/test-webhook",
+  "api/billing/portal",
+];
 
 function isAllowed(pathParts: string[]) {
   const joined = pathParts.join("/");

@@ -3152,6 +3152,9 @@ app.get('/favicon.ico', async (_, reply) => reply.code(204).send());
 
 // POST /test-email — sends a dummy lead email to verify Resend is working
 app.post('/test-email', async (req, reply) => {
+  // Sends to an arbitrary address from the firm's verified sender domain, which
+  // is an open relay for anyone who can reach this service.
+  if (requireAdminKey(req, reply) === false) return;
   const to = String(req.body?.to || req.query?.to || '').trim();
   if (!to) return reply.code(400).send({ error: 'Missing ?to= query param or body.to' });
   if (!RESEND_API_KEY) return reply.code(503).send({ error: 'RESEND_API_KEY not set' });
@@ -3255,6 +3258,7 @@ app.post('/api/firms/:id', async (req, reply) => {
 });
 
 app.get('/api/firms/:id/phone/search', async (req, reply) => {
+  if (requireAdminKey(req, reply) === false) return;
   const id = String(req.params.id || '').trim();
   const firm = await loadFirmConfig(id);
   if (firm.id !== id) return reply.code(404).send({ error: 'Firm not found' });
@@ -3287,6 +3291,8 @@ app.get('/api/firms/:id/phone/search', async (req, reply) => {
 });
 
 app.post('/api/firms/:id/phone/purchase', async (req, reply) => {
+  // Buys a real phone number on the owner's Twilio account.
+  if (requireAdminKey(req, reply) === false) return;
   const id = String(req.params.id || '').trim();
   const firm = await loadFirmConfig(id);
   if (firm.id !== id) return reply.code(404).send({ error: 'Firm not found' });
@@ -3453,6 +3459,10 @@ app.get('/dashboard', async (req, reply) => {
 });
 
 app.post('/api/next-step', async (req, reply) => {
+  // Runs the full intake controller: creates sessions and leads, and the text it
+  // is handed ends up inside the "New lead" email sent from the firm's own
+  // address. It is a testing hook, not a public endpoint.
+  if (requireAdminKey(req, reply) === false) return;
   const firmId = String(req.body?.firmId || '').trim();
   const callSid = String(req.body?.callSid || '').trim();
   const fromPhone = String(req.body?.fromPhone || '').trim();
@@ -3472,7 +3482,10 @@ app.get('/api/voice-preview', async (req, reply) => {
   const firmConfig = await loadFirmConfig(firmId);
   const aName = firmConfig.ava_name || 'Ava';
   const firmName = firmConfig.name || 'your firm';
-  const text = String(req.query?.text || `Hi, thanks for calling ${firmName}. I'm ${aName}, your virtual receptionist. How can I help you today?`).slice(0, 200);
+  // Speak the firm's own configured opening. Accepting caller-supplied text made
+  // this an unauthenticated text-to-speech oracle billed to the owner's account,
+  // and it previewed a sentence callers never actually hear.
+  const text = String(firmConfig.opening || `Hi, thanks for calling ${firmName}. I'm ${aName}, your virtual receptionist.`).slice(0, 200);
   const key = await synthesizeToDisk(text);
   if (!key) return reply.code(503).send({ error: 'TTS unavailable' });
   const audio = await fs.readFile(path.join(AUDIO_DIR, `${key}.mp3`));
@@ -3482,21 +3495,15 @@ app.get('/api/voice-preview', async (req, reply) => {
 });
 
 app.get('/api/tts', async (req, reply) => {
+  // Cache keys are sha1 hex. Interpolating an unvalidated key into a path let a
+  // crafted key read files outside the audio directory. The old ?text= branch
+  // also let anyone synthesise arbitrary text on the owner's ElevenLabs account;
+  // TwiML only ever references cached keys, so it is gone.
   const key = String(req.query?.key || '').trim();
-  const text = String(req.query?.text || '').trim();
+  if (!/^[a-f0-9]{40}$/.test(key)) return reply.code(400).send({ error: 'valid key is required' });
 
-  if (key) {
-    const audio = await fs.readFile(path.join(AUDIO_DIR, `${key}.mp3`)).catch(() => null);
-    if (!audio) return reply.code(404).send({ error: 'audio not found' });
-    reply.header('Content-Type', 'audio/mpeg');
-    reply.header('Cache-Control', 'public, max-age=31536000, immutable');
-    return reply.send(audio);
-  }
-
-  if (!text) return reply.code(400).send({ error: 'text or key is required' });
-  const generated = await synthesizeToDisk(text);
-  if (!generated) return reply.code(502).send({ error: 'tts unavailable' });
-  const audio = await fs.readFile(path.join(AUDIO_DIR, `${generated}.mp3`));
+  const audio = await fs.readFile(path.join(AUDIO_DIR, `${key}.mp3`)).catch(() => null);
+  if (!audio) return reply.code(404).send({ error: 'audio not found' });
   reply.header('Content-Type', 'audio/mpeg');
   reply.header('Cache-Control', 'public, max-age=31536000, immutable');
   return reply.send(audio);
@@ -3508,6 +3515,14 @@ app.get('/api/tts', async (req, reply) => {
 app.get('/tts-live', async (req, reply) => {
   const text = String(req.query?.text || '').trim();
   if (!text) return reply.code(400).send('text required');
+  // Twilio fetches this URL without credentials, so it cannot be authenticated —
+  // but it does synthesise arbitrary text on the owner's ElevenLabs account.
+  // Bound it per source address. A real call fetches this at most once per turn.
+  const ttsIp = req.headers?.['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || 'unknown';
+  if (!checkRateLimit(`ttslive:${ttsIp}`, Number(process.env.RATE_LIMIT_TTS_PER_MIN || 120), 60_000)) {
+    app.log.warn({ ttsIp }, 'tts-live rate limit hit');
+    return reply.code(429).send('too many requests');
+  }
   if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) return reply.code(503).send('TTS unavailable');
 
   const safeText = truncateForSpeech(text, MAX_TTS_CHARS);
@@ -4221,6 +4236,7 @@ app.post('/api/billing/checkout', async (req, reply) => {
 
 // POST /api/billing/portal — opens Stripe Customer Portal for a firm
 app.post('/api/billing/portal', async (req, reply) => {
+  if (requireAdminKey(req, reply) === false) return;
   if (!stripe) return reply.code(503).send({ error: 'Billing not configured' });
   const firmId = String(req.body?.firmId || '').trim();
   if (!firmId) return reply.code(400).send({ error: 'firmId required' });
@@ -4358,6 +4374,9 @@ app.get('/api/webhook-logs/:firmId', async (req, reply) => {
 });
 
 app.post('/api/test-webhook', async (req, reply) => {
+  // Fetches a firm-controlled URL and returns the response body — server-side
+  // request forgery with read-back if anyone can call it.
+  if (requireAdminKey(req, reply) === false) return;
   const firmId = String(req.body?.firmId || '').trim();
   if (!firmId) return reply.code(400).send({ error: 'firmId required' });
   const firmConfig = await loadFirmConfig(firmId);
@@ -4392,6 +4411,12 @@ app.post('/api/test-webhook', async (req, reply) => {
 app.post('/api/resend-instructions', async (req, reply) => {
   const firmId = String(req.body?.firmId || '').trim();
   if (!firmId) return reply.code(400).send({ error: 'firmId required' });
+  // Reachable straight after signup, before there is any session to check, so it
+  // stays open — but it may only ever mail the firm's own stored address, and
+  // not on demand in a loop.
+  if (!checkRateLimit(`resend-instructions:${firmId}`, 3, 3_600_000)) {
+    return reply.code(429).send({ error: 'Too many requests — try again later' });
+  }
   const firm = await loadFirmConfig(firmId);
   if (!firm.notification_email) return reply.code(400).send({ error: 'No notification email on file' });
   if (!RESEND_API_KEY) return reply.code(503).send({ error: 'Email not configured' });

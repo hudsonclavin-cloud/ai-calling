@@ -154,12 +154,16 @@ export async function getAnalytics(firmId: string, days = 30): Promise<Analytics
   }
 }
 
+// Fetches a firm-controlled URL server-side, so the backend requires the admin
+// key: go through the same-origin proxy that holds it.
 export async function testWebhook(firmId: string): Promise<{ ok: boolean; status: number; body: string }> {
-  return fetchJson("/api/test-webhook", { method: "POST", body: JSON.stringify({ firmId }) });
+  return fetchJsonViaAdminProxy("/api/test-webhook", { method: "POST", body: JSON.stringify({ firmId }) });
 }
 
+// Opening a firm's Stripe portal lets the holder cancel that firm's
+// subscription, so it is admin-gated on the backend.
 export async function createBillingPortal(firmId: string): Promise<string> {
-  const payload = await fetchJson<{ url: string }>("/api/billing/portal", {
+  const payload = await fetchJsonViaAdminProxy<{ url: string }>("/api/billing/portal", {
     method: "POST",
     body: JSON.stringify({ firmId }),
   });

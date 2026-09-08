@@ -50,7 +50,9 @@ export function FirmEditForm({
     setPhoneResults([]);
     setSelectedNumber(null);
     try {
-      const resp = await fetch(`${apiBase}/api/firms/${form.id}/phone/search?areaCode=${encodeURIComponent(areaCode)}`);
+      // Searching and buying numbers spends money on the owner's Twilio account,
+      // so both are admin-gated: reach them through the same-origin proxy.
+      const resp = await fetch(`/api/backend/api/firms/${form.id}/phone/search?areaCode=${encodeURIComponent(areaCode)}`);
       if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || `Search failed (${resp.status})`);
       const payload = await resp.json();
       setPhoneResults(payload.data ?? []);
@@ -67,7 +69,7 @@ export function FirmEditForm({
     setPhonePurchasing(true);
     setPhoneError(null);
     try {
-      const resp = await fetch(`${apiBase}/api/firms/${form.id}/phone/purchase`, {
+      const resp = await fetch(`/api/backend/api/firms/${form.id}/phone/purchase`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phoneNumber: selectedNumber }),
