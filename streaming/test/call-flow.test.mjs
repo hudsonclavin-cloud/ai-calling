@@ -403,3 +403,36 @@ test('simultaneous completed calls all persist their lead', async () => {
   await db.saveSession('CATEST_CONC_AFTER', { callSid: 'CATEST_CONC_AFTER', collected: {}, turnCount: 1 });
   assert.equal((await db.getSession('CATEST_CONC_AFTER')).turnCount, 1, 'writes still work after the burst');
 });
+
+test('an introduction that carries the story keeps both the name and the story', async () => {
+  const callSid = 'CATEST_NAME_AND_STORY';
+  const from = '+17045550555';
+  await turn(callSid, null, { from });
+  await turn(callSid, 'Hi, my name is José Ramírez and I was rear-ended on I-95 last Tuesday', { from });
+
+  const session = await db.getSession(callSid);
+  // The name capture runs past the name into the story, so this used to yield a
+  // candidate with too many tokens and be dropped entirely — a lead with no name.
+  assert.equal(session.collected.full_name, 'José Ramírez', 'accented name is kept');
+  assert.match(session.collected.case_summary, /rear-ended on I-95 last Tuesday/, 'and the reason for the call is not thrown away');
+  assert.equal(session.collected.practice_area, 'Personal Injury');
+  // Introducing yourself is not correcting anything.
+  assert.notEqual(session.hadCorrection, true, 'an introduction is not a correction');
+});
+
+test('a sign-off is not a name, not a summary, and not a correction', async () => {
+  const callSid = 'CATEST_SIGNOFF';
+  const from = '+17045550666';
+  await turn(callSid, null, { from });
+  await turn(callSid, 'My name is Dana Whitfield', { from });
+  await turn(callSid, 'seven zero four, five five five, zero one two three', { from });
+  const before = await db.getSession(callSid);
+  const xml = await turn(callSid, "no that's everything, thanks", { from });
+
+  const session = await db.getSession(callSid);
+  assert.equal(session.collected.full_name, 'Dana Whitfield', 'the sign-off did not overwrite the name');
+  assert.notEqual(session.collected.case_summary, "no that's everything, thanks", 'and was not filed as the case summary');
+  assert.notEqual(session.hadCorrection, true, 'and did not read as a correction');
+  assert.ok(!/clarifying/i.test(spokenText(xml)), 'so the closing does not thank them for clarifying');
+  assert.ok(before, 'sanity: the call was in progress');
+});

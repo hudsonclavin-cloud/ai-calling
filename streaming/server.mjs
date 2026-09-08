@@ -91,8 +91,11 @@ const REQUIRED_FIELDS_DEFAULT = ['full_name', 'callback_number', 'practice_area'
 // ask before Ava moves on; everything else may be dropped silently.
 const CORE_INTAKE_FIELDS = ['full_name', 'callback_number', 'case_summary'];
 const MAX_ASKS_PER_FIELD = 2;
+// These are spoken after an acknowledgment ("Got it." / "Ah, got it —"), so they
+// must not open with one of their own: "Ah, got it — Sorry — I don't think I
+// caught your name" is two apologies stacked into one breath.
 const REASK_QUESTIONS = {
-  full_name: "Sorry — I don't think I caught your name. Who am I speaking with?",
+  full_name: "I don't think I caught your name — who am I speaking with?",
   callback_number: "I still need a good callback number — what's the best one for you?",
   case_summary: "And briefly, what happened, and roughly when?",
   practice_area: "What kind of legal matter is this about?",
@@ -895,7 +898,10 @@ function isAffirmative(text) {
   return false;
 }
 
-function extractStructuredDeterministic(userText, expectedField = '') {
+// `trusted` collects fields this function deliberately validated for the field
+// they are being stored as, so mergeExtracted does not re-judge them with a rule
+// meant for looser guesses.
+function extractStructuredDeterministic(userText, expectedField = '', trusted = new Set()) {
   const text = String(userText || '').trim();
   if (!text) return {};
 
@@ -911,11 +917,14 @@ function extractStructuredDeterministic(userText, expectedField = '') {
   // "my name's Maria Gonzalez" and "the name's Dave" are the commonest spoken
   // forms and the contraction was missing, so those names were never extracted.
   const nameMatch = text.match(/(?:my name'?s|my name is|the name'?s|this is|i(?:'|’)?m|i am|call me)\s+([\p{L}.'\-\s]{2,})/iu);
-  const nameCandidate = nameMatch ? nameMatch[1].trim() : (expectedField === 'full_name' ? text : '');
+  // Trim ONLY the capture that follows an explicit name statement, where a name
+  // is guaranteed to be what comes next. Trimming a bare utterance would coin a
+  // name out of ordinary speech ("I was in a car accident" -> "I was in").
+  const nameCandidate = nameMatch ? trimNameCandidate(nameMatch[1]) : (expectedField === 'full_name' ? text : '');
   if (nameCandidate && isLikelyName(nameCandidate, text, expectedField)) extracted.full_name = nameCandidate;
 
   const lower = text.toLowerCase();
-  if (lower.includes('injury') || lower.includes('accident')) extracted.practice_area = 'Personal Injury';
+  if (lower.includes('injury') || lower.includes('accident') || lower.includes('rear-end') || lower.includes('rear end') || lower.includes('crash') || lower.includes('collision') || lower.includes('slip and fall')) extracted.practice_area = 'Personal Injury';
   else if (lower.includes('divorce') || lower.includes('custody') || lower.includes('family')) extracted.practice_area = 'Family Law';
   else if (lower.includes('employment') || lower.includes('termination') || lower.includes('harassment')) extracted.practice_area = 'Employment';
   else if (lower.includes('immigration') || lower.includes('visa') || lower.includes('deportation')) extracted.practice_area = 'Immigration';
@@ -926,7 +935,26 @@ function extractStructuredDeterministic(userText, expectedField = '') {
   // "I'm …" prefix match — "I'm scared, my husband hit me" is a distress summary, not a
   // name statement, and must still be captured (Fix A/E). A spoken phone number (word or
   // mixed form) must not leak into case_summary just because it reads like a phrase.
-  if (!extracted.full_name && !phoneMatch && !extractPhoneCandidate(text) && isLikelySummary(text, expectedField)) extracted.case_summary = text;
+  if (!extracted.full_name && !phoneMatch && !extractPhoneCandidate(text) && isLikelySummary(text, expectedField)) {
+    extracted.case_summary = text;
+  } else if (extracted.full_name && nameMatch && !phoneMatch && !extractPhoneCandidate(text)) {
+    // "Hi, my name is Maria Gonzalez and I was rear-ended on I-95 last Tuesday"
+    // is one of the commonest openings there is. Capturing only the name threw
+    // the whole reason for the call away, and Ava then asked what happened as if
+    // she had not been told.
+    // Slice after the NAME, not after the regex match: the capture is greedy over
+    // letters and hyphens, so it runs well past the name ("José Ramírez and I was
+    // rear-ended on I-") and slicing there leaves a fragment.
+    const nameAt = text.toLowerCase().indexOf(extracted.full_name.toLowerCase());
+    const afterName = nameAt < 0 ? '' : text
+      .slice(nameAt + extracted.full_name.length)
+      .replace(/^[\s,.;:-]*(?:and|but|because)?\s*/i, '')
+      .trim();
+    if (afterName && isLikelySummary(afterName, 'case_summary')) {
+      extracted.case_summary = afterName;
+      trusted.add('case_summary');
+    }
+  }
   return extracted;
 }
 
@@ -990,6 +1018,11 @@ function classifyFillerContext(userText) {
   if (detectUrgency(text) || /\b(hit me|domestic violence|protective order|restraining order|afraid|scared|terrified|hospital|serious accident|bad accident|severe injury|badly hurt|arrested|in jail)\b/.test(lower)) {
     return 'urgent_or_distressed';
   }
+  // "No, that's everything, thanks" matches the correction pattern below on its
+  // first two words, so a polite sign-off was being treated as the caller
+  // correcting Ava: she answered with "Ah, got it —" and then closed the call
+  // with "Thanks for clarifying that — I've got the updated details."
+  if (SIGN_OFF_PHRASE.test(text)) return 'neutral';
   if (/^(no[,.\s]+(?:that'?s|its|it's|the|my)|actually\b|that'?s not right\b|wrong number\b|i said\b|not that\b|different\b)/i.test(text)) {
     return 'correction';
   }
@@ -1114,7 +1147,7 @@ function classifyNameCandidate(candidate, { sourceText = '', expectedField = '',
   // Sign-offs and closers. "That's everything", "nothing else" and "that's all"
   // are name-shaped by every other rule here and were being stored as the
   // caller's full name.
-  if (/^(that'?s (everything|all|it)|nothing else|no that'?s it|all good|we'?re good|that is all|i think so|not really|no idea)$/i.test(v)) {
+  if (SIGN_OFF_PHRASE.test(v) || /^(that is all|i think so|not really|no idea)$/i.test(v)) {
     return { accepted: false, reason: 'sign_off' };
   }
   // Any state / incident word disqualifies the whole candidate.
@@ -1127,9 +1160,25 @@ function classifyNameCandidate(candidate, { sourceText = '', expectedField = '',
   return { accepted: true, reason: 'name' };
 }
 
+// "My name is Maria Gonzalez and I was rear-ended on I-95 last Tuesday" is how
+// people actually answer. The capture runs on past the name into the story, and
+// the result was then rejected for having too many tokens — so the commonest
+// possible phrasing produced a lead with NO NAME. Cut at the first connector and
+// cap the length.
+const NAME_TAIL_BOUNDARY = /\s+(?:and|but|because|so|then|who|which|that|i|we|my|our|the|a|an|calling|from|about|regarding|here)\b/i;
+function trimNameCandidate(raw) {
+  let v = String(raw || '').trim().split(NAME_TAIL_BOUNDARY)[0].trim();
+  const words = v.split(/\s+/).filter(Boolean);
+  if (words.length > 4) v = words.slice(0, 4).join(' ');
+  return v;
+}
+
 function isLikelyName(value, sourceText = '', expectedField = '') {
   return classifyNameCandidate(value, { sourceText, expectedField }).accepted;
 }
+
+// Closers a caller uses to say they are finished. Never a name, never a summary.
+const SIGN_OFF_PHRASE = /^\s*(no[,\s]+)?(that'?s|that is|thats)\s+(everything|all|it)\b|^\s*nothing (else|more)\b|^\s*(that'?s|that is) about it\b|^\s*(i think that'?s|i think that is) (everything|all|it)\b|^\s*(no|nope)[,\s]+(thanks|thank you)\b|^\s*all good\b|^\s*we'?re good\b/i;
 
 // Explicit name-correction intent (Fix A) — utterance-driven, lets a caller replace
 // a previously captured name ("no, my name is Gregory Tan" / "actually it's Sean").
@@ -1163,6 +1212,9 @@ function isLikelySummary(value, expectedField = '', { fromModel = false } = {}) 
   // so Ava still asks "what happened" and captures the real reason for the call.
   if (isCallerQuestion(v)) return false;
   if (detectRefusal(v)) return false;
+  // Nor is a sign-off. "No that's everything, thanks" clears the three-word bar
+  // on a summary turn and was being handed to the attorney as the case summary.
+  if (SIGN_OFF_PHRASE.test(v)) return false;
   const words = v.split(/\s+/).filter(Boolean);
   if (expectedField === 'case_summary' || fromModel) {
     if (words.length < 3) return false;
@@ -1181,26 +1233,27 @@ function isLikelySummary(value, expectedField = '', { fromModel = false } = {}) 
 // Differs from extractStructuredDeterministic in two ways:
 //  1. Captures case_summary even when name/phone are also present
 //  2. Lowers the case_summary word threshold to 15 words
-function extractAllFieldsFromLongResponse(text, expectedField = '') {
+function extractAllFieldsFromLongResponse(text, expectedField = '', trusted = new Set()) {
   const words = String(text || '').trim().split(/\s+/).filter(Boolean);
-  if (words.length <= 100) return extractStructuredDeterministic(text, expectedField);
+  if (words.length <= 100) return extractStructuredDeterministic(text, expectedField, trusted);
 
   const extracted = {};
   const phoneMatch = text.match(/(\+?\d[\d\s().-]{8,}\d)/);
   if (phoneMatch) extracted.callback_number = normalizePhone(phoneMatch[1]);
 
   const nameMatch = text.match(/(?:my name'?s|my name is|the name'?s|this is|i(?:'|’)?m|i am|call me)\s+([\p{L}.'\-\s]{2,})/iu);
-  if (nameMatch && isLikelyName(nameMatch[1].trim(), text, expectedField)) extracted.full_name = nameMatch[1].trim();
+  const longName = nameMatch ? trimNameCandidate(nameMatch[1]) : '';
+  if (longName && isLikelyName(longName, text, expectedField)) extracted.full_name = longName;
 
   const lower = text.toLowerCase();
-  if (lower.includes('injury') || lower.includes('accident')) extracted.practice_area = 'Personal Injury';
+  if (lower.includes('injury') || lower.includes('accident') || lower.includes('rear-end') || lower.includes('rear end') || lower.includes('crash') || lower.includes('collision') || lower.includes('slip and fall')) extracted.practice_area = 'Personal Injury';
   else if (lower.includes('divorce') || lower.includes('custody') || lower.includes('family')) extracted.practice_area = 'Family Law';
   else if (lower.includes('employment') || lower.includes('termination') || lower.includes('harassment')) extracted.practice_area = 'Employment';
   else if (lower.includes('immigration') || lower.includes('visa') || lower.includes('deportation')) extracted.practice_area = 'Immigration';
   else if (lower.includes('criminal') || lower.includes('arrested') || lower.includes('charged')) extracted.practice_area = 'Criminal Defense';
 
   // Capture full text as case_summary regardless of name/phone presence
-  if (words.length >= 15) extracted.case_summary = text;
+  if (words.length >= 15) { extracted.case_summary = text; trusted.add('case_summary'); }
   return extracted;
 }
 
@@ -2700,7 +2753,8 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
     }
   }
 
-  const deterministicExtracted = extractAllFieldsFromLongResponse(callerText, session.lastQuestionId);
+  const trustedFields = new Set();
+  const deterministicExtracted = extractAllFieldsFromLongResponse(callerText, session.lastQuestionId, trustedFields);
 
   // If callerType is already known from a prior turn, use effectiveConfig for the LLM
   // so it only suggests questions for the fields actually required in this caller's path.
@@ -2764,7 +2818,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
   // wipe out a good deterministic extraction (e.g. case_summary from long text).
   // Also, don't let a short LLM case_summary overwrite a good long deterministic one.
   const extracted = { ...deterministicExtracted };
-  const modelProvidedFields = new Set();
+  const modelProvidedFields = new Set(trustedFields);
   for (const [k, v] of Object.entries(llm?.extracted || {})) {
     if (v == null || String(v).trim() === '') continue;
     if (k === 'case_summary' && extracted[k] && !isLikelySummary(String(v).trim(), session.lastQuestionId, { fromModel: true })) continue;
@@ -2827,6 +2881,9 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
     expectedField,
     exactFieldUpdateBlocked,
   }, 'stt-confidence');
+  // Captured before the merge: whether Ava already had a name is what separates
+  // "my name is Maria" the introduction from "my name is Maria" the correction.
+  const hadNameBeforeTurn = !!String(session.collected.full_name || '').trim();
   const fieldUpdates = mergeExtracted(session, extracted, callerText, firmConfig, { modelProvidedFields });
   let callbackCollectedThisTurn = !!fieldUpdates.callback_number;
 
@@ -2879,7 +2936,13 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
 
   // ── Closing-context signals (Fix B) + refusal tracking (Fix D/G) ────────────
   if (callerText) {
-    if (phoneCorrection || detectNameCorrectionIntent(callerText) || classifyFillerContext(callerText) === 'correction') {
+    // detectNameCorrectionIntent matches "my name is ...", which is also how
+    // every caller introduces themselves. Treating that as a correction made Ava
+    // close a perfectly ordinary call with "Thanks for clarifying that — I've got
+    // the updated details", to a caller who had corrected nothing. It only counts
+    // as a correction if there was something to correct.
+    const nameCorrection = detectNameCorrectionIntent(callerText) && hadNameBeforeTurn;
+    if (phoneCorrection || nameCorrection || classifyFillerContext(callerText) === 'correction') {
       session.hadCorrection = true;
     }
     if (isCallerQuestion(callerText)) session.hadCallerQuestion = true;
