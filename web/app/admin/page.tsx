@@ -4,8 +4,10 @@ import { useEffect, useState } from "react";
 import { Building2, PhoneCall, TrendingUp, Users } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:5050";
-const ADMIN_KEY = process.env.NEXT_PUBLIC_ADMIN_KEY ?? "";
+// Admin calls go through the same-origin server proxy, which attaches the admin
+// key on the server. The key must never be a NEXT_PUBLIC_* variable: Next inlines
+// those into the public JS bundle, so it was downloadable by any visitor.
+const ADMIN_PROXY = "/api/backend";
 
 interface FirmStat {
   id: string;
@@ -55,9 +57,7 @@ export default function AdminPage() {
   const [actionLoading, setActionLoading] = useState<string | null>(null);
 
   function loadData() {
-    fetch(`${API_BASE}/api/admin/overview`, {
-      headers: ADMIN_KEY ? { "x-admin-key": ADMIN_KEY } : {},
-    })
+    fetch(`${ADMIN_PROXY}/api/admin/overview`, { cache: "no-store" })
       .then((r) => r.json())
       .then(setData)
       .catch(() => {})
@@ -69,12 +69,9 @@ export default function AdminPage() {
   async function handleAction(firmId: string, action: "suspend" | "reactivate") {
     setActionLoading(firmId);
     try {
-      await fetch(`${API_BASE}/api/admin/firms/${encodeURIComponent(firmId)}`, {
+      await fetch(`${ADMIN_PROXY}/api/admin/firms/${encodeURIComponent(firmId)}`, {
         method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          ...(ADMIN_KEY ? { "x-admin-key": ADMIN_KEY } : {}),
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action }),
       });
       loadData();

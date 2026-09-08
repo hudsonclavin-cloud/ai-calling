@@ -77,8 +77,24 @@ export async function getFirms(): Promise<FirmSettings[]> {
   }
 }
 
+// Writes to an existing firm's config require the admin key, which lives only on
+// the dashboard server (see app/api/backend). Browser calls go through that
+// same-origin proxy; it attaches the key and enforces the admin session.
+async function fetchJsonViaAdminProxy<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(`/api/backend${path}`, {
+    ...init,
+    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`API request failed (${response.status}) for ${path}: ${detail.slice(0, 200)}`);
+  }
+  return (await response.json()) as T;
+}
+
 export async function updateFirm(id: string, config: Partial<FirmSettings>): Promise<FirmSettings> {
-  const payload = await fetchJson<FirmSettings | { data: FirmSettings }>(`/api/firms/${id}`, {
+  const payload = await fetchJsonViaAdminProxy<FirmSettings | { data: FirmSettings }>(`/api/firms/${id}`, {
     method: "POST",
     body: JSON.stringify({ ...config, id }),
   });
@@ -93,18 +109,15 @@ export async function createFirm(id: string, config: Partial<FirmSettings>): Pro
   return unwrap(payload, config as FirmSettings);
 }
 
+// Throws on failure. This used to swallow every error and return the unsaved
+// settings, so the form reported "Saved." whether or not anything was written.
 export async function saveSettings(nextSettings: FirmSettings): Promise<FirmSettings> {
-  try {
-    const firmId = nextSettings.id ?? "firm_default";
-    const payload = await fetchJson<FirmSettings | { data: FirmSettings }>(`/api/firms/${firmId}`, {
-      method: "POST",
-      body: JSON.stringify(nextSettings),
-    });
-
-    return unwrap(payload, nextSettings);
-  } catch {
-    return nextSettings;
-  }
+  const firmId = nextSettings.id ?? "firm_default";
+  const payload = await fetchJsonViaAdminProxy<FirmSettings | { data: FirmSettings }>(`/api/firms/${firmId}`, {
+    method: "POST",
+    body: JSON.stringify(nextSettings),
+  });
+  return unwrap(payload, nextSettings);
 }
 
 export async function createCheckoutSession(firmId: string, fromSignup = false): Promise<string> {

@@ -245,3 +245,25 @@ test('saving one session neither resurrects nor rewrites another', async () => {
   assert.equal(kept.turnCount, 7);
   assert.equal(kept.collected.full_name, 'Real Caller');
 });
+
+test('a repeat caller gets a new lead instead of overwriting the old one', async () => {
+  const from = '+17045550777';
+  const first = 'CATEST_REPEAT_CALL_1';
+  const second = 'CATEST_REPEAT_CALL_2';
+
+  await turn(first, null, { from });
+  await turn(first, 'My name is Priya Raman', { from });
+  const s1 = await db.getSession(first);
+
+  await turn(second, null, { from });
+  await turn(second, 'My name is Priya Raman', { from });
+  const s2 = await db.getSession(second);
+
+  // Lead identity used to be sha1(firmId, caller phone), so the second call
+  // rewrote the first call's lead row: its case summary was replaced, the two
+  // transcripts were merged, and any triage status the attorney had set was lost.
+  assert.notEqual(s1.leadId, s2.leadId, 'each call gets its own lead');
+  const [lead1, lead2] = await Promise.all([db.getLeadById(s1.leadId), db.getLeadById(s2.leadId)]);
+  assert.ok(lead1, 'the first call’s lead still exists');
+  assert.ok(lead2, 'the second call has its own lead');
+});

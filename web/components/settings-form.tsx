@@ -151,7 +151,8 @@ function WebhookDeliveryField({ firmId, webhookUrl, onChange }: { firmId: string
 
 export function SettingsForm({ initialSettings }: { initialSettings: FirmSettings }) {
   const [form, setForm] = useState(initialSettings);
-  const [status, setStatus] = useState<"idle" | "saving" | "saved">("idle");
+  const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [error, setError] = useState<string | null>(null);
 
   const practiceAreasText = useMemo(() => form.practice_areas.join(", "), [form.practice_areas]);
 
@@ -172,10 +173,18 @@ export function SettingsForm({ initialSettings }: { initialSettings: FirmSetting
         .filter(Boolean),
     };
 
-    const saved = await saveSettings(normalized);
-    setForm({ ...normalized, ...saved });
-    setStatus("saved");
-    setTimeout(() => setStatus("idle"), 2000);
+    try {
+      const saved = await saveSettings(normalized);
+      setForm({ ...normalized, ...saved });
+      setStatus("saved");
+      setError(null);
+    } catch (err) {
+      // Never report success on a failed write. Saving a firm's config requires
+      // the admin session; a client-scoped viewer gets 401 here.
+      setStatus("error");
+      setError(err instanceof Error ? err.message : "Save failed");
+    }
+    setTimeout(() => setStatus("idle"), 4000);
   }
 
   return (
@@ -298,6 +307,9 @@ export function SettingsForm({ initialSettings }: { initialSettings: FirmSetting
           {status === "saving" ? "Saving…" : "Save Settings"}
         </Button>
         {status === "saved" && <p className="text-sm text-emerald-700">Saved.</p>}
+        {status === "error" && (
+          <p className="text-sm text-rose-700">{error ?? "Save failed."}</p>
+        )}
       </div>
     </form>
   );

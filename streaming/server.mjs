@@ -566,8 +566,15 @@ async function writeJsonAtomic(filePath, data) {
 // Each file is named {firm_id}.json — e.g. firm_default.json, firm_acme.json
 // Falls back to DEFAULT_FIRM_CONFIG if the file is not found.
 
+// A firm id becomes a filename, so it must never contain a path. Without this,
+// POST /api/firms/..%2F..%2Fsomething writes JSON anywhere the process can reach.
+function sanitizeFirmId(firmId) {
+  const id = String(firmId || '').trim();
+  return /^[A-Za-z0-9_-]{1,64}$/.test(id) ? id : '';
+}
+
 async function loadFirmConfig(firmId) {
-  const id = String(firmId || 'firm_default').trim();
+  const id = sanitizeFirmId(firmId) || 'firm_default';
   const filePath = path.join(FIRMS_DIR, `${id}.json`);
   const raw = await readJson(filePath, null);
   const defaultRaw = id === 'firm_default'
@@ -607,8 +614,10 @@ async function listFirmConfigs() {
 }
 
 async function saveFirmConfig(firmId, data) {
+  const id = sanitizeFirmId(firmId);
+  if (!id) throw new Error(`refusing to write firm config for invalid id: ${String(firmId).slice(0, 40)}`);
   await fs.mkdir(FIRMS_DIR, { recursive: true });
-  const filePath = path.join(FIRMS_DIR, `${firmId}.json`);
+  const filePath = path.join(FIRMS_DIR, `${id}.json`);
   await writeJsonAtomic(filePath, data);
 }
 
@@ -756,7 +765,14 @@ function createSession({ callSid, firmId, fromPhone, firmConfig }) {
     fromPhone,
     phoneFromCallerId: fromPhone || '',
     callId: `call_${sha1(`${callSid}|${firmId}`)}`,
-    leadId: `lead_${sha1(`${firmId}|${fromPhone}`)}`,
+    // One lead per CALL, not per phone number. Keying the lead on the caller's
+    // number meant every repeat caller overwrote their own previous lead: the
+    // earlier matter's case summary was replaced, both calls' transcripts were
+    // concatenated into one record, and the status regressed out of the
+    // attorney's triage (a lead they had marked contacted went back to
+    // in_progress on the first turn of the next call). Returning-caller
+    // detection is unaffected — lookupCallerHistory queries by fromPhone.
+    leadId: `lead_${sha1(`${callSid}|${firmId}`)}`,
     turnCount: 0,
     repromptCount: 0,
     callerType: null,          // null | 'new' | 'returning'
@@ -3142,18 +3158,43 @@ app.get('/api/firms/:id', async (req, reply) => {
 
 // Create or update a firm — POST body is the full config JSON
 // To onboard a new client: POST /api/firms/firm_newclient with their config
+// Fields a client may never set on itself. Accepting these from a request body
+// let anyone un-suspend a delinquent firm, extend their own trial, or attach
+// themselves to another firm's Stripe customer.
+const PRIVILEGED_FIRM_FIELDS = ['status', 'billing_status', 'trial_ends_at', 'trial_warning_sent', 'stripe_customer_id', 'stripe_subscription_id'];
+// Contact and delivery fields must never be inherited from the fallback config:
+// a brand-new firm would silently start mailing its leads to whatever address
+// firm_default carries.
+const TENANT_SPECIFIC_FIRM_FIELDS = ['notification_email', 'notification_phone', 'webhook_url', 'twilio_phone', 'stripe_customer_id', 'stripe_subscription_id'];
+
 app.post('/api/firms/:id', async (req, reply) => {
-  const id = String(req.params.id || '').trim();
+  const id = sanitizeFirmId(req.params.id);
   if (!id) return reply.code(400).send({ error: 'firm id required' });
 
-  const existing = await loadFirmConfig(id);
-  const isNew = existing.id !== id;
+  const stored = await readJson(path.join(FIRMS_DIR, `${id}.json`), null);
+  const isNew = !stored;
+  const isAdmin = hasAdminKey(req);
+
+  // Updating a firm that already exists requires the admin key. Without this,
+  // anyone could POST {"notification_email": "..."} to a known firm id and every
+  // future lead — name, number, case summary — would be delivered to them
+  // instead of the attorney, silently.
+  if (!isNew && !isAdmin) {
+    app.log.warn({ firmId: id }, 'rejected unauthenticated update to an existing firm');
+    return reply.code(403).send({ error: 'Forbidden' });
+  }
+
+  const body = { ...(req.body || {}) };
+  if (!isAdmin) for (const field of PRIVILEGED_FIRM_FIELDS) delete body[field];
+
+  const base = isNew ? { ...DEFAULT_FIRM_CONFIG } : { ...DEFAULT_FIRM_CONFIG, ...stored };
+  if (isNew) for (const field of TENANT_SPECIFIC_FIRM_FIELDS) delete base[field];
+
   const updated = {
-    ...DEFAULT_FIRM_CONFIG,
-    ...existing,
-    ...req.body,
+    ...base,
+    ...body,
     id, // id is always the URL param, not overridable
-    question_overrides: { ...DEFAULT_FIRM_CONFIG.question_overrides, ...(existing.question_overrides || {}), ...(req.body?.question_overrides || {}) },
+    question_overrides: { ...DEFAULT_FIRM_CONFIG.question_overrides, ...(stored?.question_overrides || {}), ...(body?.question_overrides || {}) },
   };
   await saveFirmConfig(id, updated);
   if (isNew && updated.notification_email && RESEND_API_KEY) {
@@ -4020,7 +4061,7 @@ app.post('/voicemail-recording', { preHandler: twilioSignaturePreHandler }, asyn
     }
 
     const firmConfig = await loadFirmConfig(firmId);
-    const leadId = `lead_${sha1(`${firmId}|${fromPhone}`)}`;
+    const leadId = `lead_${sha1(`${callSid}|${firmId}`)}`; // per call, see createSession
     const now = nowIso();
     const fakeSession = {
       callSid, firmId, fromPhone,
@@ -4111,14 +4152,26 @@ app.post('/api/billing/portal', async (req, reply) => {
 });
 
 // POST /api/resend-instructions — resend Twilio setup email to a firm
+// Fails CLOSED. The previous version returned undefined (treated as "allowed")
+// whenever ADMIN_API_KEY was unset, so forgetting to set one variable in Railway
+// silently published every admin route — suspend a firm, read the cross-tenant
+// lead feed — to the internet.
 function requireAdminKey(req, reply) {
-  if (!ADMIN_API_KEY) return; // No key configured — skip check (dev mode)
+  if (!ADMIN_API_KEY) {
+    app.log.error({ url: req.url }, 'admin route blocked: ADMIN_API_KEY is not configured');
+    reply.code(503).send({ error: 'admin key not configured' });
+    return false;
+  }
   const provided = req.headers?.['x-admin-key'] || '';
   if (provided !== ADMIN_API_KEY) {
     reply.code(401).send({ error: 'Unauthorized' });
     return false;
   }
   return true;
+}
+
+function hasAdminKey(req) {
+  return !!ADMIN_API_KEY && req.headers?.['x-admin-key'] === ADMIN_API_KEY;
 }
 
 app.get('/api/admin/rate-limits', async (req, reply) => {
