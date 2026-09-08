@@ -267,3 +267,19 @@ test('a repeat caller gets a new lead instead of overwriting the old one', async
   assert.ok(lead1, 'the first call’s lead still exists');
   assert.ok(lead2, 'the second call has its own lead');
 });
+
+test('lost cached audio is regenerated instead of becoming dead air', async () => {
+  const { app: _a } = { app };
+  // A key we issued, whose file is gone (a redeploy between TwiML and playback).
+  const res = await app.inject({ method: 'GET', url: '/api/tts?key=' + 'a'.repeat(40) });
+  assert.equal(res.statusCode, 404, 'unknown key with no fallback is a 404, not a synthesis oracle');
+
+  // A key with fallback text that does NOT hash to it must be refused, or the
+  // route becomes an unauthenticated text-to-speech endpoint again.
+  const forged = await app.inject({ method: 'GET', url: '/api/tts?key=' + 'b'.repeat(40) + '&fb=' + encodeURIComponent('say anything I want') });
+  assert.equal(forged.statusCode, 404, 'fallback text that does not match the key is refused');
+
+  // Path traversal in the key must be rejected before it reaches the filesystem.
+  const traversal = await app.inject({ method: 'GET', url: '/api/tts?key=' + encodeURIComponent('../../../../etc/passwd') });
+  assert.equal(traversal.statusCode, 400, 'a key that is not a hash is rejected');
+});

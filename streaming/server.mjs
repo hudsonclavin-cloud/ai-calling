@@ -1089,7 +1089,13 @@ function isLikelyPhone(value) {
   return normalized.startsWith('+') && normalized.replace(/\D/g, '').length >= 10;
 }
 
-function isLikelySummary(value, expectedField = '') {
+// `fromModel` marks a value the LLM extracted into the structured case_summary
+// field, as opposed to a raw caller utterance the deterministic extractor
+// guessed at. The eight-word floor below exists to stop stray speech being
+// captured as a summary; applying it to a value the model deliberately produced
+// threw away good summaries ("Rear-ended on I-95 on Tuesday" is six words), and
+// Ava then asked what happened all over again.
+function isLikelySummary(value, expectedField = '', { fromModel = false } = {}) {
   const v = String(value || '').trim();
   if (!v) return false;
   const lower = v.toLowerCase();
@@ -1101,7 +1107,7 @@ function isLikelySummary(value, expectedField = '') {
   if (isCallerQuestion(v)) return false;
   if (detectRefusal(v)) return false;
   const words = v.split(/\s+/).filter(Boolean);
-  if (expectedField === 'case_summary') {
+  if (expectedField === 'case_summary' || fromModel) {
     if (words.length < 3) return false;
     // When Ava explicitly asked "what happened", a 3+ word answer is the summary —
     // don't reject it just because it superficially matches the loose name pattern
@@ -1550,7 +1556,7 @@ clarifying_note is optional internal context for your next turn - use it for ton
 
 // ── Field merging ─────────────────────────────────────────────────────────────
 
-function mergeExtracted(session, extracted, userText, firmConfig) {
+function mergeExtracted(session, extracted, userText, firmConfig, { modelProvidedFields = new Set() } = {}) {
   const requiredFields = firmConfig.required_fields || REQUIRED_FIELDS_DEFAULT;
   const expectedField = session.lastQuestionId;
   const nameCorrection = detectNameCorrectionIntent(userText);
@@ -1560,7 +1566,7 @@ function mergeExtracted(session, extracted, userText, firmConfig) {
     if (!value) continue;
     if (key === 'full_name' && !isLikelyName(value, userText, expectedField)) continue;
     if (key === 'callback_number' && !isLikelyPhone(value)) continue;
-    if (key === 'case_summary' && !isLikelySummary(value, expectedField)) continue;
+    if (key === 'case_summary' && !isLikelySummary(value, expectedField, { fromModel: modelProvidedFields.has(key) })) continue;
     const existing = String(session.collected[key] || '').trim();
     // Name overwrite protection (Fix A): a valid, collected name is authoritative —
     // only replace it on an explicit name correction or when Ava is re-asking the name.
@@ -1711,11 +1717,18 @@ function xmlEscape(s) {
     .replaceAll("'", '&#39;');
 }
 
+function ttsCacheUrl(key, speakText) {
+  // The fallback text lets /api/tts regenerate the audio if the cached file is
+  // gone by the time Twilio fetches it (a redeploy between TwiML and playback).
+  const fb = speakText ? `&fb=${encodeURIComponent(truncateForSpeech(speakText, MAX_TTS_CHARS))}` : '';
+  return `${PUBLIC_BASE_URL}/api/tts?key=${encodeURIComponent(key)}${fb}`;
+}
+
 function gatherTwiml({ actionUrl, speakText, ttsKey, liveUrl = null, emptyCount = 0, hints = '' }) {
   const hasSpeakText = !!(speakText && speakText.trim());
   const effectiveKey = ttsKey || (hasSpeakText ? null : holdKey);
   const speakerNode = effectiveKey
-    ? `<Play>${xmlEscape(`${PUBLIC_BASE_URL}/api/tts?key=${encodeURIComponent(effectiveKey)}`)}</Play>`
+    ? `<Play>${xmlEscape(ttsCacheUrl(effectiveKey, ttsKey ? speakText : HOLD_PHRASE))}</Play>`
     : liveUrl
       ? `<Play>${xmlEscape(liveUrl)}</Play>`
       : `<Say>${xmlEscape(speakText.replace(/<[^>]+>/g, ''))}</Say>`;
@@ -1750,7 +1763,7 @@ function doneTwiml({ speakText, ttsKey, liveUrl = null, firmId = '', callSid = '
   const hasSpeakText = !!(speakText && speakText.trim());
   const effectiveKey = ttsKey || (hasSpeakText ? null : holdKey);
   const speakerNode = effectiveKey
-    ? `<Play>${xmlEscape(`${PUBLIC_BASE_URL}/api/tts?key=${encodeURIComponent(effectiveKey)}`)}</Play>`
+    ? `<Play>${xmlEscape(ttsCacheUrl(effectiveKey, ttsKey ? speakText : HOLD_PHRASE))}</Play>`
     : liveUrl
       ? `<Play>${xmlEscape(liveUrl)}</Play>`
       : `<Say>${xmlEscape(speakText.replace(/<[^>]+>/g, ''))}</Say>`;
@@ -2668,10 +2681,12 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
   // wipe out a good deterministic extraction (e.g. case_summary from long text).
   // Also, don't let a short LLM case_summary overwrite a good long deterministic one.
   const extracted = { ...deterministicExtracted };
+  const modelProvidedFields = new Set();
   for (const [k, v] of Object.entries(llm?.extracted || {})) {
     if (v == null || String(v).trim() === '') continue;
-    if (k === 'case_summary' && extracted[k] && !isLikelySummary(String(v).trim(), session.lastQuestionId)) continue;
+    if (k === 'case_summary' && extracted[k] && !isLikelySummary(String(v).trim(), session.lastQuestionId, { fromModel: true })) continue;
     extracted[k] = v;
+    modelProvidedFields.add(k);
   }
   const expectedField = session.lastQuestionId;
 
@@ -2729,7 +2744,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
     expectedField,
     exactFieldUpdateBlocked,
   }, 'stt-confidence');
-  const fieldUpdates = mergeExtracted(session, extracted, callerText, firmConfig);
+  const fieldUpdates = mergeExtracted(session, extracted, callerText, firmConfig, { modelProvidedFields });
   let callbackCollectedThisTurn = !!fieldUpdates.callback_number;
 
   // Explicit correction is authoritative even when Ava's current question concerns
@@ -2895,6 +2910,10 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
       }
     }
   }
+  // Overrides below exist precisely to replace whatever the model wanted to say,
+  // so they must also win over its wording — otherwise the clarification is
+  // computed, recorded and then never spoken.
+  let forceDeterministicText = false;
   if (lowConfidenceExactField) {
     nextDecision = {
       done: false,
@@ -2902,6 +2921,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
       nextQuestionId: lowConfidenceExactField,
       nextQuestionText: exactFieldClarification(lowConfidenceExactField),
     };
+    forceDeterministicText = true;
   }
 
   // Require both GPT agreement and core fields before allowing hangup.
@@ -2947,6 +2967,7 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
       nextQuestionId: targetField,
       nextQuestionText: overrideText || fallbackText,
     };
+    forceDeterministicText = true;
     app.log.warn(
       {
         tag: 'GATE_GENERATOR_DIVERGENCE',
@@ -2967,21 +2988,15 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
   const llmAck = '';
 
   if (!done) {
-    // EDIT 4 (audit R45) — never advance turn state on a null question id. Post-EDIT-1
-    // this always holds; kept as a seatbelt against a null sentinel reaching this branch
-    // (this codebase's history is fallback values quietly masking invariant violations).
-    if (nextDecision.nextQuestionId != null) {
-      session.turnCount += 1;
-      session.lastQuestionId = nextDecision.nextQuestionId;
-      session.lastQuestionText = nextDecision.nextQuestionText;
-      session.askedQuestionIds.push(nextDecision.nextQuestionId);
-    }
-    nextField = nextDecision.nextField;
-
-    // LLM's next_question_text has the emotional ack baked in per system prompt — use it directly.
-    // Fall back to deterministic question only if LLM didn't return one.
+    // Choose the words BEFORE recording what was asked. The recorded question id
+    // is what every extractor gates on next turn (classifyNameCandidate rejects a
+    // name unless expectedField is full_name; isLikelySummary, the callback
+    // authority branch and the phone-retry logic all key off it). Recording the
+    // deterministic id while speaking the model's question meant Ava could ask
+    // "who am I speaking with?" while the state machine believed it had asked for
+    // the practice area — and then throw the caller's name away.
     const llmQuestionText = String(llm?.next_question_text || '').trim();
-    let questionBody = llmQuestionText || nextDecision.nextQuestionText;
+    let questionBody = (forceDeterministicText ? '' : llmQuestionText) || nextDecision.nextQuestionText;
 
     // A refused field must not keep being asked (Fix D/G): if the LLM ignores the
     // refusal and keeps pushing it in free-form text, use the deterministic question
@@ -2992,6 +3007,29 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
         || (session.refusedField === 'callback_number' && /\b(number|phone|reach you|call you back|digits|best way to reach)\b/i.test(llmQuestionText));
       if (pushesRefused) questionBody = nextDecision.nextQuestionText;
     }
+
+    // Record the question that is actually about to be spoken.
+    let recordedQuestionId = nextDecision.nextQuestionId;
+    let recordedQuestionText = nextDecision.nextQuestionText;
+    if (questionBody && questionBody === llmQuestionText) {
+      recordedQuestionText = llmQuestionText;
+      const llmId = String(llm?.next_question_id || '').trim();
+      // Only trust an id that names a field this firm actually collects.
+      if (llmId && (requiredFields.includes(llmId) || llmId === 'final_clarify')) {
+        recordedQuestionId = llmId;
+      }
+    }
+
+    // EDIT 4 (audit R45) — never advance turn state on a null question id. Post-EDIT-1
+    // this always holds; kept as a seatbelt against a null sentinel reaching this branch
+    // (this codebase's history is fallback values quietly masking invariant violations).
+    if (recordedQuestionId != null) {
+      session.turnCount += 1;
+      session.lastQuestionId = recordedQuestionId;
+      session.lastQuestionText = recordedQuestionText;
+      session.askedQuestionIds.push(recordedQuestionId);
+    }
+    nextField = nextDecision.nextField;
 
     // If the LLM didn't return a separate acknowledgment but baked one into next_question_text
     // (as the system prompt allows), treat it as having an ack to prevent composeSpeakText
@@ -3497,12 +3535,31 @@ app.get('/api/voice-preview', async (req, reply) => {
 app.get('/api/tts', async (req, reply) => {
   // Cache keys are sha1 hex. Interpolating an unvalidated key into a path let a
   // crafted key read files outside the audio directory. The old ?text= branch
-  // also let anyone synthesise arbitrary text on the owner's ElevenLabs account;
-  // TwiML only ever references cached keys, so it is gone.
+  // also let anyone synthesise arbitrary text on the owner's ElevenLabs account.
   const key = String(req.query?.key || '').trim();
   if (!/^[a-f0-9]{40}$/.test(key)) return reply.code(400).send({ error: 'valid key is required' });
 
-  const audio = await fs.readFile(path.join(AUDIO_DIR, `${key}.mp3`)).catch(() => null);
+  let audio = await fs.readFile(path.join(AUDIO_DIR, `${key}.mp3`)).catch(() => null);
+
+  // Cache miss on a key we already handed to Twilio. This happens whenever the
+  // audio directory is not on a persistent volume: the TwiML is emitted, the
+  // service redeploys, and the <Play> then 404s — which the caller experiences
+  // as dead air. Re-synthesise from the fallback text, but only when that text
+  // hashes to exactly this key, so this cannot be used to synthesise anything we
+  // did not generate ourselves.
+  const fallbackText = String(req.query?.fb || '').trim();
+  if (!audio && fallbackText) {
+    const safeText = truncateForSpeech(fallbackText, MAX_TTS_CHARS);
+    const expected = makeTtsCacheKey({ voiceId: ELEVENLABS_VOICE_ID, modelId: ELEVENLABS_MODEL_ID, settings: getVoiceSettings(), text: safeText });
+    if (expected === key) {
+      app.log.warn({ key: key.slice(0, 8) }, 'tts cache miss for an already-issued key — re-synthesising (audio directory is not persistent?)');
+      const regenerated = await synthesizeToDisk(safeText);
+      if (regenerated) audio = await fs.readFile(path.join(AUDIO_DIR, `${regenerated}.mp3`)).catch(() => null);
+    } else {
+      app.log.warn({ key: key.slice(0, 8) }, 'tts fallback text does not match the requested key — refusing to synthesise');
+    }
+  }
+
   if (!audio) return reply.code(404).send({ error: 'audio not found' });
   reply.header('Content-Type', 'audio/mpeg');
   reply.header('Cache-Control', 'public, max-age=31536000, immutable');
