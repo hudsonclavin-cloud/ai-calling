@@ -159,6 +159,9 @@ const AUDIO_DIR = path.join(DATA_DIR, 'tts_audio');
 
 // Pre-synthesized hold phrase — used as fallback whenever a TTS key is unavailable
 const HOLD_PHRASE = 'One moment please.';
+// Twilio's <Say> default is a male voice, so every fallback line — errors, rate
+// limits, any TTS miss — came back in a different voice than Ava's, mid-call.
+const SAY_FALLBACK_VOICE = process.env.SAY_FALLBACK_VOICE || 'Polly.Joanna';
 let holdKey = null; // set at boot before prewarm
 
 // Thinking filler phrases — played immediately when caller finishes speaking, before OpenAI responds
@@ -203,7 +206,10 @@ const DEFAULT_FIRM_CONFIG = {
   },
   acknowledgments: ['Got it.', 'Makes sense.', 'Okay.', 'Right.', 'Mm-hm.', 'I hear you.', 'Understood.'],
   max_questions: 8,
-  max_reprompts: 2,
+  // Twilio returning an empty SpeechResult does not mean the caller said nothing
+  // — it also happens when it could not transcribe them. Two strikes ended the
+  // call on people who were talking the whole time.
+  max_reprompts: 3,
   // Calls are recorded by default. Set false per firm where a recording notice
   // is not in the opening and two-party-consent law applies.
   record_calls: true,
@@ -1773,7 +1779,7 @@ function gatherTwiml({ actionUrl, speakText, ttsKey, liveUrl = null, emptyCount 
     ? `<Play>${xmlEscape(ttsCacheUrl(effectiveKey, ttsKey ? speakText : HOLD_PHRASE))}</Play>`
     : liveUrl
       ? `<Play>${xmlEscape(liveUrl)}</Play>`
-      : `<Say>${xmlEscape(speakText.replace(/<[^>]+>/g, ''))}</Say>`;
+      : `<Say voice="${SAY_FALLBACK_VOICE}">${xmlEscape(speakText.replace(/<[^>]+>/g, ''))}</Say>`;
   const redirectUrl = addQueryParam(addQueryParam(actionUrl, 'empty', '1'), 'rc', Number(emptyCount) + 1);
   const hintsAttr = hints ? ` hints="${xmlEscape(hints)}"` : '';
 
@@ -1792,7 +1798,7 @@ async function voicemailTwiml({ firmId, callSid, fromPhone, firmConfig }) {
   const ttsKey = await synthesizeToDisk(rawMsg).catch(() => null);
   const speakerNode = ttsKey
     ? `<Play>${xmlEscape(`${PUBLIC_BASE_URL}/api/tts?key=${encodeURIComponent(ttsKey)}`)}</Play>`
-    : `<Say voice="alice">${xmlEscape(rawMsg)}</Say>`;
+    : `<Say voice="${SAY_FALLBACK_VOICE}">${xmlEscape(rawMsg)}</Say>`;
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   ${speakerNode}
@@ -1808,7 +1814,7 @@ function doneTwiml({ speakText, ttsKey, liveUrl = null, firmId = '', callSid = '
     ? `<Play>${xmlEscape(ttsCacheUrl(effectiveKey, ttsKey ? speakText : HOLD_PHRASE))}</Play>`
     : liveUrl
       ? `<Play>${xmlEscape(liveUrl)}</Play>`
-      : `<Say>${xmlEscape(speakText.replace(/<[^>]+>/g, ''))}</Say>`;
+      : `<Say voice="${SAY_FALLBACK_VOICE}">${xmlEscape(speakText.replace(/<[^>]+>/g, ''))}</Say>`;
 
   // Grace period: keep the line open for 4 seconds after Ava's goodbye so the caller
   // can add anything before we hang up. Only applies to real call endings (not errors/rate-limits).
@@ -1856,7 +1862,12 @@ function ttsLiveUrlFor(text, firmId) {
     app.log.warn({ consecutiveFailures: ttsConsecutiveFailures }, 'tts circuit open — using <Say> instead of a live stream URL');
     return null;
   }
-  return `${PUBLIC_BASE_URL}/tts-live?text=${encodeURIComponent(text)}&firmId=${encodeURIComponent(firmId)}`;
+  // Twilio caches media by URL. This URL carried only the text, so after a voice
+  // or settings change Twilio kept replaying the audio it had already fetched —
+  // in the old voice, indefinitely (the cache-hit response advertises a one-year
+  // immutable lifetime). Version it with the settings hash so a change is a new URL.
+  const v = sha1(JSON.stringify({ voiceId: ELEVENLABS_VOICE_ID, modelId: ELEVENLABS_MODEL_ID, settings: getVoiceSettings() })).slice(0, 8);
+  return `${PUBLIC_BASE_URL}/tts-live?text=${encodeURIComponent(text)}&firmId=${encodeURIComponent(firmId)}&v=${v}`;
 }
 
 async function synthesizeToDisk(text) {
@@ -1876,21 +1887,31 @@ async function synthesizeToDisk(text) {
     const tFetchStart = Date.now();
     app.log.info({ key: key.slice(0, 8), textLen: safeText.length }, 'tts-fetch-start');
     const controller = new AbortController();
+    // The timer must stay armed until the BODY has been read. Clearing it when
+    // the response headers arrive left the audio download completely unbounded,
+    // so a slow ElevenLabs response could hold the turn open past Twilio's
+    // webhook budget and drop the call.
     const timeout = setTimeout(() => controller.abort(), Math.max(500, TTS_TIMEOUT_MS));
-    const resp = await fetch(
-      `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(ELEVENLABS_VOICE_ID)}/stream?optimize_streaming_latency=4&output_format=mp3_44100_128`,
-      {
-        method: 'POST',
-        headers: { 'xi-api-key': ELEVENLABS_API_KEY, Accept: 'audio/mpeg', 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: ttsPayloadText(safeText),
-          model_id: ELEVENLABS_MODEL_ID,
-          enable_ssml_parsing: true,
-          voice_settings: voiceSettings,
-        }),
-        signal: controller.signal,
-      }
-    ).finally(() => clearTimeout(timeout));
+    let resp;
+    try {
+      resp = await fetch(
+        `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(ELEVENLABS_VOICE_ID)}/stream?optimize_streaming_latency=4&output_format=mp3_44100_128`,
+        {
+          method: 'POST',
+          headers: { 'xi-api-key': ELEVENLABS_API_KEY, Accept: 'audio/mpeg', 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: ttsPayloadText(safeText),
+            model_id: ELEVENLABS_MODEL_ID,
+            enable_ssml_parsing: true,
+            voice_settings: voiceSettings,
+          }),
+          signal: controller.signal,
+        }
+      );
+    } catch (err) {
+      clearTimeout(timeout);
+      throw err;
+    }
 
     app.log.info({ key: key.slice(0, 8), ok: resp.ok, status: resp.status, elapsedMs: Date.now() - tFetchStart }, 'tts-fetch-end');
     noteTtsOutcome(resp.ok);
@@ -1899,7 +1920,7 @@ async function synthesizeToDisk(text) {
       console.error('tts-fetch-error', { status: resp.status, body: errBody });
       return null;
     }
-    const audio = Buffer.from(await resp.arrayBuffer());
+    const audio = Buffer.from(await resp.arrayBuffer().finally(() => clearTimeout(timeout)));
     console.log('tts-audio-bytes', audio.length);
     if (!audio.length) return null;
     await fs.writeFile(filePath, audio);
@@ -3170,7 +3191,10 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
   // Resolve TTS with a hard deadline: we've already spent time waiting for OpenAI,
   // so cap the additional ElevenLabs wait to TTS_BUDGET_MS. If it's not ready in
   // time, fall back to Twilio <Say> and let the file cache in the background.
-  const TTS_BUDGET_MS = Number(process.env.TTS_BUDGET_MS ?? 15000);
+  // Twilio gives a webhook about 15 seconds in total. Spending all of it waiting
+  // for audio guarantees the caller hears Twilio's error instead of Ava, and by
+  // then the model call has already taken its share of the turn.
+  const TTS_BUDGET_MS = Number(process.env.TTS_BUDGET_MS ?? 4000);
   const ttsDeadline = new Promise((r) => setTimeout(() => r(null), TTS_BUDGET_MS));
   const tTtsStart = Date.now();
   // Already settled by this point (the OpenAI stream is done), so this only makes
@@ -3442,7 +3466,18 @@ app.post('/api/firms/:id/phone/purchase', async (req, reply) => {
   const configResp = await fetch(`${twilioBase}/IncomingPhoneNumbers/${purchased.sid}.json`, {
     method: 'POST',
     headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ VoiceUrl: voiceUrl, VoiceMethod: 'POST' }).toString(),
+    // VoiceFallbackUrl matters: without it, any error from /twiml is Twilio's
+    // generic "application error" recording and a hangup. StatusCallback set on
+    // the NUMBER means call completion no longer depends on a per-call REST
+    // update racing the first webhook.
+    body: new URLSearchParams({
+      VoiceUrl: voiceUrl,
+      VoiceMethod: 'POST',
+      VoiceFallbackUrl: `${PUBLIC_BASE_URL}/twiml-fallback?firmId=${encodeURIComponent(id)}`,
+      VoiceFallbackMethod: 'POST',
+      StatusCallback: `${PUBLIC_BASE_URL}/call-status`,
+      StatusCallbackMethod: 'POST',
+    }).toString(),
   });
   if (!configResp.ok) {
     // Number purchased but webhook config failed — save number anyway, log for manual fix
@@ -3794,13 +3829,13 @@ app.post('/twiml', { preHandler: twilioSignaturePreHandler }, async (req, reply)
     // ── Trial / suspension enforcement ───────────────────────────────────────
     if (firmConfig.status === 'suspended') {
       reply.header('Content-Type', 'text/xml');
-      return reply.send(`<Response><Say>${xmlEscape(SUSPENDED_MESSAGE)}</Say><Hangup/></Response>`);
+      return reply.send(`<Response><Say voice="${SAY_FALLBACK_VOICE}">${xmlEscape(SUSPENDED_MESSAGE)}</Say><Hangup/></Response>`);
     }
     if (firmConfig.status === 'trial' && firmConfig.trial_ends_at && new Date() > new Date(firmConfig.trial_ends_at)) {
       // Auto-suspend expired trial
       await saveFirmConfig(firmId, { ...firmConfig, status: 'suspended' });
       reply.header('Content-Type', 'text/xml');
-      return reply.send(`<Response><Say>${xmlEscape(TRIAL_EXPIRED_MESSAGE)}</Say><Hangup/></Response>`);
+      return reply.send(`<Response><Say voice="${SAY_FALLBACK_VOICE}">${xmlEscape(TRIAL_EXPIRED_MESSAGE)}</Say><Hangup/></Response>`);
     }
     // Trial warning: check on each call if within 24h of expiry and warning not yet sent
     if (firmConfig.status === 'trial' && firmConfig.trial_ends_at && !firmConfig.trial_warning_sent) {
@@ -3994,9 +4029,19 @@ app.post('/twiml', { preHandler: twilioSignaturePreHandler }, async (req, reply)
       })
     );
   } catch (err) {
-    app.log.error({ err: String(err), stack: err?.stack, callSid }, '/twiml failed');
+    // Do NOT hang up. A thrown error here is a bug on our side, not the caller's
+    // cue to leave: one unvalidated firm-config field used to end every call for
+    // that firm. Say something and keep the line open so the turn can be retried.
+    app.log.error({ err: String(err), stack: err?.stack, callSid }, '/twiml failed — keeping the line open');
     reply.header('Content-Type', 'text/xml');
-    return reply.send(doneTwiml({ speakText: getErrorMessage(), ttsKey: null }));
+    return reply.send(gatherTwiml({
+      actionUrl: `${PUBLIC_BASE_URL}/twiml?firmId=${encodeURIComponent(firmId)}`,
+      speakText: getErrorMessage(),
+      ttsKey: null,
+      liveUrl: null,
+      emptyCount: 0,
+      hints: '',
+    }));
   }
 });
 
@@ -4084,6 +4129,26 @@ app.post('/twiml-result', { preHandler: twilioSignaturePreHandler }, async (req,
     app.log.error({ err: String(err), stack: err?.stack, callSid }, '/twiml-result failed');
     return reply.send(doneTwiml({ speakText: getErrorMessage(), ttsKey: null }));
   }
+});
+
+// POST /twiml-fallback — Twilio calls this when /twiml itself fails (an
+// unhandled error, a timeout, a 5xx). Configured as VoiceFallbackUrl on every
+// number we provision. Without it, any such failure is Twilio's own "an
+// application error has occurred" recording followed by a hangup, which is what
+// a caller hears whenever the service has a bad moment. Keep it dependency-free:
+// no database, no vendor calls, nothing that can fail the same way.
+app.post('/twiml-fallback', async (req, reply) => {
+  const callSid = String(req.body?.CallSid || '').trim();
+  const firmId = String(req.query?.firmId || req.body?.firmId || 'firm_default').trim();
+  app.log.error({ callSid, firmId, errorUrl: req.body?.ErrorUrl, errorCode: req.body?.ErrorCode }, 'twiml-fallback invoked — the primary handler failed');
+  reply.header('Content-Type', 'text/xml');
+  return reply.send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Gather input="speech" action="${xmlEscape(`${PUBLIC_BASE_URL}/twiml?firmId=${encodeURIComponent(firmId)}`)}" method="POST" speechTimeout="auto" timeout="6" actionOnEmptyResult="true" language="en-US">
+    <Say voice="${SAY_FALLBACK_VOICE}">Sorry — I had a technical hiccup there. I'm still here. Could you say that again?</Say>
+  </Gather>
+  <Redirect method="POST">${xmlEscape(`${PUBLIC_BASE_URL}/twiml?firmId=${encodeURIComponent(firmId)}&empty=1`)}</Redirect>
+</Response>`);
 });
 
 // POST /twiml-grace — grace period after Ava's closing line.

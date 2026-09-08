@@ -32,7 +32,7 @@
   ],
 
   "max_questions": 8,
-  "max_reprompts": 2,
+  "max_reprompts": 3,
 
   "office_hours": "Mon-Fri 8:00 AM - 6:00 PM",
   "business_hours": {

@@ -174,20 +174,23 @@ test('two separated silences do not end the call', async () => {
 test('consecutive silences still close the call', async () => {
   const callSid = 'CATEST_SILENCE_0002';
   await turn(callSid, null);
-  await turn(callSid, '');
-  const xml = await turn(callSid, '');
-  assert.ok(hasHangup(xml), 'max_reprompts consecutive silences ends the call');
+  // Bounded so this cannot hang if the reprompt cap regresses; the point is that
+  // a caller who never speaks is eventually let go, whatever max_reprompts is.
+  let closed = false;
+  for (let i = 0; i < 8 && !closed; i++) closed = hasHangup(await turn(callSid, ''));
+  assert.ok(closed, 'a caller who never speaks is eventually released');
 });
 
 test('a silent call is filed as partial, not as a completed intake', async () => {
   const callSid = 'CATEST_POCKETDIAL_0001';
   const from = '+17045550999';
   await turn(callSid, null, { from });
-  await turn(callSid, '', { from });
-  await turn(callSid, '', { from });
+  let closed = false;
+  for (let i = 0; i < 8 && !closed; i++) closed = hasHangup(await turn(callSid, '', { from }));
+  assert.ok(closed, 'the call did end');
 
   const session = await db.getSession(callSid);
-  assert.equal(session.done, true, 'the call did end');
+  assert.equal(session.done, true, 'session is marked done');
   // A pocket dial must not reach the attorney as "New lead — Unknown Caller"
   // with outcome intake_complete.
   const call = await db.getCallByCallSid(callSid);
@@ -296,4 +299,66 @@ test('confirming the number you are calling from counts as giving a callback num
 
   const session = await db.getSession(callSid);
   assert.equal(session.collected.callback_number, from, 'the confirmed caller ID is credited');
+});
+
+// ── the two call-ending paths that had no coverage at all ────────────────────
+// Twilio POSTs /twiml-grace at the end of every completed call and /call-status
+// at the end of every call, full stop. Between them they decide whether the
+// attorney gets one email, two, or none — and neither was ever exercised.
+
+test('grace window: silence after the closing hangs up', async () => {
+  const callSid = 'CATEST_GRACE_SILENT';
+  const res = await post(`/twiml-grace?callSid=${callSid}&firmId=firm_default`, { CallSid: callSid });
+  assert.ok(hasHangup(res.body), 'silence in the grace window ends the call');
+  assert.ok(!hasGather(res.body), 'and does not re-open a gather');
+});
+
+test('grace window: speaking after the closing continues the call', async () => {
+  const callSid = 'CATEST_GRACE_SPEAKS';
+  const from = '+17045550222';
+  await turn(callSid, null, { from });
+  await turn(callSid, 'My name is Grace Holt', { from });
+
+  const res = await post(`/twiml-grace?callSid=${callSid}&firmId=firm_default`, {
+    CallSid: callSid, SpeechResult: 'wait, I also wanted to mention the police report', Confidence: '0.95',
+  });
+  assert.ok(!hasHangup(res.body) || hasGather(res.body), 'the caller is not cut off mid-sentence');
+  const session = await db.getSession(callSid);
+  assert.ok(
+    session.transcript.some((t) => t.role === 'caller' && /police report/.test(t.text)),
+    'what the caller added in the grace window reaches the transcript the attorney reads',
+  );
+});
+
+test('call-status does not promote a silent call back to a completed intake', async () => {
+  const callSid = 'CATEST_STATUS_SILENT';
+  const from = '+17045550333';
+  await turn(callSid, null, { from });
+  let closed = false;
+  for (let i = 0; i < 8 && !closed; i++) closed = hasHangup(await turn(callSid, '', { from }));
+  assert.ok(closed);
+
+  // Twilio always sends this once the call really ends.
+  await post('/call-status', { CallSid: callSid, CallStatus: 'completed', CallDuration: '11' });
+  await new Promise((r) => setTimeout(r, 250)); // the handler acknowledges first, then writes
+
+  const call = await db.getCallByCallSid(callSid);
+  assert.ok(call, 'the call row exists');
+  assert.notEqual(call.outcome, 'intake_complete', 'a call nobody spoke on is not a completed intake');
+});
+
+test('call-status files a partial lead when the caller hangs up mid-intake', async () => {
+  const callSid = 'CATEST_STATUS_PARTIAL';
+  const from = '+17045550444';
+  await turn(callSid, null, { from });
+  await turn(callSid, 'My name is Priya Raman and I was rear-ended on Tuesday', { from });
+
+  await post('/call-status', { CallSid: callSid, CallStatus: 'completed', CallDuration: '34' });
+  await new Promise((r) => setTimeout(r, 250));
+
+  const session = await db.getSession(callSid);
+  assert.equal(session, null, 'the session is cleaned up once the call is over');
+  const call = await db.getCallByCallSid(callSid);
+  assert.ok(call, 'the call is still recorded');
+  assert.ok(call.leadId, 'and it is linked to a lead the attorney can see');
 });
