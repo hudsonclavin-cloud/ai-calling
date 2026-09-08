@@ -18,7 +18,7 @@ export default async function LeadDetailPage({
 }) {
   const [{ id }, { firmId }] = await Promise.all([params, searchParams]);
   const q = firmId ? `?firmId=${firmId}` : "";
-  const lead = await getLeadById(id);
+  const lead = await getLeadById(id, firmId);
 
   if (!lead) {
     notFound();
@@ -49,7 +49,7 @@ export default async function LeadDetailPage({
               {lead.caller_type === "returning" ? "Returning Client" : "New Client"}
             </Badge>
           )}
-          <MarkContactedButton leadId={lead.id} contactedAt={lead.contacted_at} />
+          <MarkContactedButton leadId={lead.id} contactedAt={lead.contacted_at} firmId={firmId ?? lead.firmId} />
         </div>
       </div>
 

@@ -14,8 +14,9 @@ import { createBillingPortal, createCheckoutSession, updateFirm } from "@/lib/ap
 import { Badge } from "@/components/ui/badge";
 import type { FirmSettings } from "@/lib/types";
 
+// Values must match TONE_PRESETS keys in streaming/server.mjs.
 const TONES = [
-  { value: "warm-professional", label: "Warm & Professional" },
+  { value: "warm", label: "Warm & Professional" },
   { value: "friendly", label: "Friendly & Casual" },
   { value: "formal", label: "Formal & Corporate" },
 ] as const;

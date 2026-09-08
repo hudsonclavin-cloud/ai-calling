@@ -16,10 +16,11 @@ import { createFirm } from "@/lib/api";
 
 const INDUSTRIES = ["Legal", "Medical", "Real Estate", "Home Services", "Financial", "Other"] as const;
 
+// Values must match TONE_PRESETS keys in streaming/server.mjs.
 const TONES = [
-  { value: "warm-professional", label: "Warm & Professional" },
-  { value: "friendly",          label: "Friendly & Casual" },
-  { value: "formal",            label: "Formal & Corporate" },
+  { value: "warm",     label: "Warm & Professional" },
+  { value: "friendly", label: "Friendly & Casual" },
+  { value: "formal",   label: "Formal & Corporate" },
 ] as const;
 
 const INTAKE_RULES: Record<string, string> = {
@@ -133,7 +134,7 @@ const INITIAL_FORM: OnboardingForm = {
   notificationEmail: "",
   notificationPhone: "",
   assistantName: "Ava",
-  tone: "warm-professional",
+  tone: "warm",
   serviceAreas: [],
   opening: "",
   closing: "",

@@ -12,7 +12,14 @@ import { Textarea } from "@/components/ui/textarea";
 import { saveSettings, testWebhook } from "@/lib/api";
 import type { FirmSettings } from "@/lib/types";
 
-const TONES = ["Professional", "Warm", "Concise", "Friendly", "Formal"];
+// Values must match TONE_PRESETS keys in streaming/server.mjs, or the setting
+// silently falls back to "warm".
+const TONES = [
+  { value: "warm", label: "Warm" },
+  { value: "professional", label: "Professional" },
+  { value: "friendly", label: "Friendly" },
+  { value: "formal", label: "Formal" },
+] as const;
 
 const API_BASE_CLIENT = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:5050";
 
@@ -193,7 +200,7 @@ export function SettingsForm({ initialSettings }: { initialSettings: FirmSetting
             <Label htmlFor="tone">Tone</Label>
             <SelectNative id="tone" value={form.tone ?? ""} onChange={field("tone")}>
               {TONES.map((t) => (
-                <option key={t} value={t}>{t}</option>
+                <option key={t.value} value={t.value}>{t.label}</option>
               ))}
             </SelectNative>
           </div>

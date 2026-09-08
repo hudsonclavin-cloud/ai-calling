@@ -16,7 +16,7 @@ import { createFirm, createCheckoutSession } from "@/lib/api";
 const INDUSTRIES = ["Legal", "Medical", "Real Estate", "Home Services", "Financial", "Other"] as const;
 
 const TONES = [
-  { value: "warm-professional", label: "Warm & Professional" },
+  { value: "warm", label: "Warm & Professional" },
   { value: "friendly",          label: "Friendly & Casual" },
   { value: "formal",            label: "Formal & Corporate" },
 ] as const;
@@ -162,7 +162,7 @@ const INITIAL_FORM: SignupForm = {
   contactName: "",
   notificationEmail: "",
   assistantName: "Ava",
-  tone: "warm-professional",
+  tone: "warm",
   serviceAreas: [],
   hasPhone: true,
   twilioPhone: "",

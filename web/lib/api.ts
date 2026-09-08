@@ -47,9 +47,12 @@ export async function getLeads(firmId?: string): Promise<LeadSummary[]> {
   }
 }
 
-export async function getLeadById(id: string): Promise<LeadDetail | null> {
+export async function getLeadById(id: string, firmId?: string): Promise<LeadDetail | null> {
   try {
-    const payload = await fetchJson<LeadDetail | { data: LeadDetail }>(`/api/leads/${id}`);
+    // firmId is required by the backend: without it the lead lookup is not scoped
+    // to a tenant at all.
+    const qs = firmId ? `?firmId=${encodeURIComponent(firmId)}` : "";
+    const payload = await fetchJson<LeadDetail | { data: LeadDetail }>(`/api/leads/${id}${qs}`);
     return unwrap(payload, null);
   } catch {
     return null;
@@ -112,10 +115,14 @@ export async function createCheckoutSession(firmId: string, fromSignup = false):
   return payload.url;
 }
 
-export async function patchLead(id: string, updates: { contacted_at?: string; status?: string }): Promise<void> {
+export async function patchLead(
+  id: string,
+  updates: { contacted_at?: string; status?: string },
+  firmId?: string,
+): Promise<void> {
   await fetchJson(`/api/leads/${id}`, {
     method: "PATCH",
-    body: JSON.stringify(updates),
+    body: JSON.stringify({ ...updates, firmId }),
   });
 }
 

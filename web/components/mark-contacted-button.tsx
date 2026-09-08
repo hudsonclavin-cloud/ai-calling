@@ -7,9 +7,10 @@ import { patchLead } from "@/lib/api";
 interface Props {
   leadId: string;
   contactedAt: string | null;
+  firmId?: string;
 }
 
-export function MarkContactedButton({ leadId, contactedAt: initialContactedAt }: Props) {
+export function MarkContactedButton({ leadId, contactedAt: initialContactedAt, firmId }: Props) {
   const [contactedAt, setContactedAt] = useState(initialContactedAt);
   const [loading, setLoading] = useState(false);
 
@@ -26,7 +27,7 @@ export function MarkContactedButton({ leadId, contactedAt: initialContactedAt }:
     setLoading(true);
     try {
       const now = new Date().toISOString();
-      await patchLead(leadId, { contacted_at: now });
+      await patchLead(leadId, { contacted_at: now }, firmId);
       setContactedAt(now);
     } finally {
       setLoading(false);

@@ -7,6 +7,7 @@ import { CopySummaryButton } from "@/components/copy-button";
 import { API_BASE, getFirms } from "@/lib/api";
 
 const TONE_LABELS: Record<string, string> = {
+  "warm": "Warm & Professional",
   "warm-professional": "Warm & Professional",
   friendly: "Friendly",
   formal: "Formal",

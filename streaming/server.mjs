@@ -98,7 +98,19 @@ const TONE_PRESETS = {
   warm:         "Your tone is warm, empathetic, and unhurried. Use contractions naturally. Show genuine care. Never robotic.",
   professional: "Your tone is polished and precise. Minimal small talk. Use 'Certainly' not 'Sure'. Address callers by last name if given. Efficient and respectful.",
   friendly:     "Your tone is upbeat and conversational. Short, punchy sentences. Sound like a helpful person — not a corporate recording.",
+  formal:       "Your tone is composed and formal. Complete sentences, no slang, no filler. Courteous and measured throughout.",
 };
+
+// The dashboard forms have shipped display labels ("Warm") and compound values
+// ("warm-professional", "formal") that were never keys here, so every one of them
+// fell through to the warm default and the firm's tone setting did nothing.
+// Match the first recognised word so an existing saved value keeps meaning.
+function resolveToneInstruction(tone) {
+  const key = String(tone || '').toLowerCase().trim();
+  if (TONE_PRESETS[key]) return TONE_PRESETS[key];
+  const word = key.split(/[^a-z]+/).filter(Boolean).find((w) => TONE_PRESETS[w]);
+  return TONE_PRESETS[word] || TONE_PRESETS.warm;
+}
 
 const INDUSTRY_MODULES = {
   law_pi: `INDUSTRY CONTEXT — PERSONAL INJURY LAW:
@@ -230,6 +242,34 @@ if (RESEND_FROM_EMAIL.endsWith('@resend.dev')) {
   app.log.warn({ RESEND_FROM_EMAIL }, 'EMAIL WARNING: RESEND_FROM_EMAIL uses Resend sandbox domain — emails can only be delivered to the Resend account owner\'s address. Set RESEND_FROM_EMAIL to a verified sender domain for production.');
 }
 await app.register(formbody);
+
+// ── CORS ─────────────────────────────────────────────────────────────────────
+// The dashboard and this API are separate Railway services, so every fetch the
+// browser makes is cross-origin — and lib/api.ts sends Content-Type on GETs,
+// which forces a preflight. With no CORS headers and no OPTIONS route, the
+// browser rejected all of it: the leads/calls/dashboard lists sat empty, saving
+// settings did nothing, and signup failed with a connection error, while
+// server-rendered pages worked fine. Allow the dashboard origin explicitly;
+// Twilio webhooks are server-to-server and unaffected.
+const CORS_ALLOWED_ORIGINS = new Set(
+  [WEB_BASE_URL, ...String(process.env.CORS_ALLOWED_ORIGINS || '').split(',')]
+    .map((o) => String(o || '').trim().replace(/\/$/, ''))
+    .filter(Boolean),
+);
+app.addHook('onRequest', async (req, reply) => {
+  const origin = String(req.headers.origin || '').replace(/\/$/, '');
+  if (origin && CORS_ALLOWED_ORIGINS.has(origin)) {
+    reply.header('Access-Control-Allow-Origin', origin);
+    reply.header('Vary', 'Origin');
+    reply.header('Access-Control-Allow-Credentials', 'true');
+    reply.header('Access-Control-Allow-Headers', 'content-type, x-admin-key');
+    reply.header('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS');
+    reply.header('Access-Control-Max-Age', '86400');
+  }
+  if (req.method === 'OPTIONS') {
+    reply.code(origin && CORS_ALLOWED_ORIGINS.has(origin) ? 204 : 403).send();
+  }
+});
 
 // Capture raw body for Stripe webhook signature verification
 app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (req, body, done) => {
@@ -1236,7 +1276,7 @@ function callOpenAiForNextStep({ firmConfig, session, userText }) {
 
   app.log.info({ chars: JSON.stringify(prompt).length }, 'openai-payload-chars');
 
-  const toneInstruction = TONE_PRESETS[firmConfig.tone] || TONE_PRESETS['warm'];
+  const toneInstruction = resolveToneInstruction(firmConfig.tone);
 
   const { isOpen, nextOpen } = isWithinBusinessHours(firmConfig);
   const hoursStr = firmConfig.office_hours ? ` (${firmConfig.office_hours})` : '';
@@ -3240,20 +3280,29 @@ app.get('/api/leads', async (req, reply) => {
 });
 
 app.get('/api/leads/:id', async (req, reply) => {
+  // firmId is mandatory. Without it this loaded EVERY firm's leads and returned
+  // any lead by id, and lead ids are a hash of (firmId, caller phone) — so one
+  // firm's dashboard could read another firm's caller PII and transcripts.
   const firmId = String(req.query?.firmId || '').trim();
-  const leads = await loadLeads(firmId || undefined);
-  const lead = leads.find((x) => x.id === req.params.id);
+  const isAdmin = ADMIN_API_KEY && req.headers?.['x-admin-key'] === ADMIN_API_KEY;
+  if (!firmId && !isAdmin) return reply.code(400).send({ error: 'firmId required' });
+  const lead = await getLeadById(req.params.id);
   if (!lead) return reply.code(404).send({ error: 'Lead not found' });
+  if (!isAdmin && lead.firmId !== firmId) return reply.code(404).send({ error: 'Lead not found' });
   return { data: lead };
 });
 
 app.patch('/api/leads/:id', async (req, reply) => {
   const { id } = req.params;
+  // Ownership was only checked when the caller volunteered a firmId, so omitting
+  // it let anyone edit any firm's lead. Require it.
   const firmId = String(req.body?.firmId || '').trim();
-  if (firmId) {
+  const isAdmin = ADMIN_API_KEY && req.headers?.['x-admin-key'] === ADMIN_API_KEY;
+  if (!firmId && !isAdmin) return reply.code(400).send({ error: 'firmId required' });
+  {
     const lead = await getLeadById(id);
     if (!lead) return reply.code(404).send({ error: 'Lead not found' });
-    if (lead.firmId !== firmId) return reply.code(403).send({ error: 'Forbidden' });
+    if (!isAdmin && lead.firmId !== firmId) return reply.code(404).send({ error: 'Lead not found' });
   }
   const allowed = ['status', 'contacted_at'];
   const updates = Object.fromEntries(
