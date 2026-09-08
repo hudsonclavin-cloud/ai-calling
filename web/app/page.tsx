@@ -35,10 +35,15 @@ function PrimaryButton({ href, children }: { href: string; children: React.React
   );
 }
 
-function DemoButton() {
+// The demo number comes from DEMO_PHONE_NUMBER via /api/demo-number. It used to
+// be hardcoded to +1 555-499-9366 — 555 is the reserved fictional exchange, so
+// the headline call-to-action on the landing page dialled a number that cannot
+// ring. With no demo number configured, show nothing rather than a dead link.
+function DemoButton({ demoNumber }: { demoNumber?: string | null }) {
+  if (!demoNumber) return null;
   return (
     <a
-      href="tel:+15554999366"
+      href={`tel:${demoNumber}`}
       className="inline-flex items-center gap-2 rounded-full border border-slate-700 px-7 py-3.5 text-sm font-semibold text-slate-300 transition-all hover:border-slate-500 hover:text-white active:scale-95"
     >
       <Phone className="h-4 w-4" /> Hear Ava in Action
@@ -81,7 +86,7 @@ function Hero({ demoNumber }: { demoNumber?: string | null }) {
           Start Free Trial
           <ArrowRight className="h-4 w-4" />
         </PrimaryButton>
-        <DemoButton />
+        <DemoButton demoNumber={demoNumber} />
       </div>
       {demoNumber && (
         <p className="mt-3 text-sm text-slate-400">

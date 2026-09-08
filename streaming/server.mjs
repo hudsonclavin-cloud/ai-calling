@@ -596,8 +596,17 @@ async function loadFirmConfig(firmId) {
     : await readJson(path.join(FIRMS_DIR, 'firm_default.json'), null);
   const baseConfig = defaultRaw ? { ...DEFAULT_FIRM_CONFIG, ...defaultRaw } : { ...DEFAULT_FIRM_CONFIG };
   if (!raw) {
-    app.log.warn(`Firm config not found for "${id}", using default`);
-    return { ...baseConfig };
+    // Answering with the default script is the right thing for the CALLER — the
+    // phone still gets answered. Inheriting the default firm's notification
+    // email, phone and webhook is not: a Twilio number pointed at the wrong
+    // firmId, or a firm config lost when an ephemeral DATA_DIR was wiped by a
+    // deploy, then silently delivers one client's leads to another party.
+    app.log.error({ firmId: id, firmsDir: FIRMS_DIR }, "Firm config not found — answering with the default script but WITHOUT the default firm's notification contacts. Check DATA_DIR persistence and the firmId configured on the Twilio number.");
+    const fallback = { ...baseConfig };
+    for (const field of ['notification_email', 'notification_phone', 'webhook_url', 'twilio_phone', 'stripe_customer_id', 'stripe_subscription_id']) {
+      delete fallback[field];
+    }
+    return fallback;
   }
   // Merge with defaults so missing keys always have a safe value
   const industry = raw.industry || baseConfig.industry || DEFAULT_FIRM_CONFIG.industry;
@@ -1776,6 +1785,25 @@ function ttsPayloadText(plainText) {
   return enrichForSpeech(plainText);
 }
 
+// When synthesizeToDisk returns null we normally hand Twilio a /tts-live URL and
+// let it stream. If ElevenLabs is actually DOWN (rather than merely slow) that
+// URL fails too, and a failed <Play> is silence: the caller hears nothing at all
+// and the Gather just waits. Track consecutive failures so that, once ElevenLabs
+// is clearly unavailable, we stop offering the live URL and let the TwiML fall
+// through to <Say> — a robotic voice is bad, dead air loses the caller.
+let ttsConsecutiveFailures = 0;
+const TTS_CIRCUIT_OPEN_AFTER = Number(process.env.TTS_CIRCUIT_OPEN_AFTER || 3);
+function noteTtsOutcome(ok) {
+  ttsConsecutiveFailures = ok ? 0 : ttsConsecutiveFailures + 1;
+}
+function ttsLiveUrlFor(text, firmId) {
+  if (ttsConsecutiveFailures >= TTS_CIRCUIT_OPEN_AFTER) {
+    app.log.warn({ consecutiveFailures: ttsConsecutiveFailures }, 'tts circuit open — using <Say> instead of a live stream URL');
+    return null;
+  }
+  return `${PUBLIC_BASE_URL}/tts-live?text=${encodeURIComponent(text)}&firmId=${encodeURIComponent(firmId)}`;
+}
+
 async function synthesizeToDisk(text) {
   const safeText = truncateForSpeech(text, MAX_TTS_CHARS);
   if (!safeText || !ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) return null;
@@ -1810,6 +1838,7 @@ async function synthesizeToDisk(text) {
     ).finally(() => clearTimeout(timeout));
 
     app.log.info({ key: key.slice(0, 8), ok: resp.ok, status: resp.status, elapsedMs: Date.now() - tFetchStart }, 'tts-fetch-end');
+    noteTtsOutcome(resp.ok);
     if (!resp.ok) {
       const errBody = await resp.text();
       console.error('tts-fetch-error', { status: resp.status, body: errBody });
@@ -1822,6 +1851,8 @@ async function synthesizeToDisk(text) {
     console.log('tts-file-written', { key, bytes: audio.length, path: filePath });
     return key;
   } catch (err) {
+    // A timeout means slow, not down: only real transport failures open the circuit.
+    if (err?.name !== 'AbortError' && err?.name !== 'TimeoutError') noteTtsOutcome(false);
     console.error('tts-fetch-exception', err.message);
     return null;
   }
@@ -2080,7 +2111,9 @@ async function sendEmailNotification(session, firmConfig) {
   const name = full_name || 'Unknown Caller';
   const area = practice_area || 'General';
   const phone = callback_number || session.phoneFromCallerId || session.fromPhone;
-  const dashUrl = `${WEB_BASE_URL}/leads/${session.leadId}`;
+  // Without firmId the dashboard treats the visitor as unauthenticated and
+  // redirects to the admin GitHub login, so the attorney's own lead link bounced.
+  const dashUrl = `${WEB_BASE_URL}/leads/${session.leadId}?firmId=${encodeURIComponent(session.firmId || '')}`;
 
   const urgencyBanner = session.isUrgent
     ? `<div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;padding:12px 16px;margin-bottom:20px;color:#991b1b;font-size:14px;font-weight:600">⚠️ Urgent — caller indicated an emergency situation</div>`
@@ -2123,7 +2156,9 @@ async function sendPartialEmailNotification(session, firmConfig) {
   const name = full_name || 'Unknown Caller';
   const phone = callback_number || session.phoneFromCallerId || session.fromPhone;
   const area = practice_area || 'General';
-  const dashUrl = `${WEB_BASE_URL}/leads/${session.leadId}`;
+  // Without firmId the dashboard treats the visitor as unauthenticated and
+  // redirects to the admin GitHub login, so the attorney's own lead link bounced.
+  const dashUrl = `${WEB_BASE_URL}/leads/${session.leadId}?firmId=${encodeURIComponent(session.firmId || '')}`;
   const capturedFields = Object.entries(session.collected || {}).filter(([, v]) => v).map(([k]) => k).join(', ') || 'none';
 
   const body = `
@@ -2155,7 +2190,7 @@ async function sendPartialEmailNotification(session, firmConfig) {
 async function sendVoicemailEmailNotification({ fromPhone, transcript, firmConfig, leadId }) {
   if (!RESEND_API_KEY) { app.log.warn({ leadId }, 'sendVoicemailEmailNotification: RESEND_API_KEY not set — skipping'); return; }
   if (!firmConfig.notification_email) { app.log.warn({ leadId, firmId: firmConfig.id }, 'sendVoicemailEmailNotification: no notification_email on firm — skipping'); return; }
-  const dashUrl = `${WEB_BASE_URL}/leads/${leadId}`;
+  const dashUrl = `${WEB_BASE_URL}/leads/${leadId}?firmId=${encodeURIComponent(firmConfig?.id || '')}`;
   try {
     const res = await fetch('https://api.resend.com/emails', {
       method: 'POST',
@@ -3792,9 +3827,7 @@ app.post('/twiml', { preHandler: twilioSignaturePreHandler }, async (req, reply)
     }
 
     // Build a live-stream URL for cache misses — Twilio fetches it and gets audio immediately
-    const liveUrl = !ttsKey
-      ? `${PUBLIC_BASE_URL}/tts-live?text=${encodeURIComponent(speakText)}&firmId=${encodeURIComponent(firmId)}`
-      : null;
+    const liveUrl = !ttsKey ? ttsLiveUrlFor(speakText, firmId) : null;
 
     reply.header('Content-Type', 'text/xml');
     app.log.info({ callSid, ttsHit: !!ttsKey, liveStream: !!liveUrl, totalMs: Date.now() - tTwimlStart }, 'twiml-sent');
@@ -3834,9 +3867,7 @@ function buildPendingResultTwiml({ step, pending, firmId, callSid }) {
     total_ms: t4 - pending.t0,
   }, 'latency-trace');
 
-  const liveUrl = !ttsKey
-    ? `${PUBLIC_BASE_URL}/tts-live?text=${encodeURIComponent(speakText)}&firmId=${encodeURIComponent(firmId)}`
-    : null;
+  const liveUrl = !ttsKey ? ttsLiveUrlFor(speakText, firmId) : null;
 
   app.log.info({ callSid, ttsHit: !!ttsKey, liveStream: !!liveUrl }, 'twiml-result-sent');
 
@@ -3874,7 +3905,7 @@ app.post('/twiml-result', { preHandler: twilioSignaturePreHandler }, async (req,
         || getQuestionText('final_clarify', firmConfig)
         || 'Sorry — could you say that again?';
       const retryKey = await synthesizeToDisk(retryText).catch(() => null);
-      const liveUrl = retryKey ? null : `${PUBLIC_BASE_URL}/tts-live?text=${encodeURIComponent(retryText)}&firmId=${encodeURIComponent(firmId)}`;
+      const liveUrl = retryKey ? null : ttsLiveUrlFor(retryText, firmId);
       return reply.send(gatherTwiml({
         actionUrl: `${PUBLIC_BASE_URL}/twiml?firmId=${encodeURIComponent(firmId)}`,
         speakText: retryText,
@@ -3944,9 +3975,7 @@ app.post('/twiml-grace', { preHandler: twilioSignaturePreHandler }, async (req, 
     const fromPhone = session?.fromPhone || '';
     const result = await runNextStepController({ firmId, callSid, fromPhone, userText: speech, speechConfidence, callerContext });
     const { speakText, ttsKey, done: newDone } = result.payload;
-    const liveUrl = !ttsKey
-      ? `${PUBLIC_BASE_URL}/tts-live?text=${encodeURIComponent(speakText)}&firmId=${encodeURIComponent(firmId)}`
-      : null;
+    const liveUrl = !ttsKey ? ttsLiveUrlFor(speakText, firmId) : null;
     if (newDone) return reply.send(doneTwiml({ speakText, ttsKey, liveUrl, firmId, callSid }));
     const practiceHints = (result.firmConfig?.practice_areas || []).join(', ');
     return reply.send(gatherTwiml({
@@ -4050,22 +4079,33 @@ app.get('/api/calls/:id/recording', async (req, reply) => {
   if (!call) return reply.code(404).send({ error: 'Not found' });
   if (call.firmId !== firmId) return reply.code(404).send({ error: 'Not found' });
 
-  const leads = await loadLeads(call.firmId);
-  const lead = leads.find((l) => l.id === call.leadId);
-  if (!lead?.recording_url) return reply.code(404).send({ error: 'No recording' });
+  const lead = await getLeadById(call.leadId);
+  if (!lead || lead.firmId !== call.firmId) return reply.code(404).send({ error: 'Not found' });
+  if (!lead.recording_url) return reply.code(404).send({ error: 'No recording' });
 
   if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) return reply.code(503).send({ error: 'Twilio credentials not configured' });
 
+  // Forward the browser's Range header and answer with 206 + Content-Range.
+  // Buffering the whole file and always replying 200 makes an <audio> element
+  // unseekable in Chrome and unplayable in Safari and on iOS, which is where an
+  // attorney opens the link from the lead email.
   const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64');
+  const range = req.headers?.range;
   const audioRes = await fetch(`${lead.recording_url}.mp3`, {
-    headers: { Authorization: `Basic ${auth}` },
+    headers: { Authorization: `Basic ${auth}`, ...(range ? { Range: range } : {}) },
   }).catch(() => null);
 
   if (!audioRes?.ok) return reply.code(502).send({ error: 'Recording unavailable' });
 
-  reply.header('Content-Type', 'audio/mpeg');
+  reply.header('Content-Type', audioRes.headers.get('content-type') || 'audio/mpeg');
+  reply.header('Accept-Ranges', 'bytes');
   reply.header('Cache-Control', 'private, max-age=3600');
-  return reply.send(Buffer.from(await audioRes.arrayBuffer()));
+  const contentRange = audioRes.headers.get('content-range');
+  if (contentRange) reply.header('Content-Range', contentRange);
+  const contentLength = audioRes.headers.get('content-length');
+  if (contentLength) reply.header('Content-Length', contentLength);
+  reply.code(audioRes.status === 206 ? 206 : 200);
+  return reply.send(Readable.fromWeb(audioRes.body));
 });
 
 // POST /voicemail-recording — Twilio Record action callback; transcribes + saves voicemail lead
