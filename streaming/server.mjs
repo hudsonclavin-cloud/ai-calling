@@ -18,6 +18,8 @@ import {
   getLeadsByPhone,
   loadSessions,
   saveSessions,
+  getSession,
+  saveSession,
   deleteSession,
   persistSessionArtifacts,
   persistSessionArtifactsUnlocked,
@@ -58,7 +60,13 @@ const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'XrExE9yKIg1Wjnnl
 // eleven_flash_v2_5: newer, may offer better expressiveness — test latency before switching
 const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID || 'eleven_turbo_v2_5';
 const TTS_TIMEOUT_MS = Number(process.env.TTS_TIMEOUT_MS || 2500);
-const MAX_TTS_CHARS = Number(process.env.MAX_TTS_CHARS || 180);
+// Budget for the SPOKEN WORDS of one turn. This used to be measured against the
+// SSML-marked-up string, where a handful of <break time='200ms'/> tags (15-21
+// chars each) inflated a normal two-sentence reply past the limit and got its
+// final sentence — the actual question — cut off. It is now measured on plain
+// text, with enough headroom for the "under 160 characters" the system prompt
+// asks the model for, plus an acknowledgment.
+const MAX_TTS_CHARS = Number(process.env.MAX_TTS_CHARS || 260);
 const STT_LOW_CONFIDENCE_THRESHOLD = Number(process.env.STT_LOW_CONFIDENCE_THRESHOLD ?? 0.55);
 
 const RESEND_API_KEY    = process.env.RESEND_API_KEY    || '';
@@ -74,6 +82,17 @@ const WEB_BASE_URL          = process.env.WEB_BASE_URL          || 'http://local
 const ADMIN_API_KEY         = process.env.ADMIN_API_KEY         || '';
 
 const REQUIRED_FIELDS_DEFAULT = ['full_name', 'callback_number', 'practice_area', 'case_summary'];
+
+// Fields the attorney cannot work a lead without. These get a second, rephrased
+// ask before Ava moves on; everything else may be dropped silently.
+const CORE_INTAKE_FIELDS = ['full_name', 'callback_number', 'case_summary'];
+const MAX_ASKS_PER_FIELD = 2;
+const REASK_QUESTIONS = {
+  full_name: "Sorry — I don't think I caught your name. Who am I speaking with?",
+  callback_number: "I still need a good callback number — what's the best one for you?",
+  case_summary: "And briefly, what happened, and roughly when?",
+  practice_area: "What kind of legal matter is this about?",
+};
 
 const TONE_PRESETS = {
   warm:         "Your tone is warm, empathetic, and unhurried. Use contractions naturally. Show genuine care. Never robotic.",
@@ -153,7 +172,10 @@ const DEFAULT_FIRM_CONFIG = {
   ava_name: 'Ava',
   tone: 'warm',
   industry: 'law_pi',
-  opening: "Hi, thanks for calling Redwood Legal Group — this is Ava. What can I help you with today?",
+  // The opening is a GREETING ONLY. The first question is appended to it by
+  // composeSpeakText so that what Ava says matches what the controller records
+  // as asked. An opening that ends in its own question would stack two questions.
+  opening: "Hi, thanks for calling Redwood Legal Group — this is Ava.",
   closing: "Perfect. I've got everything I need. An attorney will review this and reach out to you soon.",
   practice_areas: ['Personal Injury', 'Family Law', 'Employment'],
   required_fields: REQUIRED_FIELDS_DEFAULT,
@@ -167,6 +189,9 @@ const DEFAULT_FIRM_CONFIG = {
   acknowledgments: ['Got it.', 'Makes sense.', 'Okay.', 'Right.', 'Mm-hm.', 'I hear you.', 'Understood.'],
   max_questions: 8,
   max_reprompts: 2,
+  // Calls are recorded by default. Set false per firm where a recording notice
+  // is not in the opening and two-party-consent law applies.
+  record_calls: true,
   office_hours: 'Mon-Fri 8:00 AM - 6:00 PM',
   business_hours: null,
   timezone: 'America/New_York',
@@ -228,9 +253,13 @@ function checkRateLimit(key, maxHits, windowMs) {
   return true; // allowed
 }
 
-// Purge stale entries every 5 minutes to prevent memory growth
+// Purge stale entries every 5 minutes to prevent memory growth. The cutoff must
+// be the LONGEST window any caller of checkRateLimit uses (the per-firm daily
+// one) — pruning to 5 minutes silently reset the daily counter every 5 minutes,
+// so the limit it appeared to enforce was never the limit actually enforced.
+const MAX_RATE_LIMIT_WINDOW_MS = 86_400_000;
 const rateLimitCleanupTimer = setInterval(() => {
-  const cutoff = Date.now() - 5 * 60_000;
+  const cutoff = Date.now() - MAX_RATE_LIMIT_WINDOW_MS;
   for (const [key, hits] of rateLimitStore.entries()) {
     const fresh = hits.filter((t) => t > cutoff);
     if (!fresh.length) rateLimitStore.delete(key);
@@ -238,6 +267,23 @@ const rateLimitCleanupTimer = setInterval(() => {
   }
 }, 5 * 60_000);
 rateLimitCleanupTimer.unref?.();
+
+// Call sids seen recently, so rate limiting can count CALLS instead of webhook
+// requests. Every turn of a conversation is a separate POST to /twiml; counting
+// requests meant a normal 8-turn call burned 8 units of the caller's quota and a
+// single brisk conversation could trip a per-minute limit on its own.
+const recentCallSids = new Map(); // callSid -> lastSeenMs
+const CALL_SID_TTL_MS = 2 * 60 * 60_000;
+function markCallSeen(callSid) {
+  const isNew = !recentCallSids.has(callSid);
+  recentCallSids.set(callSid, Date.now());
+  return isNew;
+}
+const callSidCleanupTimer = setInterval(() => {
+  const cutoff = Date.now() - CALL_SID_TTL_MS;
+  for (const [sid, ts] of recentCallSids.entries()) if (ts < cutoff) recentCallSids.delete(sid);
+}, 10 * 60_000);
+callSidCleanupTimer.unref?.();
 
 // ── Per-session ack index (avoids repeated acknowledgments) ──────────────────
 const sessionAckIndex = new Map();
@@ -702,6 +748,15 @@ function createSession({ callSid, firmId, fromPhone, firmConfig }) {
   };
 }
 
+// Did the caller actually tell us anything? Caller ID alone is not intake. Used
+// to decide whether a call that ended in silence is a lead worth emailing to the
+// attorney or just a pocket dial to file as partial.
+function hasActionableIntake(session) {
+  const collected = session?.collected || {};
+  return ['full_name', 'case_summary', 'practice_area', 'callback_number']
+    .some((field) => String(collected[field] || '').trim().length >= 2);
+}
+
 // ── Deterministic extraction ──────────────────────────────────────────────────
 
 // Short filler words that should never be treated as extractable content
@@ -900,12 +955,15 @@ const NON_NAME_WORDS = new Set([
 // A value becomes full_name only when Ava is asking for the name, the caller made
 // an explicit name statement, or an explicit name correction — AND the candidate is
 // semantically a name, not a state/description/refusal. Never uses an LLM.
-function classifyNameCandidate(candidate, { sourceText = '', expectedField = '', correctionIntent = false } = {}) {
+function classifyNameCandidate(candidate, { sourceText = '', expectedField = '', correctionIntent = false, allowUnsolicited = false } = {}) {
   const v = String(candidate || '').trim();
   if (!v) return { accepted: false, reason: 'empty' };
   const sourceHasNamePrefix = /(?:my name is|this is|i(?:'|’)?m|i am|i'?m called|call me|it'?s)\s+[A-Za-z]/i.test(sourceText);
   // Field/intent gate: only accept when the name was actually solicited or volunteered.
-  if (expectedField !== 'full_name' && !sourceHasNamePrefix && !correctionIntent) {
+  // `allowUnsolicited` is set by one narrow caller (see the callback-turn rule in
+  // runNextStepController) where the caller is answering the name question a turn
+  // late and every other guard below still has to pass.
+  if (expectedField !== 'full_name' && !sourceHasNamePrefix && !correctionIntent && !allowUnsolicited) {
     return { accepted: false, reason: 'unexpected_field' };
   }
   if (/\d/.test(v)) return { accepted: false, reason: 'digit_dominated' };
@@ -1080,6 +1138,21 @@ function buildDeterministicQuestion(session, firmConfig) {
       nextField,
       nextQuestionId: nextField,
       nextQuestionText: getQuestionText(nextField, firmConfig),
+    };
+  }
+
+  // Every askable required field has been asked at least once, and this one is
+  // STILL empty. Falling straight through to a generic "anything else?" here is
+  // how a lead reaches the attorney with no name and no callback number: the
+  // caller answered a different question (or was never really asked), and Ava
+  // never comes back to it. Re-ask a core field once, rephrased, before giving up.
+  const askCount = session.askedQuestionIds.filter((id) => id === nextField).length;
+  if (CORE_INTAKE_FIELDS.includes(nextField) && askCount < MAX_ASKS_PER_FIELD) {
+    return {
+      done: false,
+      nextField,
+      nextQuestionId: nextField,
+      nextQuestionText: REASK_QUESTIONS[nextField] || getQuestionText(nextField, firmConfig),
     };
   }
 
@@ -1511,12 +1584,22 @@ function composeSpeakText({ session, bodyText, callSid, firmConfig, llmAck = '',
   if (!session.disclaimerShown) {
     session.disclaimerShown = true;
     if (session.callerType === 'returning' && session.knownName) {
+      // The returning greeting IS an open "what brings you in" question, and the
+      // controller records case_summary as the asked field on this turn, so the
+      // spoken line and the recorded question already agree. Do not stack a
+      // second question on top of it.
       const firstName = session.knownName.split(/\s+/)[0];
       return getReturningGreeting(firstName, firmConfig);
     }
     const opening = firmConfig.opening || `Hi, this is ${firmConfig.ava_name || 'Ava'}, the attorney's assistant.`;
-    // On first turn, append the caller type question so the caller knows what to say
-    return session.callerType === null && trimmed ? `${opening} ${trimmed}` : opening;
+    // INVARIANT: whatever question the controller recorded as asked on this turn
+    // must actually be spoken. The controller has already pushed nextQuestionId
+    // into askedQuestionIds and set lastQuestionId before we get here, so
+    // returning the bare opening desyncs speech from state: the caller is never
+    // asked for their name, their next utterance is attributed to the wrong
+    // field, and the askedQuestionIds guard then blocks Ava (and the LLM) from
+    // ever asking for it again. Always append the question.
+    return trimmed ? `${opening} ${trimmed}` : opening;
   }
 
   // (Fix B) Strip any prohibited lead-in ack the LLM baked into its line ("Okay, I
@@ -1525,12 +1608,17 @@ function composeSpeakText({ session, bodyText, callSid, firmConfig, llmAck = '',
   // separately below from a safe allowlist, so this only removes the banned lead-ins.
   trimmed = stripLeadingProhibitedAck(trimmed) || trimmed;
 
-  // LLM provided its own acknowledgment — next_question_text already has it baked in,
-  // so return it directly instead of prepending a redundant deterministic ack.
-  if (llmAck) return enrichForSpeech(trimmed);
+  // NOTE: this returns PLAIN TEXT, never SSML. Prosody markup is applied at the
+  // last possible moment, inside the TTS calls (see ttsPayloadText). Returning
+  // SSML from here poisoned everything downstream that treats speakText as words:
+  // the <break> tags counted against the TTS character budget (so a normal
+  // two-sentence reply was truncated and the caller never heard the question),
+  // and the raw tags were stored in the transcript, replayed to the LLM as
+  // conversation history, shown to the attorney, and fed to the repeat detector.
+  if (llmAck) return trimmed;
 
   const ack = getNextAck(callSid || session.callSid, firmConfig, callerContext);
-  return enrichForSpeech(ack ? `${ack} ${trimmed}` : trimmed);
+  return ack ? `${ack} ${trimmed}` : trimmed;
 }
 
 // ── XML + TwiML ───────────────────────────────────────────────────────────────
@@ -1610,9 +1698,20 @@ function doneTwiml({ speakText, ttsKey, liveUrl = null, firmId = '', callSid = '
 
 // ── TTS ───────────────────────────────────────────────────────────────────────
 
+// Prosody markup is added here, at the boundary with ElevenLabs, and nowhere
+// else. The cache key is computed on the PLAIN text so that one spoken sentence
+// always maps to one cache entry (and one prewarmed file), independent of how
+// enrichForSpeech happens to mark it up.
+function ttsPayloadText(plainText) {
+  return enrichForSpeech(plainText);
+}
+
 async function synthesizeToDisk(text) {
   const safeText = truncateForSpeech(text, MAX_TTS_CHARS);
   if (!safeText || !ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) return null;
+  if (String(text || '').replace(/\s+/g, ' ').trim().length > safeText.length) {
+    app.log.warn({ chars: String(text).length, limit: MAX_TTS_CHARS, kept: safeText.slice(-60) }, 'tts-truncated — spoken line was cut short');
+  }
 
   const voiceSettings = getVoiceSettings();
   const key = makeTtsCacheKey({ voiceId: ELEVENLABS_VOICE_ID, modelId: ELEVENLABS_MODEL_ID, settings: voiceSettings, text: safeText });
@@ -1631,7 +1730,7 @@ async function synthesizeToDisk(text) {
         method: 'POST',
         headers: { 'xi-api-key': ELEVENLABS_API_KEY, Accept: 'audio/mpeg', 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          text: safeText,
+          text: ttsPayloadText(safeText),
           model_id: ELEVENLABS_MODEL_ID,
           enable_ssml_parsing: true,
           voice_settings: voiceSettings,
@@ -1668,32 +1767,35 @@ async function prewarmTtsCache() {
   const firms = await listFirmConfigs();
   const allPhrases = new Set();
 
+  // Prewarm the exact strings the runtime will ask for, or the cache never hits.
+  // Previously this warmed raw questions and every configured acknowledgment,
+  // while the runtime speaks "<allowlisted ack> <question>", the greeting joined
+  // to the first question, a sanitized closing, and different reprompt templates
+  // — so almost every prewarmed file was for a string Ava never says, and almost
+  // every line she does say was synthesized live, mid-call.
   for (const firm of firms) {
-    // Opening and closing are firm-specific
-    if (firm.opening) allPhrases.add(firm.opening);
-    if (firm.closing) allPhrases.add(firm.closing);
-    // All question overrides
-    for (const q of Object.values(firm.question_overrides || {})) {
-      if (q) allPhrases.add(q);
-    }
-    // All acknowledgments
-    for (const ack of (firm.acknowledgments || [])) {
-      if (ack) allPhrases.add(ack);
-    }
-    // Reprompts
-    allPhrases.add(`Sorry, I didn't catch that. ${firm.question_overrides?.full_name || "What's your name?"}`);
-    allPhrases.add(`Could you say that again? ${firm.question_overrides?.full_name || "What's your name?"}`);
-  }
-
-  // Also prewarm ack+question combos — these are the exact strings spoken on turns 2+
-  // e.g. "Got it. And the best number to reach you?" — not individually cached by the above
-  for (const firm of firms) {
-    const acks = firm.acknowledgments || [];
     const questions = Object.values(firm.question_overrides || {}).filter(Boolean);
-    for (const ack of acks) {
-      for (const q of questions) {
-        allPhrases.add(`${ack} ${q}`);
-      }
+    const firstQuestion = getQuestionText(
+      (firm.required_fields || REQUIRED_FIELDS_DEFAULT)[0],
+      firm,
+    );
+
+    // Turn 1: greeting + first question, exactly as composeSpeakText joins them.
+    const opening = firm.opening || `Hi, this is ${firm.ava_name || 'Ava'}, the attorney's assistant.`;
+    allPhrases.add(firstQuestion ? `${opening} ${firstQuestion}` : opening);
+
+    // The closing as selectClosing sanitizes it (neutral path).
+    if (firm.closing) allPhrases.add(stripLeadingProhibitedAck(firm.closing) || firm.closing);
+
+    // Turns 2+: only the allowlisted acknowledgments are ever spoken.
+    for (const ack of getSafeDeterministicAcks(firm)) {
+      for (const q of questions) allPhrases.add(`${ack} ${q}`);
+      for (const q of Object.values(REASK_QUESTIONS)) allPhrases.add(`${ack} ${q}`);
+    }
+
+    // The real reprompt templates, with the question they wrap.
+    for (const template of (getRepromptPhrases(firm) || []).filter(Boolean)) {
+      for (const q of questions) allPhrases.add(String(template).replace('{QUESTION}', q));
     }
   }
 
@@ -2165,13 +2267,16 @@ async function generateDynamicFiller({ userText, lastQuestionText }) {
   }
 }
 
-async function fireNotifications(session, firmConfig) {
+// `latched: true` means the caller already set session.notified and persisted it
+// before calling (the only race-safe order — see runNextStepController). Callers
+// that have not done that get the in-memory check, which is better than nothing.
+async function fireNotifications(session, firmConfig, { latched = false } = {}) {
   app.log.info(
     { leadId: session.leadId, done: session.done, hasResendKey: !!RESEND_API_KEY, notificationEmail: firmConfig?.notification_email || '' },
     'fireNotifications called',
   );
   if (!session.done) return;
-  if (session.notified) {
+  if (!latched && session.notified) {
     app.log.debug({ leadId: session.leadId }, 'notifications already sent — skipping');
     return;
   }
@@ -2232,6 +2337,69 @@ function fireWebhooks(lead, firmId, firmConfig) {
     .catch((err) => app.log.warn({ err: String(err), firmId }, 'webhook delivery error'));
 }
 
+// ── Twilio call control ───────────────────────────────────────────────────────
+
+function twilioAuthHeader() {
+  return `Basic ${Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64')}`;
+}
+
+// Every Twilio REST call here logs a non-2xx response. The previous code attached
+// only a .catch(), which fires on network errors but NOT on a 400 — so an
+// outright rejected request looked exactly like a successful one.
+async function twilioPost(url, params, { callSid, label }) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { Authorization: twilioAuthHeader(), 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(params).toString(),
+    signal: AbortSignal.timeout(Number(process.env.TWILIO_TIMEOUT_MS ?? 5000)),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    app.log.error({ callSid, label, status: res.status, body: body.slice(0, 300) }, 'twilio request rejected');
+  }
+  return res;
+}
+
+function registerCallStatusCallback(callSid) {
+  twilioPost(
+    `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Calls/${callSid}.json`,
+    {
+      StatusCallback: `${PUBLIC_BASE_URL}/call-status`,
+      StatusCallbackMethod: 'POST',
+    },
+    { callSid, label: 'call-status-callback' },
+  ).catch((err) => app.log.warn({ err: String(err), callSid }, 'statusCallback registration failed'));
+}
+
+// Recording a live call is the Recordings sub-resource, not a Call update field.
+// The first /twiml webhook can arrive a moment before Twilio considers the call
+// in-progress (error 21220), so one delayed retry is worth it.
+async function startCallRecording(callSid, attempt = 0) {
+  try {
+    const res = await twilioPost(
+      `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Calls/${callSid}/Recordings.json`,
+      {
+        RecordingStatusCallback: `${PUBLIC_BASE_URL}/recording-status`,
+        RecordingStatusCallbackMethod: 'POST',
+        RecordingStatusCallbackEvent: 'completed',
+        RecordingChannels: 'dual',
+        RecordingTrack: 'both',
+      },
+      { callSid, label: 'start-recording' },
+    );
+    if (res.ok) {
+      app.log.info({ callSid }, 'recording-started');
+      return;
+    }
+    if (attempt === 0) {
+      setTimeout(() => { startCallRecording(callSid, 1).catch(() => {}); }, 1500);
+    }
+  } catch (err) {
+    app.log.warn({ err: String(err), callSid, attempt }, 'startCallRecording failed');
+    if (attempt === 0) setTimeout(() => { startCallRecording(callSid, 1).catch(() => {}); }, 1500);
+  }
+}
+
 // ── Returning caller lookup ───────────────────────────────────────────────────
 
 async function lookupCallerHistory(phone, firmId) {
@@ -2261,10 +2429,9 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
   return withCallLock(callSid, async () => {
   // Load this firm's config from its JSON file
   const firmConfig = await loadFirmConfig(firmId || 'firm_default');
-  const sessions = await loadSessions();
 
   const normalizedPhone = normalizePhone(fromPhone);
-  let session = sessions[callSid];
+  let session = await getSession(callSid);
   if (!session) {
     session = createSession({ callSid, firmId: firmConfig.id, fromPhone: normalizedPhone, firmConfig });
   }
@@ -2273,7 +2440,15 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
   session.lastSpeechConfidence = speechConfidence;
 
   const callerText = String(userText || '').trim();
-  if (callerText) appendTranscript(session, 'caller', callerText);
+  if (callerText) {
+    appendTranscript(session, 'caller', callerText);
+    // A silence counter that never resets is a hangup timer. repromptCount was
+    // only ever incremented, so two pauses ANYWHERE in a call — looking up a
+    // policy number, thinking about how to describe an accident — hit
+    // max_reprompts and Ava said goodbye mid-intake. Reprompts mean
+    // "consecutive silences", so a caller who speaks clears the count.
+    session.repromptCount = 0;
+  }
 
   // Early exit detection — caller wants to end the call before intake is complete
   if (callerText && detectEarlyExit(callerText)) {
@@ -2281,10 +2456,20 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
     sessionAckIndex.delete(callSid);
     const exitText = getEarlyExitPhrase(firmConfig);
     appendTranscript(session, 'assistant', exitText);
-    sessions[callSid] = session;
+    session.updatedAt = nowIso();
+    // This path saves the lead as done (ready_for_review) but used to be the one
+    // completed-call exit that never notified anyone: no email, no SMS, no
+    // webhook. A caller who says "actually, I'll call back later" after giving
+    // their name and number is a real lead the attorney never heard about.
+    const shouldNotify = hasActionableIntake(session) && !session.notified;
+    if (shouldNotify) session.notified = true;
     const ttsKey = await synthesizeToDisk(exitText).catch(() => null);
-    await saveSessions(sessions);
+    await saveSession(callSid, session);
     persistSessionArtifacts(session, { assistantText: exitText, callerText, done: true }).catch((err) => app.log.warn({ err: String(err), callSid }, 'early-exit persistArtifacts failed'));
+    if (shouldNotify) {
+      fireNotifications(session, firmConfig, { latched: true })
+        .catch((err) => app.log.error({ err: String(err), callSid }, 'early-exit fireNotifications failed'));
+    }
     return { firmConfig, session, payload: { speakText: exitText, ttsKey, done: true, nextField: null, timings: {} } };
   }
 
@@ -2341,16 +2526,29 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
   let speculativeText = '';
   let ttsPrefetch = null;
   if (!speculativeDecision.done && speculativeDecision.nextQuestionText) {
+    // A prefetch is only worth anything if it synthesizes the EXACT string that
+    // gets spoken, because the text IS the cache key. This used to cache the bare
+    // question while composeSpeakText spoke "<ack> <question>" (and on the first
+    // turn the greeting plus the question), so it missed on essentially every
+    // turn: an ElevenLabs call was paid for and thrown away, and the caller then
+    // waited on a second, serial synthesis after OpenAI returned. peekNextAck
+    // reads the next acknowledgment without advancing the rotation.
     speculativeText = session.disclaimerShown
-      ? speculativeDecision.nextQuestionText
-      : (firmConfig.opening || `Hi, this is ${firmConfig.ava_name || 'Ava'}, the attorney's assistant.`);
+      ? [peekNextAck(callSid, firmConfig, callerContext), speculativeDecision.nextQuestionText].filter(Boolean).join(' ')
+      : `${firmConfig.opening || `Hi, this is ${firmConfig.ava_name || 'Ava'}, the attorney's assistant.`} ${speculativeDecision.nextQuestionText}`.trim();
     ttsPrefetch = synthesizeToDisk(speculativeText).catch(() => null);
   }
 
-  // Kick off TTS as soon as early text arrives (before full OpenAI response is done)
+  // Kick off TTS as soon as early text arrives (before the full OpenAI response is
+  // done). Run it through the same lead-in sanitizer composeSpeakText applies, or
+  // the synthesized string differs from the spoken one every time the model opens
+  // with "Okay," / "Perfect," — and the head start is discarded.
+  let earlyComposedText = '';
   earlyTextPromise.then((earlyText) => {
-    if (earlyText && earlyText !== speculativeText) {
-      earlyTtsPromise = synthesizeToDisk(earlyText).catch(() => null);
+    if (!earlyText) return;
+    earlyComposedText = stripLeadingProhibitedAck(earlyText) || earlyText;
+    if (earlyComposedText !== speculativeText) {
+      earlyTtsPromise = synthesizeToDisk(earlyComposedText).catch(() => null);
     }
   });
 
@@ -2438,6 +2636,23 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
   }
   if (callbackCollectedThisTurn) {
     app.log.info({ callSid, callbackProvenance: session.callbackProvenance || 'unknown' }, 'callback-collected');
+  }
+
+  // ── Late name capture ───────────────────────────────────────────────────────
+  // Ava asks for a callback number; the caller answers with their name instead
+  // (they are answering the question from a turn earlier, or they just lead with
+  // it). Without this the utterance is discarded — classifyNameCandidate's field
+  // gate rejects any name that was not explicitly solicited — and the attorney
+  // gets a lead with no name. A digits-expected turn is the one place where a
+  // digit-free, name-shaped utterance is unambiguous, and every other name guard
+  // (token count, state words, case descriptions, refusals) still has to pass.
+  if (!String(session.collected.full_name || '').trim()
+      && (expectedField === 'callback_number' || expectedField === '__phone_retry__')
+      && callerText && !/\d/.test(callerText) && !phoneCandidate
+      && classifyNameCandidate(callerText.trim(), { sourceText: callerText, allowUnsolicited: true }).accepted) {
+    session.collected.full_name = callerText.trim();
+    fieldUpdates.full_name = callerText.trim();
+    app.log.info({ callSid, expectedField }, 'late-name-capture: caller gave their name on the callback turn');
   }
 
   // ── Urgency detection (Fix C) ──────────────────────────────────────────────
@@ -2561,7 +2776,12 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
     const nextText = String(llm.next_question_text || '').trim();
     // Exclude a refused field so the LLM can't re-propose it (Fix D).
     const missing = requiredFields.filter((field) => !isFieldSatisfied(field));
-    if (nextId && nextText && !session.askedQuestionIds.includes(nextId) && missing.includes(nextId) && missing.length) {
+    // NOTE: do NOT also require `!askedQuestionIds.includes(nextId)` here.
+    // `missing` already excludes collected and refused fields, so that extra
+    // condition only ever blocked the LLM from asking again for a field that is
+    // genuinely still empty — which is exactly what it should be allowed to do.
+    // (With the first-turn desync it also permanently blocked the name question.)
+    if (nextId && nextText && missing.includes(nextId) && missing.length) {
       // 5.2 — field-repeat guard: skip if already collected
       if (session.collected[nextId] && String(session.collected[nextId]).trim()) {
         // already collected — let deterministic fallback pick the next missing field
@@ -2727,7 +2947,6 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
 
   appendTranscript(session, 'assistant', speakText);
   session.updatedAt = nowIso();
-  sessions[callSid] = session;
 
   // Resolve TTS with a hard deadline: we've already spent time waiting for OpenAI,
   // so cap the additional ElevenLabs wait to TTS_BUDGET_MS. If it's not ready in
@@ -2735,13 +2954,16 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
   const TTS_BUDGET_MS = Number(process.env.TTS_BUDGET_MS ?? 15000);
   const ttsDeadline = new Promise((r) => setTimeout(() => r(null), TTS_BUDGET_MS));
   const tTtsStart = Date.now();
+  // Already settled by this point (the OpenAI stream is done), so this only makes
+  // sure earlyComposedText has been assigned before we compare against it.
+  await earlyTextPromise.catch(() => null);
   let ttsKey;
   if (speakText === speculativeText && ttsPrefetch) {
     // Speculative hit — audio is likely already cached; race just in case
     ttsKey = await Promise.race([ttsPrefetch, ttsDeadline]);
     app.log.info({ callSid, hit: !!ttsKey, elapsedMs: Date.now() - tTtsStart, totalMs: Date.now() - tOpenAiStart }, 'tts-resolved (speculative)');
     if (!ttsKey) app.log.info({ callSid }, 'tts-speculative-hit but deadline exceeded, using <Say>');
-  } else if (earlyTtsPromise && speakText === (await earlyTextPromise)) {
+  } else if (earlyTtsPromise && speakText === earlyComposedText) {
     // Early-stream hit — TTS has been running since next_question_text arrived in stream
     ttsKey = await Promise.race([earlyTtsPromise, ttsDeadline]);
     app.log.info({ callSid, hit: !!ttsKey, elapsedMs: Date.now() - tTtsStart, totalMs: Date.now() - tOpenAiStart }, 'tts-resolved (early-stream)');
@@ -2759,13 +2981,25 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
   }
   const tAfterTts = Date.now();
 
+  // Close the notification latch BEFORE persisting, not inside fireNotifications.
+  // fireNotifications set session.notified = true after saveSessions had already
+  // written the row, so the latch never reached the database: the grace-period
+  // path reloads the session, sees notified:false, and the attorney gets a second
+  // copy of the same lead (email + SMS + webhook) for every "thanks, bye" the
+  // caller says after the closing.
+  const shouldNotify = session.done === true && !session.notified;
+  if (shouldNotify) session.notified = true;
+
   // Persist session state before returning so follow-up routes can read their writes.
-  await saveSessions(sessions);
+  await saveSession(callSid, session);
   persistSessionArtifacts(session, { assistantText: speakText, callerText, done: session.done })
     .then(() => { if (session.done) app.log.info({ callSid, leadId: session.leadId }, 'persistArtifacts OK — lead saved to DB'); })
     .catch((err) => app.log.error({ err: String(err), callSid, leadId: session.leadId }, 'persistArtifacts FAILED — lead not saved'));
-  app.log.info({ leadId: session.leadId, sessionDone: session.done, firmId: session.firmId, notificationEmailFromConfig: firmConfig?.notification_email || '(empty)' }, 'about to call fireNotifications');
-  fireNotifications(session, firmConfig).catch(err => app.log.error({ err: String(err) }, 'fireNotifications background failure'));
+  if (shouldNotify) {
+    app.log.info({ leadId: session.leadId, sessionDone: session.done, firmId: session.firmId, notificationEmailFromConfig: firmConfig?.notification_email || '(empty)' }, 'about to call fireNotifications');
+    fireNotifications(session, firmConfig, { latched: true })
+      .catch(err => app.log.error({ err: String(err) }, 'fireNotifications background failure'));
+  }
 
   return {
     firmConfig,
@@ -3165,7 +3399,7 @@ app.get('/tts-live', async (req, reply) => {
         method: 'POST',
         headers: { 'xi-api-key': ELEVENLABS_API_KEY, Accept: 'audio/mpeg', 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          text: safeText,
+          text: ttsPayloadText(safeText),
           model_id: ELEVENLABS_MODEL_ID,
           enable_ssml_parsing: true,
           voice_settings: voiceSettings,
@@ -3234,17 +3468,29 @@ app.post('/twiml', { preHandler: twilioSignaturePreHandler }, async (req, reply)
     return reply.send(doneTwiml({ speakText: 'Unable to continue this call right now.', ttsKey: null }));
   }
 
-  // Rate limiting: per-IP (10 req/min) and per-firmId (100 calls/day)
-  const clientIp = req.headers?.['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || 'unknown';
-  if (!checkRateLimit(`ip:${clientIp}`, 10, 60_000)) {
-    reply.header('Content-Type', 'text/xml');
-    app.log.warn({ clientIp, firmId }, 'rate limit hit (IP)');
-    return reply.send(doneTwiml({ speakText: RATE_LIMIT_MESSAGES[Math.floor(Math.random() * RATE_LIMIT_MESSAGES.length)], ttsKey: null }));
-  }
-  if (!checkRateLimit(`firm:${firmId}`, 100, 86_400_000)) {
-    reply.header('Content-Type', 'text/xml');
-    app.log.warn({ firmId }, 'rate limit hit (firm)');
-    return reply.send(doneTwiml({ speakText: RATE_LIMIT_MESSAGES[Math.floor(Math.random() * RATE_LIMIT_MESSAGES.length)], ttsKey: null }));
+  // Rate limiting counts NEW CALLS, never turns. Every turn of a conversation is
+  // another POST here, so counting requests meant a normal 8-turn intake spent 8
+  // units of quota and one brisk caller alone exceeded a 10/minute limit. Worse,
+  // all of this traffic arrives from Twilio's shared egress IPs (via Railway's
+  // proxy), so the per-IP key is not a caller at all. Limiting a call already in
+  // progress is never right: the caller has done nothing wrong and gets hung up
+  // on mid-sentence. So: only the first request of a call is counted, and only
+  // the first request of a call can ever be rejected.
+  const isNewCall = markCallSeen(callSid);
+  if (isNewCall) {
+    const clientIp = req.headers?.['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || 'unknown';
+    const ipCallsPerMin = Number(process.env.RATE_LIMIT_IP_CALLS_PER_MIN || 30);
+    const firmCallsPerDay = Number(process.env.RATE_LIMIT_FIRM_CALLS_PER_DAY || 200);
+    if (!checkRateLimit(`ip:${clientIp}`, ipCallsPerMin, 60_000)) {
+      reply.header('Content-Type', 'text/xml');
+      app.log.warn({ clientIp, firmId, limit: ipCallsPerMin }, 'rate limit hit (IP, new calls/min)');
+      return reply.send(doneTwiml({ speakText: RATE_LIMIT_MESSAGES[Math.floor(Math.random() * RATE_LIMIT_MESSAGES.length)], ttsKey: null }));
+    }
+    if (!checkRateLimit(`firm:${firmId}`, firmCallsPerDay, 86_400_000)) {
+      reply.header('Content-Type', 'text/xml');
+      app.log.warn({ firmId, limit: firmCallsPerDay }, 'rate limit hit (firm, calls/day)');
+      return reply.send(doneTwiml({ speakText: RATE_LIMIT_MESSAGES[Math.floor(Math.random() * RATE_LIMIT_MESSAGES.length)], ttsKey: null }));
+    }
   }
 
   // Answering machine / voicemail detection
@@ -3291,26 +3537,20 @@ app.post('/twiml', { preHandler: twilioSignaturePreHandler }, async (req, reply)
       }
     }
 
-    const sessions = await loadSessions();
-    let session = sessions[callSid];
+    let session = await getSession(callSid);
     if (!session) {
       session = createSession({ callSid, firmId, fromPhone, firmConfig });
-      sessions[callSid] = session;
-      await saveSessions(sessions);
-      // Register statusCallback and enable recording on the live call
+      await saveSession(callSid, session);
+      // Register the status callback, then start the recording. These are two
+      // different Twilio APIs and used to be sent as one request to the Call
+      // *update* endpoint — which accepts StatusCallback but has no Record or
+      // RecordingStatusCallback parameter at all. Twilio ignores unknown form
+      // fields and returns 200, and the response was never inspected, so no
+      // recording was ever created, /recording-status never fired, and every
+      // lead's recording_url stayed null with nothing in the logs to say why.
       if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
-        const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64');
-        fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Calls/${callSid}.json`, {
-          method: 'POST',
-          headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({
-            StatusCallback: `${PUBLIC_BASE_URL}/call-status`,
-            StatusCallbackMethod: 'POST',
-            Record: 'record-from-answer-dual',
-            RecordingStatusCallback: `${PUBLIC_BASE_URL}/recording-status`,
-            RecordingStatusCallbackMethod: 'POST',
-          }).toString(),
-        }).catch((err) => app.log.warn({ err: String(err), callSid }, 'statusCallback/recording registration failed'));
+        registerCallStatusCallback(callSid);
+        if (firmConfig.record_calls !== false) startCallRecording(callSid);
       }
     }
 
@@ -3319,7 +3559,11 @@ app.post('/twiml', { preHandler: twilioSignaturePreHandler }, async (req, reply)
     // webhook retry) on a done session must not re-enter first-turn logic and
     // produce a duplicate goodbye. Speak the closing once and hang up.
     if (session.done === true) {
-      const closing = firmConfig.closing || DEFAULT_FIRM_CONFIG.closing;
+      // Use the same sanitized closing the call actually ended with, not the raw
+      // firm string — otherwise a Twilio retry replays a second, differently
+      // worded goodbye ("Perfect. I've got everything I need...") that
+      // selectClosing had deliberately stripped.
+      const closing = selectClosing(session, firmConfig);
       const closeKey = await synthesizeToDisk(closing).catch(() => null);
       reply.header('Content-Type', 'text/xml');
       return reply.send(doneTwiml({ speakText: closing, ttsKey: closeKey }));
@@ -3340,16 +3584,33 @@ app.post('/twiml', { preHandler: twilioSignaturePreHandler }, async (req, reply)
         // Reprompt — start TTS and fire-and-forget saves in parallel
         if (isEmptyRedirect || !userText) session.repromptCount += 1;
         speakText = applyRepromptText(session, firmConfig);
-        done = session.done;
+        done = session.done; // controls the TwiML: we still hang up after the closing
+        // ...but a call that ended because NOBODY SPOKE is not a completed intake.
+        // Persisting it with done=true stamps outcome=intake_complete and
+        // status=ready_for_review and emails the attorney a "New lead — Unknown
+        // Caller (General)" for every pocket dial, robocall and dropped line.
+        const intakeComplete = done && hasActionableIntake(session);
+        const shouldNotify = intakeComplete && !session.notified;
+        if (shouldNotify) session.notified = true; // latch before the row is written
         appendTranscript(session, 'assistant', speakText);
         session.updatedAt = nowIso();
-        sessions[callSid] = session;
         const ttsPromise = synthesizeToDisk(speakText);
-        await saveSessions(sessions);
-        persistSessionArtifacts(session, { assistantText: speakText, callerText: '', done })
+        await saveSession(callSid, session);
+        const persisted = persistSessionArtifacts(session, { assistantText: speakText, callerText: '', done: intakeComplete })
           .catch((err) => app.log.warn({ err: String(err), callSid }, 'persistArtifacts failed'));
-        app.log.info({ leadId: session.leadId, sessionDone: session.done, firmId: session.firmId, notificationEmailFromConfig: firmConfig?.notification_email || '(empty)' }, 'about to call fireNotifications');
-        await fireNotifications(session, firmConfig);
+        if (shouldNotify) {
+          app.log.info({ leadId: session.leadId, sessionDone: session.done, firmId: session.firmId, notificationEmailFromConfig: firmConfig?.notification_email || '(empty)' }, 'about to call fireNotifications');
+          // Never await notifications inside a Twilio webhook. sendEmailWithRetry
+          // makes up to 3 Resend attempts with 5s timeouts and 0/1s/4s backoff —
+          // worst case ~20s, past Twilio's 15s webhook budget, at which point the
+          // caller hears Twilio's generic error instead of Ava's goodbye.
+          fireNotifications(session, firmConfig, { latched: true })
+            .catch((err) => app.log.error({ err: String(err), callSid }, 'fireNotifications background failure'));
+        } else if (done) {
+          app.log.info({ callSid, leadId: session.leadId }, 'reprompt-close: silence with nothing collected — saving as partial, no lead email');
+          persisted.then(() => patchLead(session.leadId, { status: 'partial' }))
+            .catch((err) => app.log.warn({ err: String(err), callSid }, 'reprompt-close: partial status patch failed'));
+        }
         ttsKey = await ttsPromise;
       }
     } else {
@@ -3535,12 +3796,11 @@ app.post('/twiml-grace', { preHandler: twilioSignaturePreHandler }, async (req, 
 
   app.log.info({ callSid, speech: speech.slice(0, 100) }, 'twiml-grace: caller spoke — continuing');
 
-  const sessions = await loadSessions();
-  const session = sessions[callSid];
+  const session = await getSession(callSid);
   if (session) {
     session.done = false;
-    sessions[callSid] = session;
-    await saveSessions(sessions);
+    session.updatedAt = nowIso();
+    await saveSession(callSid, session);
   }
 
   try {
@@ -3577,8 +3837,7 @@ app.post('/call-status', { preHandler: twilioSignaturePreHandler }, async (req, 
 
   withCallLock(callSid, async () => {
     // Reload session inside the lock so we see the final state after any in-flight /twiml turn.
-    const sessions = await loadSessions();
-    const session = sessions[callSid];
+    const session = await getSession(callSid);
     if (!session) return;
 
     // Duration patch is now inside the lock — can't race persistSessionArtifacts.
@@ -3626,8 +3885,7 @@ app.post('/recording-status', { preHandler: twilioSignaturePreHandler }, async (
   reply.code(204).send();
 
   withCallLock(callSid, async () => {
-    const sessions = await loadSessions();
-    const session = sessions[callSid];
+    const session = await getSession(callSid);
     if (session?.leadId) {
       await patchLead(session.leadId, { recording_url: recordingUrl, recording_duration: duration });
       app.log.info({ callSid, leadId: session.leadId, duration }, 'recording-saved');
@@ -4060,13 +4318,17 @@ if (RESEND_FROM_EMAIL && !RESEND_FROM_EMAIL.endsWith('@resend.dev')) {
   const fromDomain = RESEND_FROM_EMAIL.split('@')[1] || '';
   app.log.warn({ RESEND_FROM_EMAIL, fromDomain }, 'BOOT: RESEND_FROM_EMAIL uses a custom domain — ensure it is verified in the Resend dashboard or emails will be rejected (403)');
 }
+// Report the settings that are actually sent to ElevenLabs. This block used to
+// print hardcoded "(default 0.38 / 0.80 / 0.38)" strings left over from a
+// previous tuning pass while getVoiceSettings() sent 0.55 / 0.75 / 0.10, so the
+// boot log disagreed with the request body and every voice-tuning session since
+// has been reading the wrong numbers.
 app.log.info({
   ELEVENLABS_MODEL_ID,
   ELEVENLABS_VOICE_ID: ELEVENLABS_VOICE_ID ? ELEVENLABS_VOICE_ID.slice(0, 8) + '...' : '(unset)',
-  ELEVEN_STABILITY:     process.env.ELEVEN_STABILITY     ?? '(default 0.38)',
-  ELEVEN_SIMILARITY:    process.env.ELEVEN_SIMILARITY    ?? '(default 0.80)',
-  ELEVEN_STYLE:         process.env.ELEVEN_STYLE         ?? '(default 0.38)',
-  ELEVEN_SPEAKER_BOOST: process.env.ELEVEN_SPEAKER_BOOST ?? '(default true)',
+  voice_settings: getVoiceSettings(),
+  overridden: ['ELEVEN_STABILITY', 'ELEVEN_SIMILARITY', 'ELEVEN_STYLE', 'ELEVEN_SPEAKER_BOOST', 'ELEVEN_SPEED']
+    .filter((k) => process.env[k] != null),
 }, 'BOOT ElevenLabs voice config');
 
 if (isMain) {

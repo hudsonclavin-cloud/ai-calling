@@ -853,7 +853,7 @@
     {
       "id": "reject-acknowledgment-summary",
       "category": "case_summary",
-      "description": "Bare acknowledgment is not stored as case_summary.",
+      "description": "Bare acknowledgment is not stored as case_summary, and Ava re-asks for the summary instead of giving up on it.",
       "startingState": {
         "callerType": "new",
         "disclaimerShown": true,
@@ -882,7 +882,7 @@
         "notCollected": [
           "case_summary"
         ],
-        "nextQuestionId": "final_clarify",
+        "nextQuestionId": "case_summary",
         "done": false,
         "retryState": {
           "phoneRetryPending": false,
@@ -894,7 +894,7 @@
     {
       "id": "reject-phone-summary",
       "category": "case_summary",
-      "description": "Bare phone number on a summary turn is not stored as case_summary.",
+      "description": "Bare phone number on a summary turn is not stored as case_summary, and Ava re-asks for the summary instead of giving up on it.",
       "startingState": {
         "callerType": "new",
         "disclaimerShown": true,
@@ -925,7 +925,7 @@
         "notCollected": [
           "case_summary"
         ],
-        "nextQuestionId": "final_clarify",
+        "nextQuestionId": "case_summary",
         "done": false,
         "retryState": {
           "phoneRetryPending": false,
@@ -937,7 +937,7 @@
     {
       "id": "reject-name-like-summary",
       "category": "case_summary",
-      "description": "Name-like text on a summary turn is not stored as case_summary.",
+      "description": "Name-like text on a summary turn is not stored as case_summary, and Ava re-asks for the summary instead of giving up on it.",
       "startingState": {
         "callerType": "new",
         "disclaimerShown": true,
@@ -966,7 +966,7 @@
         "notCollected": [
           "case_summary"
         ],
-        "nextQuestionId": "final_clarify",
+        "nextQuestionId": "case_summary",
         "done": false,
         "retryState": {
           "phoneRetryPending": false,
@@ -1100,7 +1100,7 @@
     {
       "id": "correction-approved-ack-only",
       "category": "emotional_context",
-      "description": "Correction context allows only the approved correction acknowledgment or no acknowledgment.",
+      "description": "Correction context allows only the approved correction acknowledgment or no acknowledgment, and Ava re-asks for the number the caller just said was wrong.",
       "startingState": {
         "callerType": "new",
         "disclaimerShown": true,
@@ -1127,7 +1127,7 @@
         "notCollected": [
           "callback_number"
         ],
-        "nextQuestionId": "final_clarify",
+        "nextQuestionId": "callback_number",
         "done": false,
         "retryState": {
           "phoneRetryPending": false,

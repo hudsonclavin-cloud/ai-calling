@@ -373,6 +373,28 @@ export async function loadSessions() {
 
 export async function saveSessions(sessions) { await _saveSessions(sessions); }
 
+// Single-row session access. Use these on every live-call path.
+//
+// Reading the whole sessions table, mutating one entry and writing the whole
+// table back is a lost-update generator: while caller A's turn is waiting on
+// OpenAI (up to 8s) and ElevenLabs, caller B completes a turn and saves; A then
+// writes back its stale snapshot and reverts B's row to what it was when A's turn
+// started. B's next turn reloads a session with turnCount 0 and disclaimerShown
+// false, so Ava replays the greeting and re-asks questions B already answered.
+// The same write also resurrects rows /call-status has just deleted.
+export async function getSession(callSid) {
+  if (!callSid) return null;
+  const result = await getClient().execute({ sql: 'SELECT data FROM sessions WHERE callSid = ?', args: [String(callSid)] });
+  const row = result.rows[0];
+  if (!row) return null;
+  try { return JSON.parse(String(row.data)); } catch { return null; }
+}
+
+export async function saveSession(callSid, session) {
+  if (!callSid || !session) return;
+  await _saveSessions({ [String(callSid)]: session });
+}
+
 export async function deleteSession(callSid) {
   await getClient().execute({ sql: 'DELETE FROM sessions WHERE callSid = ?', args: [callSid] });
 }

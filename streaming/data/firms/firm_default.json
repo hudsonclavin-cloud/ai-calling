@@ -6,7 +6,7 @@
   "tone": "warm",
   "industry": "law_pi",
 
-  "opening": "Hi, this is Ava with Redwood Legal Group. I'm going to ask you a few quick questions so the attorney can review your case before calling you back.",
+  "opening": "Hi, thanks for calling Redwood Legal Group — this is Ava.",
   "closing": "Perfect. I've got everything I need. An attorney from Redwood Legal will review this and reach out to you soon.",
 
   "practice_areas": ["Personal Injury", "Family Law", "Employment"],
