@@ -415,7 +415,13 @@ function getUrgencyOpener(firmConfig, session) {
 // (Fix B) Remove a leading throwaway acknowledgment ("Perfect." / "Great," / "Okay —")
 // from Ava speech. These read as tone-deaf on sensitive calls and are what the launch
 // evaluator flags. Deterministic; only strips a single leading filler token.
-const PROHIBITED_LEADING_ACK = /^\s*(perfect|great|awesome|excellent|wonderful|fantastic|amazing|right|mm-?hm+|okay|ok|alright|all right|of course|sure|got it|gotcha)\b[\s.,!—–-]*/i;
+// The acknowledgment must be followed by punctuation, i.e. it stands on its own
+// as the opening beat of the line. Matching on a bare word boundary decapitated
+// real sentences: "Great question — the attorney will cover that" became
+// "Question — ...", "Sure thing — what happened?" became "Thing — what
+// happened?", and "Right after the accident, what happened?" became "After the
+// accident, ...". Under-stripping is harmless; mutilating Ava's line is not.
+const PROHIBITED_LEADING_ACK = /^\s*(perfect|great|awesome|excellent|wonderful|fantastic|amazing|right|mm-?hm+|okay|ok|alright|all right|of course|sure|got it|gotcha)\s*[.,!?—–-]+\s*/i;
 function stripLeadingProhibitedAck(text) {
   let s = String(text || '');
   if (!PROHIBITED_LEADING_ACK.test(s)) return s;
@@ -429,6 +435,12 @@ function stripLeadingProhibitedAck(text) {
 // prohibited acknowledgment. Neutral closings reuse the firm's line, sanitized.
 function selectClosing(session, firmConfig) {
   const base = firmConfig?.closing || DEFAULT_FIRM_CONFIG.closing;
+  // The firm's closing typically claims "I've got everything I need". Saying that
+  // on a call where Ava collected nothing is the line that makes the product feel
+  // broken to the caller, and it misleads the attorney reading the transcript.
+  if (!hasActionableIntake(session)) {
+    return "Thanks for calling — I've made a note of your call and someone from the office will follow up.";
+  }
   if (session.isUrgent) {
     return "I'm really glad you reached out. I've noted everything for the team so the right person can follow up with you as soon as possible.";
   }
@@ -875,7 +887,9 @@ function extractStructuredDeterministic(userText, expectedField = '') {
   const phoneMatch = text.match(/(\+?\d[\d\s().-]{8,}\d)/);
   if (phoneMatch) extracted.callback_number = normalizePhone(phoneMatch[1]);
 
-  const nameMatch = text.match(/(?:my name is|this is|i(?:'|’)?m|i am)\s+([A-Za-z.'\-\s]{2,})/i);
+  // "my name's Maria Gonzalez" and "the name's Dave" are the commonest spoken
+  // forms and the contraction was missing, so those names were never extracted.
+  const nameMatch = text.match(/(?:my name'?s|my name is|the name'?s|this is|i(?:'|’)?m|i am|call me)\s+([\p{L}.'\-\s]{2,})/iu);
   const nameCandidate = nameMatch ? nameMatch[1].trim() : (expectedField === 'full_name' ? text : '');
   if (nameCandidate && isLikelyName(nameCandidate, text, expectedField)) extracted.full_name = nameCandidate;
 
@@ -971,11 +985,25 @@ function selectThinkingFiller(userText, lastFillerIdx = -1, callerContext = clas
   return { category, text: FILLER_PHRASES[fillerIdx], fillerIdx };
 }
 
+// Vocabulary that means the caller is describing their matter, not leaving. An
+// exit phrase inside a sentence like this is part of the story: "I'm done with
+// my husband, I want a divorce" is a family-law lead, not a goodbye, and hanging
+// up on it is the worst thing Ava can do.
+const MATTER_VOCABULARY = /\b(divorce|custody|accident|crash|wreck|injur\w*|hurt|hospital|doctor|arrest\w*|charge[ds]?|court|case|lawyer|attorney|sue|sued|lawsuit|evict\w*|fired|terminated|harass\w*|abuse[ds]?|assault\w*|police|ticket|dui|will|estate|bankrupt\w*|contract|landlord|insurance|claim|settlement|hit me|threatened)\b/;
+
 function detectEarlyExit(text) {
   const lower = String(text || '').toLowerCase().trim();
   if (!lower) return false;
+  const wordCount = lower.split(/\s+/).filter(Boolean).length;
+  // A caller who is still telling you about their matter is not signing off, even
+  // if their words happen to contain "I'm done" or "no thanks".
+  if (wordCount > 5 && MATTER_VOCABULARY.test(lower)) return false;
   // (Fix F) Unambiguous exit intents — no destination sense, safe to fire on directly.
-  if (/\b(never\s*mind|nevermind|forget it|scratch that|disregard|not interested|changed my mind|i don'?t need help|i'?m (all set|good for now)|no thanks?|good\s*bye|goodbye|bye( now)?|i'?m done|end (the |this )?call|hang up|maybe another time|some other time|call me later)\b/.test(lower)) {
+  // "i'm done with/being/of ..." continues into a complaint; only a standalone
+  // "I'm done" is a sign-off. "bye" needs a real boundary — \b matches inside
+  // "bye-law", so a hyphen or letter on either side disqualifies it.
+  if (/\bi'?m done\s+(with|being|of|dealing|putting)\b/.test(lower)) return false;
+  if (/(?:^|[^\w-])(never\s*mind|nevermind|forget it|scratch that|disregard|not interested|changed my mind|i don'?t need help|i'?m (all set|good for now)|no thanks?|good\s*bye|goodbye|bye( now)?|i'?m done|end (the |this )?call|hang up|maybe another time|some other time|call me later)(?:[^\w-]|$)/.test(lower)) {
     return true;
   }
   // "call (you) back" / "try again" / "reach out later" — an exit, and distinct from
@@ -1046,7 +1074,9 @@ function classifyNameCandidate(candidate, { sourceText = '', expectedField = '',
     return { accepted: false, reason: 'unexpected_field' };
   }
   if (/\d/.test(v)) return { accepted: false, reason: 'digit_dominated' };
-  if (!/^[A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*){0,3}$/.test(v)) {
+  // Unicode letters, not just A-Z: rejecting "José Ramírez" or "Nguyễn" sent the
+  // attorney a lead with no name on it.
+  if (!/^\p{L}[\p{L}.'-]*(?:\s+\p{L}[\p{L}.'-]*){0,3}$/u.test(v)) {
     return { accepted: false, reason: 'invalid_characters' };
   }
   const words = v.split(/\s+/).filter(Boolean);
@@ -1059,6 +1089,12 @@ function classifyNameCandidate(candidate, { sourceText = '', expectedField = '',
   // Refusal / non-answer ("I'd rather not say", "I don't want to give my name").
   if (/\b(rather not|don'?t want|won'?t|prefer not|not comfortable|no comment|none of)\b/i.test(v)) {
     return { accepted: false, reason: 'refusal' };
+  }
+  // Sign-offs and closers. "That's everything", "nothing else" and "that's all"
+  // are name-shaped by every other rule here and were being stored as the
+  // caller's full name.
+  if (/^(that'?s (everything|all|it)|nothing else|no that'?s it|all good|we'?re good|that is all|i think so|not really|no idea)$/i.test(v)) {
+    return { accepted: false, reason: 'sign_off' };
   }
   // Any state / incident word disqualifies the whole candidate.
   const stateWord = words.find((w) => NON_NAME_WORDS.has(w.toLowerCase().replace(/[.'-]+$/, '')));
@@ -1132,7 +1168,7 @@ function extractAllFieldsFromLongResponse(text, expectedField = '') {
   const phoneMatch = text.match(/(\+?\d[\d\s().-]{8,}\d)/);
   if (phoneMatch) extracted.callback_number = normalizePhone(phoneMatch[1]);
 
-  const nameMatch = text.match(/(?:my name is|this is|i(?:'|’)?m|i am)\s+([A-Za-z.'\-\s]{2,})/i);
+  const nameMatch = text.match(/(?:my name'?s|my name is|the name'?s|this is|i(?:'|’)?m|i am|call me)\s+([\p{L}.'\-\s]{2,})/iu);
   if (nameMatch && isLikelyName(nameMatch[1].trim(), text, expectedField)) extracted.full_name = nameMatch[1].trim();
 
   const lower = text.toLowerCase();
@@ -1208,7 +1244,13 @@ function buildDeterministicQuestion(session, firmConfig) {
   // A field the caller explicitly refused is not askable — asking it again is the
   // repeated-question loop (Fix D/G). It stays "missing" but we never re-request it.
   const refused = session.refusedField ? new Set([session.refusedField]) : new Set();
-  const missing = requiredFields.filter((field) => !String(session.collected[field] || '').trim());
+  const missing = requiredFields.filter((field) => {
+    // A provisional summary (the caller's distress statement, captured before Ava
+    // ever asked what happened) counts as present for completion but still gets
+    // asked properly, so an urgent call is never left with only that.
+    if (field === 'case_summary' && session.provisionalSummary && !session.askedQuestionIds.includes('case_summary')) return true;
+    return !String(session.collected[field] || '').trim();
+  });
   const askable = missing.filter((f) => !refused.has(f));
   if (!askable.length) return { done: true, nextField: null, nextQuestionId: null, nextQuestionText: '' };
 
@@ -2593,7 +2635,12 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
 
   // Returning caller check — on first turn only (before caller type question is asked)
   if (!callerText && session.callerType === null) {
-    const history = await lookupCallerHistory(normalizedPhone, firmConfig.id);
+    // A blocked or unparseable caller id normalises to an empty string, which
+    // matched every other anonymous caller's lead — so Ava greeted a stranger by
+    // a previous caller's name and pre-filled their details.
+    const history = normalizedPhone
+      ? await lookupCallerHistory(normalizedPhone, firmConfig.id)
+      : { isReturning: false, priorLeads: [] };
     if (history.isReturning) {
       session.callerType = 'returning';
       // Pre-populate captured fields so Ava doesn't re-ask — EXCEPT callback_number,
@@ -2782,12 +2829,14 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
       session.isUrgent = true;
       session.urgencyCategory = urg.category;
       app.log.info({ callSid, urgencyCategory: urg.category, signals: urg.signals, confidence: urg.confidence }, 'urgency-detected');
-      // The urgency statement ("I was in a car accident and I'm scared") may have been
-      // auto-extracted as case_summary by extractStructuredDeterministic (≥40 chars, ≥4 words).
-      // That's NOT a real case summary — it's just the distress signal.
-      // Clear it so Ava explicitly asks for a case summary on a later turn instead of jumping to done.
-      if (!session.askedQuestionIds.includes('case_summary')) {
-        delete session.collected.case_summary;
+      // The distress statement ("I was in a car accident and I'm scared") may have
+      // been auto-captured as case_summary. It is a thin summary, so Ava should
+      // still ask what happened — but DELETING it meant that if the call ended
+      // soon after (and distressed callers are exactly the ones who cut a call
+      // short), the attorney received the most urgent lead of the day with an
+      // empty summary. Keep it as a provisional summary and remember to ask.
+      if (!session.askedQuestionIds.includes('case_summary') && String(session.collected.case_summary || '').trim()) {
+        session.provisionalSummary = true;
       }
     }
   }
@@ -2873,6 +2922,24 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
     session.collected.callback_number = session.carriedCallback;
     session.callbackProvenance = 'carried_number';
     callbackCollectedThisTurn = true;
+  }
+
+  // The system prompt instructs Ava to confirm a caller-ID number ("and the best
+  // number for you is the one you're calling from?"), but nothing ever promoted
+  // it when the caller said yes — so they answered the question correctly and
+  // were asked for their number again, sometimes repeatedly. Credit the caller ID
+  // only on an explicit affirmation to the callback question, never silently.
+  if (!callbackCollectedThisTurn
+      && !String(session.collected.callback_number || '').trim()
+      && (expectedField === 'callback_number' || expectedField === '__phone_retry__')
+      && callerText && isAffirmative(callerText)
+      && !session.carriedCallback
+      && isLikelyPhone(session.phoneFromCallerId || session.fromPhone || '')) {
+    session.collected.callback_number = normalizePhone(session.phoneFromCallerId || session.fromPhone);
+    session.callbackProvenance = 'caller_id_confirmed';
+    fieldUpdates.callback_number = session.collected.callback_number;
+    callbackCollectedThisTurn = true;
+    app.log.info({ callSid }, 'callback: caller confirmed the number they are calling from');
   }
 
   if (callbackCollectedThisTurn || String(session.collected.callback_number || '').trim()) {
@@ -2996,7 +3063,16 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
     // "who am I speaking with?" while the state machine believed it had asked for
     // the practice area — and then throw the caller's name away.
     const llmQuestionText = String(llm?.next_question_text || '').trim();
-    let questionBody = (forceDeterministicText ? '' : llmQuestionText) || nextDecision.nextQuestionText;
+    // If the model decided to close but the gate disagreed (a core field is still
+    // missing), its text is a goodbye. Speaking a goodbye and then holding the
+    // line open leaves the caller sitting in silence waiting for a call that has
+    // not ended. Use the deterministic question instead.
+    const llmWantedToClose = String(llm?.next_question_id || '').trim() === 'done';
+    if (llmWantedToClose) {
+      app.log.info({ callSid, nextField: nextDecision.nextField }, 'model wanted to close but a required field is missing — asking for it instead of speaking its goodbye');
+    }
+    const useDeterministic = forceDeterministicText || llmWantedToClose;
+    let questionBody = (useDeterministic ? '' : llmQuestionText) || nextDecision.nextQuestionText;
 
     // A refused field must not keep being asked (Fix D/G): if the LLM ignores the
     // refusal and keeps pushing it in free-form text, use the deterministic question
@@ -4087,9 +4163,18 @@ app.post('/call-status', { preHandler: twilioSignaturePreHandler }, async (req, 
       }
     }
 
-    // Session already marked done — full lead already saved by the last /twiml turn, just clean up.
+    // Session already marked done — the lead was saved by the last /twiml turn.
+    // But "done" also covers a call that ended because nobody spoke, which the
+    // reprompt path deliberately filed as partial. Re-persisting that with
+    // done:true here stamped it intake_complete / ready_for_review again and
+    // undid the distinction, putting blank leads back in the attorney's queue.
     if (session.done === true) {
-      await persistSessionArtifactsUnlocked(session, { assistantText: '', callerText: '', done: true });
+      const complete = hasActionableIntake(session);
+      await persistSessionArtifactsUnlocked(session, { assistantText: '', callerText: '', done: complete });
+      if (!complete) {
+        await patchLead(session.leadId, { status: 'partial' })
+          .catch((err) => app.log.warn({ err: String(err), callSid }, 'call-status: partial status patch failed'));
+      }
       await deleteSession(callSid).catch((err) => app.log.warn({ err: String(err), callSid }, 'call-status: session delete failed'));
       return;
     }

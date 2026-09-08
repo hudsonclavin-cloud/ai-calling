@@ -283,3 +283,17 @@ test('lost cached audio is regenerated instead of becoming dead air', async () =
   const traversal = await app.inject({ method: 'GET', url: '/api/tts?key=' + encodeURIComponent('../../../../etc/passwd') });
   assert.equal(traversal.statusCode, 400, 'a key that is not a hash is rejected');
 });
+
+test('confirming the number you are calling from counts as giving a callback number', async () => {
+  const callSid = 'CATEST_CALLERID_CONFIRM';
+  const from = '+17045550188';
+  await turn(callSid, null, { from });
+  await turn(callSid, 'My name is Alan Pierce', { from });
+  // Ava is now asking for a callback number; the caller confirms caller ID.
+  const session0 = await db.getSession(callSid);
+  assert.equal(session0.lastQuestionId, 'callback_number', 'precondition: Ava is asking for the number');
+  await turn(callSid, 'yes, this number is fine', { from });
+
+  const session = await db.getSession(callSid);
+  assert.equal(session.collected.callback_number, from, 'the confirmed caller ID is credited');
+});
