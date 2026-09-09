@@ -9,8 +9,13 @@ let skipWarned = false;
 // logs pointing at the signature check.
 const REJECT_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response><Say>Sorry, this line is not configured correctly right now. Please try again later.</Say><Hangup/></Response>';
 
+// Answered 200, deliberately. Twilio only PLAYS TwiML from a 2xx response — a
+// 4xx is a failed webhook, and the caller gets Twilio's own "an application
+// error has occurred" recording instead of anything we wrote. Nothing is
+// mutated on this path and the body is a fixed sentence, so there is nothing to
+// protect by refusing; the caller hearing a human sentence is worth more.
 function reject(reply) {
-  reply.code(403).header('Content-Type', 'text/xml').send(REJECT_TWIML);
+  reply.code(200).header('Content-Type', 'text/xml').send(REJECT_TWIML);
 }
 
 function buildUrl(publicBase, rawUrl) {

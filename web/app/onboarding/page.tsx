@@ -37,13 +37,16 @@ const STEP_LABELS = ["Business Info", "Assistant", "Scripts", "Review"] as const
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function toFirmId(name: string): string {
+  // The backend rejects an id longer than 64 characters, and a law firm's full
+  // legal name routinely exceeds that, so signup failed with a 400 for exactly
+  // the businesses most likely to be real.
   return (
     "firm_" +
     name
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "_")
       .replace(/^_+|_+$/g, "")
-  );
+  ).slice(0, 64).replace(/_+$/, "");
 }
 
 function smartOpening(businessName: string, assistantName: string): string {

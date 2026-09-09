@@ -436,3 +436,53 @@ test('a sign-off is not a name, not a summary, and not a correction', async () =
   assert.ok(!/clarifying/i.test(spokenText(xml)), 'so the closing does not thank them for clarifying');
   assert.ok(before, 'sanity: the call was in progress');
 });
+
+test('an unrelated reply on the callback turn is not stored as the caller name', async () => {
+  // The late-name-capture rule accepts a name given on a digits turn. Without a
+  // shape check it accepted anything short and digit-free — "Hold on please"
+  // and "I don't know" both became the client's legal name on the lead.
+  for (const [i, utterance] of ['Hold on please', "I don't know", 'Let me check', 'My cell phone'].entries()) {
+    const callSid = `CATEST_NOTNAME_${i}`;
+    const from = `+1704555${9100 + i}`;
+    await turn(callSid, null, { from });
+    await turn(callSid, 'I was in a car accident', { from }); // Ava moves to the number
+    await turn(callSid, utterance, { from });
+    const session = await db.getSession(callSid);
+    assert.equal(session.collected.full_name, '', `"${utterance}" must not become a name`);
+  }
+});
+
+test('a call that ends without a completed intake still closes its call row', async () => {
+  const callSid = 'CATEST_ROW_CLOSED';
+  const from = '+17045559200';
+  await turn(callSid, null, { from });
+  await turn(callSid, 'My name is Nadia Okafor', { from });
+  await post('/call-status', { CallSid: callSid, CallStatus: 'completed', CallDuration: '20' });
+  await new Promise((r) => setTimeout(r, 250));
+
+  const call = await db.getCallByCallSid(callSid);
+  // Deriving the row purely from "intake complete" left every partial call
+  // sitting at In Progress on the dashboard forever.
+  assert.equal(call.status, 'completed', 'the call row is closed');
+  assert.ok(call.endedAt, 'and has an end time');
+});
+
+test('a pocket dial from a known number is not treated as a lead', async () => {
+  const from = '+17045559300';
+  const first = 'CATEST_KNOWN_FIRST';
+  await turn(first, null, { from });
+  await turn(first, 'My name is Iris Vance and I was rear-ended last week', { from });
+  await turn(first, 'seven zero four, five five five, nine three zero zero', { from });
+
+  // Same number calls back and says nothing at all.
+  const second = 'CATEST_KNOWN_SILENT';
+  await turn(second, null, { from });
+  let closed = false;
+  for (let i = 0; i < 8 && !closed; i++) closed = hasHangup(await turn(second, '', { from }));
+
+  const session = await db.getSession(second);
+  // Returning-caller detection pre-fills name and practice area before the
+  // caller has spoken, so "do we have any fields" is not the same question as
+  // "did this caller tell us anything".
+  assert.equal(session.notified, false, 'silence from a known number is not a new lead');
+});

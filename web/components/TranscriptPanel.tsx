@@ -9,9 +9,10 @@ import type { LeadDetail } from "@/lib/types";
 interface TranscriptPanelProps {
   leadId: string | null;
   onClose: () => void;
+  firmId?: string;
 }
 
-export function TranscriptPanel({ leadId, onClose }: TranscriptPanelProps) {
+export function TranscriptPanel({ leadId, onClose, firmId }: TranscriptPanelProps) {
   const [lead, setLead] = useState<LeadDetail | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -22,11 +23,13 @@ export function TranscriptPanel({ leadId, onClose }: TranscriptPanelProps) {
     }
     setLoading(true);
     setLead(null);
-    getLeadById(leadId).then((data) => {
+    // The backend requires firmId on this route; without it the panel just
+    // showed an endless spinner.
+    getLeadById(leadId, firmId).then((data) => {
       setLead(data);
       setLoading(false);
     });
-  }, [leadId]);
+  }, [leadId, firmId]);
 
   if (!leadId) return null;
 

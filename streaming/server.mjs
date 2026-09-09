@@ -226,9 +226,14 @@ const DEFAULT_FIRM_CONFIG = {
   // — it also happens when it could not transcribe them. Two strikes ended the
   // call on people who were talking the whole time.
   max_reprompts: 3,
-  // Calls are recorded by default. Set false per firm where a recording notice
-  // is not in the opening and two-party-consent law applies.
+  // Calls are recorded by default, and the caller is told so on the first turn.
+  // Recording previously never worked at all (the parameters were sent to an
+  // endpoint that ignores them), so making it work turns a dormant compliance
+  // problem into a live one in every two-party-consent state. Set
+  // recording_notice to an empty string only if the notice is given some other
+  // way, or set record_calls false to leave recording off.
   record_calls: true,
+  recording_notice: 'Just so you know, this call is recorded.',
   office_hours: 'Mon-Fri 8:00 AM - 6:00 PM',
   business_hours: null,
   timezone: 'America/New_York',
@@ -340,6 +345,9 @@ rateLimitCleanupTimer.unref?.();
 // requests meant a normal 8-turn call burned 8 units of the caller's quota and a
 // single brisk conversation could trip a per-minute limit on its own.
 const recentCallSids = new Map(); // callSid -> lastSeenMs
+// Consecutive handler failures per call, so an error loop is bounded.
+const errorRetryCounts = new Map();
+const MAX_ERROR_RETRIES = Number(process.env.MAX_ERROR_RETRIES || 2);
 const CALL_SID_TTL_MS = 2 * 60 * 60_000;
 function markCallSeen(callSid) {
   const isNew = !recentCallSids.has(callSid);
@@ -624,14 +632,25 @@ function sanitizeFirmId(firmId) {
 }
 
 async function loadFirmConfig(firmId) {
+  const requestedId = String(firmId || '').trim();
   const id = sanitizeFirmId(firmId) || 'firm_default';
+  const unknownFirm = !!requestedId && id !== requestedId;
   const filePath = path.join(FIRMS_DIR, `${id}.json`);
   const raw = await readJson(filePath, null);
   const defaultRaw = id === 'firm_default'
     ? raw
     : await readJson(path.join(FIRMS_DIR, 'firm_default.json'), null);
-  const baseConfig = defaultRaw ? { ...DEFAULT_FIRM_CONFIG, ...defaultRaw } : { ...DEFAULT_FIRM_CONFIG };
-  if (!raw) {
+  let baseConfig = defaultRaw ? { ...DEFAULT_FIRM_CONFIG, ...defaultRaw } : { ...DEFAULT_FIRM_CONFIG };
+  // Another firm's config is a template for wording and behaviour, never for
+  // WHERE ITS LEADS GO. Deleting these on write was not enough: any key absent
+  // from a firm's own file was merged straight back in from firm_default here,
+  // so a firm created without a notification phone silently sent its lead SMS
+  // to the default firm's number.
+  if (id !== 'firm_default') {
+    baseConfig = { ...baseConfig };
+    for (const field of TENANT_SPECIFIC_FIRM_FIELDS) delete baseConfig[field];
+  }
+  if (!raw || unknownFirm) {
     // Answering with the default script is the right thing for the CALLER — the
     // phone still gets answered. Inheriting the default firm's notification
     // email, phone and webhook is not: a Twilio number pointed at the wrong
@@ -867,6 +886,11 @@ function createSession({ callSid, firmId, fromPhone, firmConfig }) {
 // to decide whether a call that ended in silence is a lead worth emailing to the
 // attorney or just a pocket dial to file as partial.
 function hasActionableIntake(session) {
+  // A returning caller's prior name and practice area are copied into collected
+  // on the FIRST turn, before they have said a word, so fields alone cannot
+  // answer "did this caller tell us anything". Require that they actually spoke.
+  const saidSomething = (session?.transcript || []).some((t) => t.role === 'caller' && String(t.text || '').trim());
+  if (!saidSomething) return false;
   const collected = session?.collected || {};
   return ['full_name', 'case_summary', 'practice_area', 'callback_number']
     .some((field) => String(collected[field] || '').trim().length >= 2);
@@ -1112,6 +1136,39 @@ const NON_NAME_WORDS = new Set([
   'husband', 'wife', 'boyfriend', 'girlfriend', 'partner', 'someone', 'somebody',
 ]);
 
+// Words that carry no identity. A name candidate made ENTIRELY of these is
+// speech, not a name. Kept separate from NON_NAME_WORDS (states and incidents)
+// because a real name may legitimately contain one of these ("Will Smith").
+const COMMON_SPEECH_WORDS = new Set([
+  'a','an','the','and','or','but','if','so','then','than','as','at','by','for','from','in','into','of','on','to','with','about',
+  'i','me','my','mine','we','us','our','you','your','yours','he','him','his','she','her','hers','they','them','their','it','its',
+  'this','that','these','those','here','there','now','later','again','back','just','only','really','very','well','okay','ok',
+  'is','am','are','was','were','be','been','being','do','does','did','dont','doesnt','didnt','have','has','had','can','could',
+  'will','would','shall','should','may','might','must','let','lets','get','got','give','go','going','come','need','want','like',
+  'yes','no','not','sure','thanks','thank','please','sorry','hello','hi','hey','um','uh','one','two','second','minute','moment',
+  'what','when','where','why','how','who','which','whose',
+]);
+// High-precision markers that a phrase is about the CALL, not a person. Any one
+// of these disqualifies the candidate outright.
+const STRONG_NON_NAME_WORDS = new Set([
+  'hold','wait','repeat','know','check','speak','speaking','calling','call','phone','number','cell','mobile','unlisted',
+  'private','blocked','again','said','say','tell','told','ask','asked','sorry','trying','reach','reached','listed',
+]);
+
+// Is this utterance shaped like a personal name, with no question asked? Used
+// only where a name was NOT solicited, so the bar is deliberately higher: a
+// false negative just means Ava asks for the name, while a false positive puts
+// "Hold on please" on the attorney's lead as the client's legal name.
+function looksLikePersonalName(value) {
+  const words = String(value || '').trim().split(/\s+/).filter(Boolean);
+  if (words.length < 2 || words.length > 4) return false;
+  const norm = words.map((w) => w.toLowerCase().replace(/[^\p{L}']/gu, ''));
+  if (norm.some((w) => !w)) return false;
+  if (norm.some((w) => STRONG_NON_NAME_WORDS.has(w))) return false;
+  if (norm.every((w) => COMMON_SPEECH_WORDS.has(w))) return false;
+  return true;
+}
+
 // Deterministic name-candidate classifier (Fix A). Returns { accepted, reason }.
 // A value becomes full_name only when Ava is asking for the name, the caller made
 // an explicit name statement, or an explicit name correction — AND the candidate is
@@ -1126,6 +1183,11 @@ function classifyNameCandidate(candidate, { sourceText = '', expectedField = '',
   // late and every other guard below still has to pass.
   if (expectedField !== 'full_name' && !sourceHasNamePrefix && !correctionIntent && !allowUnsolicited) {
     return { accepted: false, reason: 'unexpected_field' };
+  }
+  // Nothing solicited this name, so it must look like one on its own merits.
+  if (allowUnsolicited && expectedField !== 'full_name' && !sourceHasNamePrefix && !correctionIntent
+      && !looksLikePersonalName(v)) {
+    return { accepted: false, reason: 'not_name_shaped' };
   }
   if (/\d/.test(v)) return { accepted: false, reason: 'digit_dominated' };
   // Unicode letters, not just A-Z: rejecting "José Ramírez" or "Nguyễn" sent the
@@ -1735,7 +1797,13 @@ function numberToWords(n) {
 }
 
 function enrichForSpeech(text) {
-  let s = String(text || '');
+  // The output of this function is an XML document when any tag is injected, so
+  // the words themselves have to be XML-safe first. A firm called "Smith & Jones"
+  // otherwise produced a malformed <speak> body.
+  let s = String(text || '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
   let ssmlAdded = false;
 
   // Post-ack pause
@@ -1792,15 +1860,22 @@ function composeSpeakText({ session, bodyText, callSid, firmConfig, llmAck = '',
       const firstName = session.knownName.split(/\s+/)[0];
       return getReturningGreeting(firstName, firmConfig);
     }
-    const opening = firmConfig.opening || `Hi, this is ${firmConfig.ava_name || 'Ava'}, the attorney's assistant.`;
+    const openingBase = firmConfig.opening || `Hi, this is ${firmConfig.ava_name || 'Ava'}, the attorney's assistant.`;
+    const notice = firmConfig.record_calls !== false && firmConfig.recording_notice
+      ? String(firmConfig.recording_notice).trim()
+      : '';
+    const opening = notice ? `${openingBase} ${notice}` : openingBase;
+    // The question is what the controller recorded as asked, so it is the part
+    // that must survive if the whole line does not fit.
+    if (trimmed) return fitOpeningWithQuestion(opening, trimmed, MAX_TTS_CHARS);
     // INVARIANT: whatever question the controller recorded as asked on this turn
     // must actually be spoken. The controller has already pushed nextQuestionId
     // into askedQuestionIds and set lastQuestionId before we get here, so
     // returning the bare opening desyncs speech from state: the caller is never
     // asked for their name, their next utterance is attributed to the wrong
     // field, and the askedQuestionIds guard then blocks Ava (and the LLM) from
-    // ever asking for it again. Always append the question.
-    return trimmed ? `${opening} ${trimmed}` : opening;
+    // ever asking for it again.
+    return opening;
   }
 
   // (Fix B) Strip any prohibited lead-in ack the LLM baked into its line ("Okay, I
@@ -1936,6 +2011,17 @@ function ttsLiveUrlFor(text, firmId) {
   // immutable lifetime). Version it with the settings hash so a change is a new URL.
   const v = sha1(JSON.stringify({ voiceId: ELEVENLABS_VOICE_ID, modelId: ELEVENLABS_MODEL_ID, settings: getVoiceSettings() })).slice(0, 8);
   return `${PUBLIC_BASE_URL}/tts-live?text=${encodeURIComponent(text)}&firmId=${encodeURIComponent(firmId)}&v=${v}`;
+}
+
+// Protects the trailing question when a long greeting plus a question exceeds
+// the speech budget: trimming from the end would drop the question, leaving Ava
+// recording a question she never asked — the original defect.
+function fitOpeningWithQuestion(opening, question, limit) {
+  const joined = `${opening} ${question}`.replace(/\s+/g, ' ').trim();
+  if (joined.length <= limit) return joined;
+  const room = limit - question.length - 1;
+  const trimmedOpening = room > 20 ? truncateForSpeech(opening, room) : '';
+  return trimmedOpening ? `${trimmedOpening} ${question}` : question;
 }
 
 async function synthesizeToDisk(text) {
@@ -2237,7 +2323,7 @@ function ctaButton(text, url, color = '#6d28d9') {
   return `<p style="margin:24px 0 0"><a href="${url}" style="display:inline-block;background:${color};color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-size:14px;font-weight:600">${text} →</a></p>`;
 }
 
-async function sendEmailNotification(session, firmConfig) {
+async function sendEmailNotification(session, firmConfig, { isUpdate = false } = {}) {
   const notificationEmail = String(firmConfig?.notification_email || '').trim();
   if (!RESEND_API_KEY) {
     app.log.warn({ leadId: session.leadId }, 'sendEmailNotification: RESEND_API_KEY not set — skipping');
@@ -2287,7 +2373,7 @@ async function sendEmailNotification(session, firmConfig) {
     leadId: session.leadId,
     firmId: session.firmId,
     to: notificationEmail,
-    subject: `New lead — ${name} (${area})`,
+    subject: isUpdate ? `Updated lead — ${name} (${area})` : `New lead — ${name} (${area})`,
     html,
   });
 }
@@ -2519,7 +2605,7 @@ async function generateDynamicFiller({ userText, lastQuestionText }) {
 // `latched: true` means the caller already set session.notified and persisted it
 // before calling (the only race-safe order — see runNextStepController). Callers
 // that have not done that get the in-memory check, which is better than nothing.
-async function fireNotifications(session, firmConfig, { latched = false } = {}) {
+async function fireNotifications(session, firmConfig, { latched = false, isUpdate = false } = {}) {
   app.log.info(
     { leadId: session.leadId, done: session.done, hasResendKey: !!RESEND_API_KEY, notificationEmail: firmConfig?.notification_email || '' },
     'fireNotifications called',
@@ -2535,7 +2621,7 @@ async function fireNotifications(session, firmConfig, { latched = false } = {}) 
     console.warn('[Email] Skipping — RESEND_API_KEY not set');
   }
   try {
-    await sendEmailNotification(session, firmConfig);
+    await sendEmailNotification(session, firmConfig, { isUpdate });
   } catch (err) {
     app.log.error({ err, leadId: session.leadId }, 'email notification unexpected failure');
     console.error('[Email] Resend error:', err);
@@ -3309,8 +3395,18 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
   // path reloads the session, sees notified:false, and the attorney gets a second
   // copy of the same lead (email + SMS + webhook) for every "thanks, bye" the
   // caller says after the closing.
-  const shouldNotify = session.done === true && !session.notified;
-  if (shouldNotify) session.notified = true;
+  // Latch on WHAT was notified, not merely THAT something was. A caller who adds
+  // or fixes a detail in the grace window after the goodbye ("wait — my number
+  // is actually...") re-completes the intake, and a plain boolean latch meant
+  // the attorney kept the first, wrong version and never heard about the fix.
+  const collectedFingerprint = JSON.stringify(session.collected || {});
+  const shouldNotify = session.done === true
+    && (!session.notified || session.notifiedFingerprint !== collectedFingerprint);
+  const isRenotify = shouldNotify && !!session.notified;
+  if (shouldNotify) {
+    session.notified = true;
+    session.notifiedFingerprint = collectedFingerprint;
+  }
 
   // Persist session state before returning so follow-up routes can read their writes.
   await saveSession(callSid, session);
@@ -3319,7 +3415,8 @@ async function runNextStepController({ firmId, callSid, fromPhone, userText, spe
     .catch((err) => app.log.error({ err: String(err), callSid, leadId: session.leadId }, 'persistArtifacts FAILED — lead not saved'));
   if (shouldNotify) {
     app.log.info({ leadId: session.leadId, sessionDone: session.done, firmId: session.firmId, notificationEmailFromConfig: firmConfig?.notification_email || '(empty)' }, 'about to call fireNotifications');
-    fireNotifications(session, firmConfig, { latched: true })
+    if (isRenotify) app.log.info({ callSid, leadId: session.leadId }, 'lead changed after the first notification — sending the corrected version');
+    fireNotifications(session, firmConfig, { latched: true, isUpdate: isRenotify })
       .catch(err => app.log.error({ err: String(err) }, 'fireNotifications background failure'));
   }
 
@@ -3413,7 +3510,11 @@ app.post('/test-email', async (req, reply) => {
 });
 
 // List all firms
-app.get('/api/firms', async () => {
+app.get('/api/firms', async (req, reply) => {
+  // This route hands out every firm id — which is the only thing standing
+  // between a stranger and that firm's leads — along with every notification
+  // address, phone number and Stripe id. It is an admin view.
+  if (requireAdminKey(req, reply) === false) return;
   const firms = await listFirmConfigs();
   return { data: firms };
 });
@@ -3997,7 +4098,7 @@ app.post('/twiml', { preHandler: twilioSignaturePreHandler }, async (req, reply)
         session.updatedAt = nowIso();
         const ttsPromise = synthesizeToDisk(speakText);
         await saveSession(callSid, session);
-        const persisted = persistSessionArtifacts(session, { assistantText: speakText, callerText: '', done: intakeComplete })
+        const persisted = persistSessionArtifacts(session, { assistantText: speakText, callerText: '', done: intakeComplete, ended: done })
           .catch((err) => app.log.warn({ err: String(err), callSid }, 'persistArtifacts failed'));
         if (shouldNotify) {
           app.log.info({ leadId: session.leadId, sessionDone: session.done, firmId: session.firmId, notificationEmailFromConfig: firmConfig?.notification_email || '(empty)' }, 'about to call fireNotifications');
@@ -4126,6 +4227,15 @@ app.post('/twiml', { preHandler: twilioSignaturePreHandler }, async (req, reply)
     // that firm. Say something and keep the line open so the turn can be retried.
     app.log.error({ err: String(err), stack: err?.stack, callSid }, '/twiml failed — keeping the line open');
     reply.header('Content-Type', 'text/xml');
+    // Bounded: a persistent server-side fault must not trap the caller in an
+    // endless "sorry, say that again" loop. Count the failures for this call and
+    // let them go after a few.
+    const failures = (errorRetryCounts.get(callSid) || 0) + 1;
+    errorRetryCounts.set(callSid, failures);
+    if (failures > MAX_ERROR_RETRIES) {
+      errorRetryCounts.delete(callSid);
+      return reply.send(doneTwiml({ speakText: getErrorMessage(), ttsKey: null }));
+    }
     return reply.send(gatherTwiml({
       actionUrl: `${PUBLIC_BASE_URL}/twiml?firmId=${encodeURIComponent(firmId)}`,
       speakText: getErrorMessage(),
@@ -4291,6 +4401,13 @@ app.post('/twiml-grace', { preHandler: twilioSignaturePreHandler }, async (req, 
     }));
   } catch (err) {
     app.log.error({ err: String(err), callSid }, '/twiml-grace failed');
+    // Restore the done flag we cleared above. Leaving it false hands /call-status
+    // a completed, already-notified lead to re-file as partial, and the attorney
+    // gets a second, worse copy of a lead they already have.
+    if (session) {
+      session.done = true;
+      await saveSession(callSid, session).catch(() => {});
+    }
     return reply.send(`<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`);
   }
 });
@@ -4327,7 +4444,7 @@ app.post('/call-status', { preHandler: twilioSignaturePreHandler }, async (req, 
     // undid the distinction, putting blank leads back in the attorney's queue.
     if (session.done === true) {
       const complete = hasActionableIntake(session);
-      await persistSessionArtifactsUnlocked(session, { assistantText: '', callerText: '', done: complete });
+      await persistSessionArtifactsUnlocked(session, { assistantText: '', callerText: '', done: complete, ended: true });
       if (!complete) {
         await patchLead(session.leadId, { status: 'partial' })
           .catch((err) => app.log.warn({ err: String(err), callSid }, 'call-status: partial status patch failed'));
@@ -4339,7 +4456,7 @@ app.post('/call-status', { preHandler: twilioSignaturePreHandler }, async (req, 
     // Caller hung up before intake completed — persist as partial lead.
     app.log.info({ callSid, leadId: session.leadId, callDuration }, 'call-status: saving partial lead');
     try {
-      await persistSessionArtifactsUnlocked(session, { assistantText: '', callerText: '', done: false });
+      await persistSessionArtifactsUnlocked(session, { assistantText: '', callerText: '', done: false, ended: true });
       await patchLead(session.leadId, { status: 'partial' });
       const firmConfig = await loadFirmConfig(session.firmId || 'firm_default');
       const partialLead = { id: session.leadId, firmId: session.firmId, fromPhone: session.fromPhone, status: 'partial', ...session.collected };

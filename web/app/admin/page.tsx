@@ -55,12 +55,22 @@ export default function AdminPage() {
   const [data, setData] = useState<Overview | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   function loadData() {
     fetch(`${ADMIN_PROXY}/api/admin/overview`, { cache: "no-store" })
-      .then((r) => r.json())
-      .then(setData)
-      .catch(() => {})
+      .then(async (r) => {
+        // The proxy answers 401 when the admin session has expired and 503 when
+        // ADMIN_API_KEY is not configured. Both used to be parsed as data and
+        // handed to the renderer, which then crashed on the missing fields.
+        if (!r.ok) {
+          const body = await r.json().catch(() => ({}));
+          throw new Error(body?.error || `Request failed (${r.status})`);
+        }
+        return r.json();
+      })
+      .then((d) => { setData(d); setError(null); })
+      .catch((e) => setError(e instanceof Error ? e.message : "Could not load the admin overview"))
       .finally(() => setLoading(false));
   }
 
@@ -69,14 +79,21 @@ export default function AdminPage() {
   async function handleAction(firmId: string, action: "suspend" | "reactivate") {
     setActionLoading(firmId);
     try {
-      await fetch(`${ADMIN_PROXY}/api/admin/firms/${encodeURIComponent(firmId)}`, {
+      const r = await fetch(`${ADMIN_PROXY}/api/admin/firms/${encodeURIComponent(firmId)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action }),
       });
+      // Reporting success on a rejected request is how a firm stays live after
+      // you thought you had suspended it.
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(body?.error || `Could not ${action} this firm (${r.status})`);
+      }
+      setError(null);
       loadData();
-    } catch {
-      // ignore
+    } catch (e) {
+      setError(e instanceof Error ? e.message : `Could not ${action} this firm`);
     } finally {
       setActionLoading(null);
     }
@@ -89,10 +106,14 @@ export default function AdminPage() {
         <p className="mt-1 text-sm text-slate-500">Aggregate stats across all firms.</p>
       </div>
 
+      {error && (
+        <p className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</p>
+      )}
+
       {loading ? (
         <p className="text-sm text-slate-400">Loading…</p>
       ) : !data ? (
-        <p className="text-sm text-rose-500">Failed to load admin overview.</p>
+        <p className="text-sm text-rose-500">{error ?? "Failed to load admin overview."}</p>
       ) : (
         <>
           {/* Summary cards */}

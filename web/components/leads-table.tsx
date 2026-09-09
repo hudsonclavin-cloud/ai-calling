@@ -40,7 +40,7 @@ function formatStatus(status: string): string {
   return status;
 }
 
-export function LeadsTable({ leads }: { leads: LeadSummary[] }) {
+export function LeadsTable({ leads, firmId }: { leads: LeadSummary[]; firmId?: string }) {
   const router = useRouter();
   const qRef = useRef('');
 
@@ -211,7 +211,7 @@ export function LeadsTable({ leads }: { leads: LeadSummary[] }) {
         </Table>
       </CardContent>
     </Card>
-    <TranscriptPanel leadId={transcriptLeadId} onClose={() => setTranscriptLeadId(null)} />
+    <TranscriptPanel leadId={transcriptLeadId} onClose={() => setTranscriptLeadId(null)} firmId={firmId} />
     </>
   );
 }

@@ -34,24 +34,34 @@ function unwrap<T>(payload: unknown, fallback: T): T {
   return (payload as T) ?? fallback;
 }
 
-export async function getCalls(firmId?: string): Promise<CallRecord[]> {
+// An unscoped read (no firmId) is the admin looking at everything. In the
+// browser there is no credential for that — the admin key is server-side only —
+// so it goes through the same-origin proxy, which attaches it. Otherwise the
+// backend correctly refuses and the page renders empty with no explanation.
+function unscopedViaProxy(path: string) {
+  return typeof window !== "undefined" ? `/api/backend${path}` : `${API_BASE}${path}`;
+}
+
+async function fetchScoped<T>(path: string, firmId: string | undefined, fallback: T): Promise<T> {
   try {
-    const qs = firmId ? `?firmId=${encodeURIComponent(firmId)}` : "";
-    const payload = await fetchJson<CallRecord[] | { data: CallRecord[] }>(`/api/calls${qs}`);
-    return unwrap(payload, []);
+    if (firmId) {
+      const payload = await fetchJson<T | { data: T }>(`${path}?firmId=${encodeURIComponent(firmId)}`);
+      return unwrap(payload, fallback);
+    }
+    const response = await fetch(unscopedViaProxy(path), { cache: "no-store" });
+    if (!response.ok) throw new Error(`API request failed (${response.status}) for ${path}`);
+    return unwrap(await response.json(), fallback);
   } catch {
-    return [];
+    return fallback;
   }
 }
 
+export async function getCalls(firmId?: string): Promise<CallRecord[]> {
+  return fetchScoped<CallRecord[]>("/api/calls", firmId, []);
+}
+
 export async function getLeads(firmId?: string): Promise<LeadSummary[]> {
-  try {
-    const qs = firmId ? `?firmId=${encodeURIComponent(firmId)}` : "";
-    const payload = await fetchJson<LeadSummary[] | { data: LeadSummary[] }>(`/api/leads${qs}`);
-    return unwrap(payload, []);
-  } catch {
-    return [];
-  }
+  return fetchScoped<LeadSummary[]>("/api/leads", firmId, []);
 }
 
 export async function getLeadById(id: string, firmId?: string): Promise<LeadDetail | null> {

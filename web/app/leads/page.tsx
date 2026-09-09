@@ -25,6 +25,7 @@ function toCSV(leads: LeadSummary[]): string {
 }
 
 export default function LeadsPage() {
+  const [firmId, setFirmId] = useState('');
   const [leads, setLeads] = useState<LeadSummary[]>([]);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [secondsAgo, setSecondsAgo] = useState(0);
@@ -33,6 +34,7 @@ export default function LeadsPage() {
 
   useEffect(() => {
     const id = new URLSearchParams(window.location.search).get('firmId') ?? '';
+    setFirmId(id);
 
     const doRefresh = async () => {
       const data = await getLeads(id);
@@ -97,7 +99,7 @@ export default function LeadsPage() {
         </div>
       </div>
       <Suspense>
-        <LeadsTable leads={leads} />
+        <LeadsTable leads={leads} firmId={firmId} />
       </Suspense>
     </div>
   );

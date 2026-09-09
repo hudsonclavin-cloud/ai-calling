@@ -25,6 +25,10 @@ const ALLOWED_PREFIXES = [
   "api/webhook-logs",
   "api/test-webhook",
   "api/billing/portal",
+  // Unscoped admin reads: the browser has no admin key, so the admin's own
+  // dashboard, leads and calls pages come through here.
+  "api/leads",
+  "api/calls",
 ];
 
 function isAllowed(pathParts: string[]) {

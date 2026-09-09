@@ -492,7 +492,11 @@ function persistSessionArtifactsUnlocked(session, opts) {
   return serializedWrite(() => persistSessionArtifactsTx(session, opts));
 }
 
-async function persistSessionArtifactsTx(session, { assistantText, callerText, done }) {
+async function persistSessionArtifactsTx(session, { assistantText, callerText, done, ended = false }) {
+  // `done` means the intake completed; `ended` means the call is over either way.
+  // Deriving the calls row purely from `done` left every silence-ended and
+  // partial call sitting at "In Progress" on the dashboard forever.
+  const closed = done || ended;
   const client = getClient();
   const now = nowIso();
   const newEntries = [];
@@ -516,10 +520,10 @@ async function persistSessionArtifactsTx(session, { assistantText, callerText, d
         `,
         args: [
           session.callId, session.callSid, session.firmId, session.fromPhone, session.leadId,
-          done ? 'completed' : 'in_progress',
+          closed ? 'completed' : 'in_progress',
           now, now,
-          done ? now : null,
-          done ? 'intake_complete' : '',
+          closed ? now : null,
+          done ? 'intake_complete' : (ended ? 'partial' : ''),
           JSON.stringify(session.collected),
           JSON.stringify(newEntries),
         ],
@@ -534,10 +538,10 @@ async function persistSessionArtifactsTx(session, { assistantText, callerText, d
           WHERE callSid = ?
         `,
         args: [
-          done ? 'completed' : 'in_progress',
+          closed ? 'completed' : 'in_progress',
           now,
-          done ? now : (existingCall.endedAt ?? null),
-          done ? 'intake_complete' : String(existingCall.outcome),
+          closed ? now : (existingCall.endedAt ?? null),
+          done ? 'intake_complete' : (ended ? 'partial' : String(existingCall.outcome)),
           JSON.stringify(session.collected),
           JSON.stringify(transcript),
           session.callSid,
