@@ -143,10 +143,26 @@ was graded against a field they were never asked about.
 - Boot now names each misconfiguration and the symptom it causes. `.env.example` documents all 30
   variables (it documented 12); `web/.env.example` added.
 
-**Tests:** 44 → 98, all passing. Added `test/call-flow.test.mjs` (18 tests driving the server the way
-Twilio does — 11 of them fail against the pre-fix commit) and `test/llm-contract.test.mjs` (the first
-tests in this repo to exercise the model path at all; the discarded-summary defect was found by them,
-not by reading). `npm test` no longer runs a credentials-dependent script as if it were a test suite.
+**Adversarial review of this branch's own diff.** Six reviewers read the changes independently and
+found real defects in them, all since fixed: the late-name-capture rule accepted any short digit-free
+reply on the callback turn as the caller's legal name ("Hold on please" became a client's name — worse
+than the bug it replaced); requiring firmId on the lead route broke the dashboard's transcript panel;
+moving the admin key server-side left the admin's own pages empty, because those pages fetch from the
+browser and the browser no longer has a credential; the notification latch was a plain boolean, so a
+caller who corrected a detail in the grace window left the attorney holding the first, wrong version;
+and making recording actually work turned a dormant compliance problem into a live one, so the default
+opening now carries a recording notice. The review also caught pre-existing bugs the first pass missed:
+tenant contact fields were stripped on write but merged back in from firm_default on read, so a firm
+without its own notification phone sent lead SMS to the default firm's number; `GET /api/firms`
+published every firm id and notification address unauthenticated, and the firm id is the only thing
+protecting that firm's leads; signature rejection answered 403, which Twilio never plays; and partial
+calls showed "In Progress" on the dashboard forever.
+
+**Tests:** 75 → 104, all passing. Added `test/call-flow.test.mjs` (23 tests driving the server the way
+Twilio does — nine of the first ten fail against the commit this branch started from) and
+`test/llm-contract.test.mjs` (the first tests in this repo to exercise the model path at all; the
+discarded-summary defect was found by them, not by reading). `npm test` no longer runs a
+credentials-dependent script as if it were a test suite.
 
 **Still to do, highest first:** per-firm client authentication; confirm DATA_DIR is a volume; rotate the
 leaked keys; the simulation harness still tolerates the desync it was adapted to and gates nothing in CI.
