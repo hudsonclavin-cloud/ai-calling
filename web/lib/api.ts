@@ -3,10 +3,17 @@ import type { AnalyticsData, CallRecord, FirmSettings, LeadDetail, LeadSummary, 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:5050";
 
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
+  // Server components can authenticate as the admin, which is what makes the
+  // admin's own landing pages (no firmId in the URL) show anything at all —
+  // without it the backend rightly refuses an unscoped read and every list
+  // rendered empty. ADMIN_API_KEY is not a NEXT_PUBLIC_ variable, so it is
+  // undefined in the browser bundle and this header is simply absent there.
+  const adminKey = typeof window === "undefined" ? process.env.ADMIN_API_KEY : undefined;
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers: {
       "Content-Type": "application/json",
+      ...(adminKey ? { "x-admin-key": adminKey } : {}),
       ...(init?.headers ?? {}),
     },
     cache: "no-store",

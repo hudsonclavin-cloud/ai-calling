@@ -7,9 +7,13 @@ import type { CallRecord } from "@/lib/types";
 
 export default function CallsPage() {
   const [calls, setCalls] = useState<CallRecord[]>([]);
+  // Kept so opening a call carries the firm through; dropping it lands a client
+  // on the admin login instead of the lead.
+  const [firmId, setFirmId] = useState('');
 
   useEffect(() => {
     const id = new URLSearchParams(window.location.search).get('firmId') ?? '';
+    setFirmId(id);
 
     const doRefresh = async () => {
       const data = await getCalls(id);
@@ -27,7 +31,7 @@ export default function CallsPage() {
         <h1 className="text-2xl font-semibold text-slate-900 md:text-3xl">Calls</h1>
         <p className="text-sm text-slate-500">Monitor recent inbound call activity and intake outcomes.</p>
       </div>
-      <CallsTable calls={calls} />
+      <CallsTable calls={calls} firmId={firmId} />
     </div>
   );
 }

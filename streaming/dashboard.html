@@ -480,9 +480,10 @@
       hydrate(data.leads || []);
     }catch(e){
       if(!state.leads.length){
-        state.demo = true;
-        banner('API not reachable — showing sample data so you can preview the design. Wire /api/dashboard-leads to go live.');
-        hydrate(SAMPLE);
+        // Never fabricate leads. Showing invented callers to someone working a
+        // real front desk is worse than showing nothing: they read them as real.
+        banner('Could not reach the server — no calls are being shown. This is a connection problem, not an empty inbox.');
+        hydrate([]);
       }else if(manual){
         banner('Refresh failed — showing last loaded data.');
       }

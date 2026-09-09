@@ -37,7 +37,7 @@ function formatStatus(status: CallStatus): string {
   return "Completed";
 }
 
-export function CallsTable({ calls }: { calls: CallRecord[] }) {
+export function CallsTable({ calls, firmId }: { calls: CallRecord[]; firmId?: string }) {
   const router = useRouter();
   const [statusFilter, setStatusFilter] = useState<(typeof statusOrder)[number]>("all");
   const [practiceAreaFilter, setPracticeAreaFilter] = useState("all");
@@ -111,7 +111,7 @@ export function CallsTable({ calls }: { calls: CallRecord[] }) {
                 <TableRow
                   key={call.id}
                   className="cursor-pointer hover:bg-slate-50"
-                  onClick={() => router.push(`/leads/${call.leadId}`)}
+                  onClick={() => router.push(`/leads/${call.leadId}${firmId ? `?firmId=${encodeURIComponent(firmId)}` : ""}`)}
                 >
                   <TableCell>
                     {new Date(call.startedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
