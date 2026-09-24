@@ -11,24 +11,44 @@ import { Label } from "@/components/ui/label";
 import { SelectNative } from "@/components/ui/select-native";
 import { Textarea } from "@/components/ui/textarea";
 import { createFirm } from "@/lib/api";
+import type { FirmSettings } from "@/lib/types";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const INDUSTRIES = ["Legal", "Medical", "Real Estate", "Home Services", "Financial", "Other"] as const;
+const INDUSTRIES = [
+  { value: "law_pi", label: "Legal — Personal Injury" },
+  { value: "law_family", label: "Legal — Family Law" },
+  { value: "law_criminal", label: "Legal — Criminal Defense" },
+  { value: "medical", label: "Medical / Healthcare" },
+  { value: "real_estate", label: "Real Estate" },
+  { value: "home_services", label: "Home Services" },
+  { value: "financial_services", label: "Financial Services" },
+  { value: "general", label: "Other / General" },
+] as const;
 
 const TONES = [
-  { value: "warm-professional", label: "Warm & Professional" },
+  { value: "warm",             label: "Warm & Professional" },
   { value: "friendly",          label: "Friendly & Casual" },
-  { value: "formal",            label: "Formal & Corporate" },
+  { value: "professional",      label: "Formal & Corporate" },
 ] as const;
 
 const INTAKE_RULES: Record<string, string> = {
-  Legal:          "Collect caller contact details and a short case summary. Escalate emergency threats to 911 guidance.",
-  Medical:        "Collect patient name, callback number, reason for visit, and any urgent symptoms. Do not provide medical advice.",
-  "Real Estate":  "Collect buyer or seller status, property interest, timeline, and financing readiness.",
-  "Home Services":"Collect service type needed, address, preferred timing, and urgency level.",
-  Financial:      "Collect name, callback number, and a brief description of the financial need.",
-  Other:          "Collect name, callback number, and a summary of the inquiry.",
+  law_pi: "Collect contact details, incident type, approximate date, treatment status, and a short summary. Never give legal advice.",
+  law_family: "Collect contact details, matter type, key dates, and immediate safety concerns. Never give legal advice.",
+  law_criminal: "Collect contact details, alleged charge, jurisdiction, custody status, and court date. Keep questions minimal.",
+  medical: "Collect patient name, callback number, reason for visit, and urgency. Do not diagnose or provide medical advice.",
+  real_estate: "Collect contact details, transaction or property type, location, and timeline.",
+  home_services: "Collect contact details, service needed, service address, timing, and safety urgency.",
+  financial_services: "Collect contact details, service needed, and timing. Never request account numbers, SSNs, passwords, or card data.",
+  general: "Collect name, callback number, requested service, and a concise summary of the inquiry.",
+};
+
+const QUESTION_OVERRIDES: Record<string, Record<string, string>> = {
+  medical: { practice_area: "What can our care team help you with?", case_summary: "Could you briefly describe the reason for your call and how urgent it feels?" },
+  real_estate: { practice_area: "What kind of property or real estate service do you need?", case_summary: "Could you briefly share the property location and your timeline?" },
+  home_services: { practice_area: "What service do you need today?", case_summary: "What's happening, where is the property, and how urgent is it?" },
+  financial_services: { practice_area: "What financial service are you looking for?", case_summary: "Could you briefly describe what you need and your preferred timing?" },
+  general: { practice_area: "Which of our services can we help with?", case_summary: "Could you briefly describe what you'd like our team to help with?" },
 };
 
 const STEP_LABELS = ["Business Info", "Assistant", "Scripts", "Review"] as const;
@@ -110,7 +130,7 @@ function TagInput({ tags, onChange }: { tags: string[]; onChange: (tags: string[
 
 interface OnboardingForm {
   businessName: string;
-  industry: string;
+  industry: FirmSettings["industry"];
   contactName: string;
   contactEmail: string;
   twilioPhone: string;
@@ -126,14 +146,14 @@ interface OnboardingForm {
 
 const INITIAL_FORM: OnboardingForm = {
   businessName: "",
-  industry: "Legal",
+  industry: "law_pi",
   contactName: "",
   contactEmail: "",
   twilioPhone: "",
   notificationEmail: "",
   notificationPhone: "",
   assistantName: "Ava",
-  tone: "warm-professional",
+  tone: "warm",
   serviceAreas: [],
   opening: "",
   closing: "",
@@ -221,11 +241,16 @@ export default function OnboardingPage() {
         name: form.businessName,
         ava_name: form.assistantName,
         tone: form.tone,
+        industry: form.industry,
         opening: form.opening,
         closing: form.closing,
         practice_areas: form.serviceAreas,
         max_questions: form.maxQuestions,
-        intake_rules: INTAKE_RULES[form.industry] ?? INTAKE_RULES.Other,
+        intake_rules: INTAKE_RULES[form.industry] ?? INTAKE_RULES.general,
+        question_overrides: QUESTION_OVERRIDES[form.industry] ?? {},
+        required_fields: ["full_name", "callback_number", "practice_area", "case_summary"],
+        contact_name: form.contactName,
+        contact_email: form.contactEmail,
         notification_email: form.notificationEmail,
         notification_phone: form.notificationPhone,
         ...(form.twilioPhone.trim() ? { twilio_phone: form.twilioPhone.trim() } : {}),
@@ -350,7 +375,7 @@ export default function OnboardingPage() {
         <Card>
           <CardHeader>
             <CardTitle>Business Information</CardTitle>
-            <CardDescription>Basic details about the client's business.</CardDescription>
+            <CardDescription>Basic details about the client&apos;s business.</CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4">
             <div className="grid gap-2">
@@ -374,10 +399,10 @@ export default function OnboardingPage() {
               <SelectNative
                 id="industry"
                 value={form.industry}
-                onChange={(e) => set("industry", e.target.value)}
+                onChange={(e) => set("industry", e.target.value as FirmSettings["industry"])}
               >
                 {INDUSTRIES.map((ind) => (
-                  <option key={ind} value={ind}>{ind}</option>
+                  <option key={ind.value} value={ind.value}>{ind.label}</option>
                 ))}
               </SelectNative>
             </div>
@@ -493,7 +518,7 @@ export default function OnboardingPage() {
 
             <div className="grid gap-2">
               <Label>
-                {form.industry === "Legal" ? "Practice Areas" : "Service Areas"} *
+                {form.industry.startsWith("law_") ? "Practice Areas" : "Service Areas"} *
               </Label>
               <TagInput
                 tags={form.serviceAreas}
@@ -594,7 +619,7 @@ export default function OnboardingPage() {
           </CardHeader>
           <CardContent>
             <ReviewRow label="Business Name" value={form.businessName} />
-            <ReviewRow label="Industry" value={form.industry} />
+            <ReviewRow label="Industry" value={INDUSTRIES.find((item) => item.value === form.industry)?.label ?? form.industry} />
             <ReviewRow
               label="Contact"
               value={[form.contactName, form.contactEmail].filter(Boolean).join(" · ")}

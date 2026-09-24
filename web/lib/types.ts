@@ -103,6 +103,7 @@ export interface FirmSettings {
   name: string;
   ava_name: string;
   tone: string;
+  industry: "law_pi" | "law_family" | "law_criminal" | "medical" | "real_estate" | "home_services" | "financial_services" | "general";
   opening: string;
   closing: string;
   practice_areas: string[];
@@ -116,6 +117,8 @@ export interface FirmSettings {
   intake_rules: string;
   notification_email: string;
   notification_phone: string;
+  contact_name?: string;
+  contact_email?: string;
   twilio_phone?: string;
   webhook_url?: string;
   stripe_customer_id?: string;
