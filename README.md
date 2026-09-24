@@ -1,4 +1,8 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Ava AI Calling
+
+A multi-tenant AI phone-intake platform with a Next.js marketing app, a separate operator dashboard in `web/`, and a Fastify/Twilio voice service in `streaming/`.
+
+Redwood Legal is the reference configuration. New legal and non-legal businesses should be created through the dashboard onboarding flow rather than by changing application code. Read the [product doctrine](docs/PRODUCT_DOCTRINE.md) before extending tenant or industry behavior, and see the [audit and rollout report](docs/AUDIT_AND_ROLLOUT.md) for current risks and next steps.
 
 ## Getting Started
 

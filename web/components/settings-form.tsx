@@ -12,7 +12,22 @@ import { Textarea } from "@/components/ui/textarea";
 import { saveSettings, testWebhook } from "@/lib/api";
 import type { FirmSettings } from "@/lib/types";
 
-const TONES = ["Professional", "Warm", "Concise", "Friendly", "Formal"];
+const TONES = [
+  { value: "warm", label: "Warm & Professional" },
+  { value: "professional", label: "Formal & Corporate" },
+  { value: "friendly", label: "Friendly & Casual" },
+];
+
+const INDUSTRIES: { value: FirmSettings["industry"]; label: string }[] = [
+  { value: "law_pi", label: "Legal — Personal Injury" },
+  { value: "law_family", label: "Legal — Family Law" },
+  { value: "law_criminal", label: "Legal — Criminal Defense" },
+  { value: "medical", label: "Medical / Healthcare" },
+  { value: "real_estate", label: "Real Estate" },
+  { value: "home_services", label: "Home Services" },
+  { value: "financial_services", label: "Financial Services" },
+  { value: "general", label: "Other / General" },
+];
 
 const API_BASE_CLIENT = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:5050";
 
@@ -193,7 +208,7 @@ export function SettingsForm({ initialSettings }: { initialSettings: FirmSetting
             <Label htmlFor="tone">Tone</Label>
             <SelectNative id="tone" value={form.tone ?? ""} onChange={field("tone")}>
               {TONES.map((t) => (
-                <option key={t} value={t}>{t}</option>
+                <option key={t.value} value={t.value}>{t.label}</option>
               ))}
             </SelectNative>
           </div>
@@ -207,11 +222,19 @@ export function SettingsForm({ initialSettings }: { initialSettings: FirmSetting
         </CardHeader>
         <CardContent className="grid gap-4">
           <div className="grid gap-2">
-            <Label htmlFor="name">Firm Name</Label>
+            <Label htmlFor="name">Business Name</Label>
             <Input id="name" value={form.name} onChange={field("name")} />
           </div>
           <div className="grid gap-2">
-            <Label htmlFor="practice_areas">Practice Areas (comma-separated)</Label>
+            <Label htmlFor="industry">Industry</Label>
+            <SelectNative id="industry" value={form.industry} onChange={field("industry")}>
+              {INDUSTRIES.map((industry) => (
+                <option key={industry.value} value={industry.value}>{industry.label}</option>
+              ))}
+            </SelectNative>
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="practice_areas">Services / Practice Areas (comma-separated)</Label>
             <Input
               id="practice_areas"
               value={practiceAreasText}
@@ -277,7 +300,7 @@ export function SettingsForm({ initialSettings }: { initialSettings: FirmSetting
             <Label>Webhook URL</Label>
             <WebhookCopyField firmId={form.id} />
             <p className="text-xs text-slate-400">
-              Set this as the "A Call Comes In" webhook (HTTP POST) on your Twilio number.
+              Set this as the &quot;A Call Comes In&quot; webhook (HTTP POST) on your Twilio number.
             </p>
           </div>
           <WebhookDeliveryField firmId={form.id} webhookUrl={form.webhook_url ?? ""} onChange={(v) => setForm((f) => ({ ...f, webhook_url: v }))} />

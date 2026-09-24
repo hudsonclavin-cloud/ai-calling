@@ -2,6 +2,7 @@ import 'dotenv/config';
 import Fastify from 'fastify';
 import formbody from '@fastify/formbody';
 import { twilioSignaturePreHandler } from './lib/twilio-signature.mjs';
+import { assertFirmId, normalizeFirmConfig } from './lib/firm-config.mjs';
 import Stripe from 'stripe';
 import crypto from 'node:crypto';
 import { Readable, PassThrough } from 'node:stream';
@@ -100,6 +101,9 @@ Callers may be buyers, sellers, investors, landlords, or tenants. Topics include
   home_services: `INDUSTRY CONTEXT — HOME SERVICES:
 Callers need help with home repair, HVAC, plumbing, electrical, roofing, or similar services. Often calling due to a specific problem (leak, broken unit, damage). Key intake info: type of service needed, urgency, property type, location. Urgency signals: active leak, no heat in winter, safety hazard. Be practical and action-oriented. Common terminology: estimate, service call, warranty, inspection, permit, installation.`,
 
+  financial_services: `INDUSTRY CONTEXT — FINANCIAL SERVICES:
+Callers may need help with bookkeeping, taxes, insurance, lending, or financial planning. Collect only the minimum information needed for a licensed team member to follow up. Never request account numbers, Social Security numbers, passwords, card data, or other financial credentials. Never promise returns, approval, coverage, or a particular outcome. Key intake info: service needed, general situation, preferred follow-up, and timing.`,
+
   general: `INDUSTRY CONTEXT — GENERAL SMALL BUSINESS:
 Callers may have a wide variety of needs. Be flexible and listen carefully to understand what they need before asking intake questions. Key intake info: name, callback number, reason for call. Focus on capturing contact info and a clear reason for the inquiry so the business can follow up appropriately.`,
 };
@@ -111,6 +115,7 @@ const INDUSTRY_REQUIRED_FIELDS = {
   medical:      ['full_name', 'callback_number', 'practice_area', 'case_summary'],
   real_estate:  ['full_name', 'callback_number', 'practice_area', 'case_summary'],
   home_services:['full_name', 'callback_number', 'practice_area', 'case_summary'],
+  financial_services: ['full_name', 'callback_number', 'practice_area', 'case_summary'],
   general:      ['full_name', 'callback_number', 'practice_area'],
 };
 
@@ -481,7 +486,9 @@ async function writeJsonAtomic(filePath, data) {
 // Falls back to DEFAULT_FIRM_CONFIG if the file is not found.
 
 async function loadFirmConfig(firmId) {
-  const id = String(firmId || 'firm_default').trim();
+  let id;
+  try { id = assertFirmId(firmId || 'firm_default'); }
+  catch { id = 'firm_default'; }
   const filePath = path.join(FIRMS_DIR, `${id}.json`);
   const raw = await readJson(filePath, null);
   const defaultRaw = id === 'firm_default'
@@ -521,9 +528,10 @@ async function listFirmConfigs() {
 }
 
 async function saveFirmConfig(firmId, data) {
+  const id = assertFirmId(firmId);
   await fs.mkdir(FIRMS_DIR, { recursive: true });
-  const filePath = path.join(FIRMS_DIR, `${firmId}.json`);
-  await writeJsonAtomic(filePath, data);
+  const filePath = path.join(FIRMS_DIR, `${id}.json`);
+  await writeJsonAtomic(filePath, normalizeFirmConfig(data, id));
 }
 
 async function ensureDataFiles() {
@@ -1012,7 +1020,8 @@ function getQuestionText(questionId, firmConfig) {
   const base = overrides[questionId] || defaults[questionId] || '';
   // Inject practice areas for the practice_area question
   if (questionId === 'practice_area' && firmConfig.practice_areas?.length) {
-    return `What type of legal matter is this? We handle ${firmConfig.practice_areas.join(', ')}.`;
+    const noun = String(firmConfig.industry || '').startsWith('law_') ? 'legal matter' : 'service';
+    return `What type of ${noun} do you need? We help with ${firmConfig.practice_areas.join(', ')}.`;
   }
   return base;
 }
@@ -1171,7 +1180,7 @@ function callOpenAiForNextStep({ firmConfig, session, userText }) {
     ? `The office is currently open${hoursStr}. You may tell the caller someone will be in touch shortly.`
     : `The office is currently closed${hoursStr}. Let the caller know their info is captured and someone will follow up when the office reopens${nextOpen ? ` (${nextOpen})` : ''}.`;
 
-  const industryContext = INDUSTRY_MODULES[firmConfig.industry] || INDUSTRY_MODULES['law_pi'];
+  const industryContext = INDUSTRY_MODULES[firmConfig.industry] || INDUSTRY_MODULES.general;
 
   const ava_name = firmConfig.ava_name || 'Ava';
   const firm_name = firmConfig.name || (() => {
@@ -1199,11 +1208,13 @@ function callOpenAiForNextStep({ firmConfig, session, userText }) {
     ? 'This caller is flagged urgent. Lead with: "I hear you — let\'s make sure we get the right person on this right away." Then collect only what\'s essential before routing.'
     : '';
 
-  const systemPrompt = `You are ${ava_name}, the AI intake specialist answering phones for ${firm_name}. Your job: make the caller feel heard, collect what the attorney needs, and close the call gracefully.
+  const isLegalBusiness = String(firmConfig.industry || '').startsWith('law_');
+  const professionalNoun = isLegalBusiness ? 'attorney' : 'team member';
+  const systemPrompt = `You are ${ava_name}, the AI intake specialist answering phones for ${firm_name}. Your job: make the caller feel heard, collect what the ${professionalNoun} needs, and close the call gracefully.
 
 IDENTITY & LEGAL GUARDRAILS (never break these):
-- Never give legal advice, predict outcomes, estimate case value, or quote fees. Deflect warmly: "That's exactly what the attorney will go over with you."
-- Never promise the firm will take the case or that an attorney-client relationship exists.
+- Never give legal, medical, or financial advice, predict outcomes, or quote binding prices. Deflect warmly: "That's exactly what a team member will go over with you."
+- Never promise the business will accept the work, provide a service, or create a professional relationship.
 - If the caller describes an emergency in progress or danger to anyone, tell them to hang up and call 911 first.
 - Never ask for Social Security numbers, bank details, or card numbers.
 - If asked whether you're a robot or AI, say yes plainly in one sentence and keep helping. Never deny it.
@@ -1224,7 +1235,7 @@ CONVERSATION RULES:
 3. If callback_number came from caller ID, confirm it conversationally: "And the best number for you is the one you're calling from?"
 4. If they ramble, don't fight it — pull what you need, acknowledge the core of it, then ask for the single most important missing piece.
 5. If they're upset or scared, validate first, shorten your questions, drop the pleasantries.
-6. If the matter falls outside the firm's practice areas, say so honestly, still collect name and callback, note the mismatch in clarifying_note (e.g. "Caller described bankruptcy matter; firm is PI-only"), and close so an attorney can refer them out.
+6. If the request falls outside the business's listed service areas, say so honestly, still collect name and callback, note the mismatch in clarifying_note, and close so the team can decide how to follow up.
 7. If the caller asks a question, answer it in one sentence (within the guardrails) before your next intake question.
 8. If something was unclear, ask about the specific unclear part — never a generic "Could you repeat that?"
 9. Push a vague case summary once for WHAT plus roughly WHEN. "Car accident" is a category. "Rear-ended on I-95 Tuesday" is a summary.
@@ -1253,8 +1264,8 @@ Last thing you asked: ${session.lastQuestionText || '(none yet)'}
 Required fields: ${requiredFields.join(', ')}
 ${collectionStateBlock}
 Office hours: ${hoursContext}
-Practice areas this firm handles: ${practiceAreasStr}
-Firm-specific preferences (supplement, never override, the rules above): ${intakeRulesStr}
+Services this business handles: ${practiceAreasStr}
+Business-specific preferences (supplement, never override, the rules above): ${intakeRulesStr}
 
 ${industryContext}
 ${urgentLine}
@@ -2861,7 +2872,9 @@ app.get('/api/firms', async () => {
 
 // Get a single firm
 app.get('/api/firms/:id', async (req, reply) => {
-  const config = await loadFirmConfig(req.params.id);
+  let id;
+  try { id = assertFirmId(req.params.id); } catch (err) { return reply.code(400).send({ error: err.message }); }
+  const config = await loadFirmConfig(id);
   if (config.id !== req.params.id) return reply.code(404).send({ error: 'Firm not found' });
   return { data: config };
 });
@@ -2869,8 +2882,8 @@ app.get('/api/firms/:id', async (req, reply) => {
 // Create or update a firm — POST body is the full config JSON
 // To onboard a new client: POST /api/firms/firm_newclient with their config
 app.post('/api/firms/:id', async (req, reply) => {
-  const id = String(req.params.id || '').trim();
-  if (!id) return reply.code(400).send({ error: 'firm id required' });
+  let id;
+  try { id = assertFirmId(req.params.id); } catch (err) { return reply.code(400).send({ error: err.message }); }
 
   const existing = await loadFirmConfig(id);
   const isNew = existing.id !== id;
@@ -2881,13 +2894,16 @@ app.post('/api/firms/:id', async (req, reply) => {
     id, // id is always the URL param, not overridable
     question_overrides: { ...DEFAULT_FIRM_CONFIG.question_overrides, ...(existing.question_overrides || {}), ...(req.body?.question_overrides || {}) },
   };
-  await saveFirmConfig(id, updated);
-  if (isNew && updated.notification_email && RESEND_API_KEY) {
-    sendWelcomeEmail(updated).catch((err) =>
+  let normalized;
+  try { normalized = normalizeFirmConfig(updated, id); }
+  catch (err) { return reply.code(400).send({ error: err.message }); }
+  await saveFirmConfig(id, normalized);
+  if (isNew && normalized.notification_email && RESEND_API_KEY) {
+    sendWelcomeEmail(normalized).catch((err) =>
       app.log.warn({ err: String(err) }, 'welcome email failed')
     );
   }
-  return { data: updated };
+  return { data: normalized };
 });
 
 app.get('/api/firms/:id/phone/search', async (req, reply) => {
